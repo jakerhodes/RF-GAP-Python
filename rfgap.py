@@ -23,6 +23,8 @@ else:
 from sklearn.utils.validation import check_is_fitted
 from joblib import Parallel, delayed
 
+
+# TODO: Make this a conditional class. Define the fit method which has the condition to call Reg or class
 def MakeRF(label_type = 'categorical', prox_method = 'oob', matrix_type = 'sparse', **kwargs):
 
     """A method to generate an instance of the class RFGAP, 
