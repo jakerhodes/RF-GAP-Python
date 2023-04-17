@@ -23,7 +23,8 @@ else:
 from sklearn.utils.validation import check_is_fitted
 
 
-def RFGAP(prediction_type = None, y = None, prox_method = 'rfgap', matrix_type = 'sparse', triangular = True, **kwargs):
+def RFGAP(prediction_type = None, y = None, prox_method = 'rfgap', matrix_type = 'sparse', triangular = True,
+          non_zero_diagonal = True, **kwargs):
     """
     A factory method to conditionally create the RFGAP class based on RandomForestClassifier or RandomForestRegressor
 
@@ -49,6 +50,15 @@ def RFGAP(prediction_type = None, y = None, prox_method = 'rfgap', matrix_type =
     matrix_type : str
         Whether the matrix returned proximities whould be sparse or dense 
         (default is sparse)
+
+    triangular : bool
+        Should only the upper triangle of the proximity matrix be computed? This speeds up computation
+        time. Not available for RF-GAP proximities (default is True)
+
+    non_zero_diagonal : bool
+        Only used for RF-GAP proximities. Should the diagonal entries be computed as non-zero? 
+        If True, the proximities are also normalized to be between 0 (min) and 1 (max).
+        (default is True)
 
     **kwargs
         Keyward arguements specific to the RandomForestClassifer or 
@@ -82,8 +92,8 @@ def RFGAP(prediction_type = None, y = None, prox_method = 'rfgap', matrix_type =
     class RFGAP(rf):
 
 
-
-        def __init__(self, prox_method = prox_method, matrix_type = matrix_type, triangular = triangular, **kwargs):
+        def __init__(self, prox_method = prox_method, matrix_type = matrix_type, triangular = triangular,
+                     non_zero_diagonal = True, **kwargs):
 
             super(RFGAP, self).__init__(**kwargs)
 
@@ -122,12 +132,8 @@ def RFGAP(prediction_type = None, y = None, prox_method = 'rfgap', matrix_type =
             super().fit(X, y, sample_weight)
             self.leaf_matrix = self.apply(X)
             
-            # super().fit(X, y, sample_weight)
-            # self.leaf_matrix = self.apply(X)
-
-
             # Only run these two when needed
-            if self.prox_method == 'oob' or self.prox_method == 'new_oob':
+            if self.prox_method == 'oob':
                 self.oob_indices = self.get_oob_indices(X)
                 self.oob_leaves = self.oob_indices * self.leaf_matrix
 
@@ -139,8 +145,6 @@ def RFGAP(prediction_type = None, y = None, prox_method = 'rfgap', matrix_type =
 
                 self.in_bag_leaves = self.in_bag_indices * self.leaf_matrix
                 self.oob_leaves = self.oob_indices * self.leaf_matrix
-
-            # self.fit(X, y, sample_weight)
 
         
         def _get_oob_samples(self, data):
@@ -155,7 +159,6 @@ def RFGAP(prediction_type = None, y = None, prox_method = 'rfgap', matrix_type =
             n = len(data)
             oob_samples = []
             for tree in self.estimators_:
-            # for tree in self.instance.estimators_:
                 # Here at each iteration we obtain out-of-bag samples for every tree.
                 oob_indices = _generate_unsampled_indices(tree.random_state, n, n)
                 oob_samples.append(oob_indices)
@@ -164,8 +167,7 @@ def RFGAP(prediction_type = None, y = None, prox_method = 'rfgap', matrix_type =
 
 
 
-
-        def get_oob_indices(self, data): #The data here is your X_train matrix
+        def get_oob_indices(self, data):
             
             """This generates a matrix of out-of-bag samples for each decision tree in the forest
 
@@ -181,7 +183,6 @@ def RFGAP(prediction_type = None, y = None, prox_method = 'rfgap', matrix_type =
             """
             n = len(data)
             num_trees = self.n_estimators
-            # num_trees = self.instance.n_estimators
             oob_matrix = np.zeros((n, num_trees))
             oob_samples = self._get_oob_samples(data)
 
@@ -288,7 +289,7 @@ def RFGAP(prediction_type = None, y = None, prox_method = 'rfgap', matrix_type =
 
                 if self.triangular:
 
-                    tree_inds = self.leaf_matrix[ind, :] # Only indices after selected
+                    tree_inds = self.leaf_matrix[ind, :] # Only indices after selected index
                     prox_vec = np.sum(tree_inds == self.leaf_matrix[ind:, :], axis = 1) # same here
 
                     cols = np.where(prox_vec != 0)[0] + ind
@@ -306,9 +307,8 @@ def RFGAP(prediction_type = None, y = None, prox_method = 'rfgap', matrix_type =
 
 
             elif self.prox_method == 'rfgap':
-
-                # TODO: Copy to regression module
-                # TODO: Still try to set up a triangular version?  Just noting it won't be exact.
+                # This method is creating the diagonal entries as if using replicate index.
+                # TODO: make arguement for non-zero diagonals (default non-zero)
 
                 oob_trees    = np.nonzero(self.oob_indices[ind, :])[0]
                 in_bag_trees = np.nonzero(self.in_bag_indices[ind, :])[0]
@@ -324,26 +324,20 @@ def RFGAP(prediction_type = None, y = None, prox_method = 'rfgap', matrix_type =
                 ks_in  = ks[in_bag_trees]
                 ks_out = ks[oob_trees]
 
-
                 S_out = np.count_nonzero(self.oob_indices[ind, :])
-                S_in  = np.count_nonzero(self.in_bag_indices[ind, :])
 
                 prox_vec = np.sum(np.divide(match_counts[:, oob_trees], ks_out), axis = 1) / S_out
-                prox_vec[ind] = np.sum(np.divide(match_counts[ind, in_bag_trees], ks_in)) / S_in
 
-                # Do we want to normalize here or when being used?
-                prox_vec = prox_vec / np.max(prox_vec)
-                prox_vec[ind] = 1
+                if non_zero_diagonal:
+                    S_in  = np.count_nonzero(self.in_bag_indices[ind, :])
+                    prox_vec[ind] = np.sum(np.divide(match_counts[ind, in_bag_trees], ks_in)) / S_in
 
+                    prox_vec = prox_vec / np.max(prox_vec)
+                    prox_vec[ind] = 1
 
                 cols = np.nonzero(prox_vec)[0]
                 rows = np.ones(len(cols), dtype = int) * ind
                 data = prox_vec[cols]
-
-
-
-
-
 
             return data.tolist(), rows.tolist(), cols.tolist()
         
@@ -460,10 +454,9 @@ def RFGAP(prediction_type = None, y = None, prox_method = 'rfgap', matrix_type =
                     rows.extend(rows_temp)
                     prox_vals.extend(prox_temp)
 
-
+            # DO we still need this extension?
             elif self.prox_method == 'rfgap':
-
-                
+  
                 for ind in range(n_ext):
 
                     oob_terminals = extended_leaf_matrix[ind, :] 
@@ -486,10 +479,6 @@ def RFGAP(prediction_type = None, y = None, prox_method = 'rfgap', matrix_type =
 
 
             prox_sparse = sparse.csr_matrix((np.array(prox_vals), (np.array(cols), np.array(rows))), shape = (n_ext, n))
-
-            # TODO: make normalize an argument for class
-            # if self.prox_method == 'rfgap':
-            #     prox_sparse = normalize(prox_sparse, norm = 'max')
 
             if self.matrix_type == 'dense':
                 return prox_sparse.todense() 
