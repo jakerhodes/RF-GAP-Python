@@ -1,1 +1,1 @@
-import rfgap
+from .rfgap import RFGAP
