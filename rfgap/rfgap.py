@@ -328,7 +328,7 @@ def RFGAP(prediction_type = None, y = None, prox_method = 'rfgap', matrix_type =
 
                 prox_vec = np.sum(np.divide(match_counts[:, oob_trees], ks_out), axis = 1) / S_out
 
-                if non_zero_diagonal:
+                if self.non_zero_diagonal:
                     S_in  = np.count_nonzero(self.in_bag_indices[ind, :])
                     prox_vec[ind] = np.sum(np.divide(match_counts[ind, in_bag_trees], ks_in)) / S_in
 
