@@ -14,7 +14,7 @@ prediction_type = 'classification'
 rf = rfgap(prediction_type = prediction_type)
 rf.fit(x, y)
 
-proximities = rf.get_proximiteis()
+proximities = rf.get_proximities()
 
 ```
 
