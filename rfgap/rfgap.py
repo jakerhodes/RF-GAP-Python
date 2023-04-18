@@ -93,7 +93,7 @@ def RFGAP(prediction_type = None, y = None, prox_method = 'rfgap', matrix_type =
 
 
         def __init__(self, prox_method = prox_method, matrix_type = matrix_type, triangular = triangular,
-                     non_zero_diagonal = True, **kwargs):
+                     non_zero_diagonal = non_zero_diagonal, **kwargs):
 
             super(RFGAP, self).__init__(**kwargs)
 
@@ -101,6 +101,7 @@ def RFGAP(prediction_type = None, y = None, prox_method = 'rfgap', matrix_type =
             self.matrix_type = matrix_type
             self.triangular  = triangular
             self.prediction_type = prediction_type
+            self.non_zero_diagonal = non_zero_diagonal
 
 
         def fit(self, X, y, sample_weight = None):
@@ -307,7 +308,6 @@ def RFGAP(prediction_type = None, y = None, prox_method = 'rfgap', matrix_type =
 
 
             elif self.prox_method == 'rfgap':
-                # This method is creating the diagonal entries as if using replicate index.
                 # TODO: make arguement for non-zero diagonals (default non-zero)
 
                 oob_trees    = np.nonzero(self.oob_indices[ind, :])[0]
