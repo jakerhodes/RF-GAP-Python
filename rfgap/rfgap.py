@@ -74,7 +74,7 @@ def RFGAP(prediction_type = None, y = None, prox_method = 'rfgap', matrix_type =
 
 
     if prediction_type is None and y is None:
-        raise ValueError("At least prediction_type or y must be provided.")
+        prediction_type = 'classification'
     
 
     if prediction_type is None and y is not None:
@@ -91,7 +91,6 @@ def RFGAP(prediction_type = None, y = None, prox_method = 'rfgap', matrix_type =
 
     class RFGAP(rf):
 
-
         def __init__(self, prox_method = prox_method, matrix_type = matrix_type, triangular = triangular,
                      non_zero_diagonal = non_zero_diagonal, **kwargs):
 
@@ -104,7 +103,7 @@ def RFGAP(prediction_type = None, y = None, prox_method = 'rfgap', matrix_type =
             self.non_zero_diagonal = non_zero_diagonal
 
 
-        def fit(self, X, y, sample_weight = None):
+        def fit(self, X, y, sample_weight = None, x_test = None):
 
             """Fits the random forest and generates necessary pieces to fit proximities
 
@@ -132,20 +131,38 @@ def RFGAP(prediction_type = None, y = None, prox_method = 'rfgap', matrix_type =
             """
             super().fit(X, y, sample_weight)
             self.leaf_matrix = self.apply(X)
+
             
-            # Only run these two when needed
+            if x_test is not None:
+                n_test = np.shape(x_test)[0]
+                
+                self.leaf_matrix_test = self.apply(x_test)
+                self.leaf_matrix = np.concatenate((self.leaf_matrix, self.leaf_matrix_test), axis = 0)
+            
+                        
             if self.prox_method == 'oob':
                 self.oob_indices = self.get_oob_indices(X)
+                
+                if x_test is not None:
+                    self.oob_indices = np.concatenate((self.oob_indices, np.ones((n_test, self.n_estimators))))
+                
                 self.oob_leaves = self.oob_indices * self.leaf_matrix
 
             if self.prox_method == 'rfgap':
 
                 self.oob_indices = self.get_oob_indices(X)
                 self.in_bag_counts = self.get_in_bag_counts(X)
+
+                
+                if x_test is not None:
+                    self.oob_indices = np.concatenate((self.oob_indices, np.ones((n_test, self.n_estimators))))
+                    self.in_bag_counts = np.concatenate((self.in_bag_counts, np.zeros((n_test, self.n_estimators))))                
+                                
                 self.in_bag_indices = 1 - self.oob_indices
 
                 self.in_bag_leaves = self.in_bag_indices * self.leaf_matrix
                 self.oob_leaves = self.oob_indices * self.leaf_matrix
+            
 
         
         def _get_oob_samples(self, data):
@@ -254,6 +271,7 @@ def RFGAP(prediction_type = None, y = None, prox_method = 'rfgap', matrix_type =
             prox_vec : (n_samples, 1) array)_like: a vector of proximity values
             """
             n, num_trees = self.leaf_matrix.shape
+            
             prox_vec = np.zeros((1, n))
             
             if self.prox_method == 'oob':
@@ -291,7 +309,7 @@ def RFGAP(prediction_type = None, y = None, prox_method = 'rfgap', matrix_type =
                 if self.triangular:
 
                     tree_inds = self.leaf_matrix[ind, :] # Only indices after selected index
-                    prox_vec = np.sum(tree_inds == self.leaf_matrix[ind:, :], axis = 1) # same here
+                    prox_vec = np.sum(tree_inds == self.leaf_matrix[ind:, :], axis = 1)
 
                     cols = np.where(prox_vec != 0)[0] + ind
                     rows = np.ones(len(cols), dtype = int) * ind
@@ -308,7 +326,6 @@ def RFGAP(prediction_type = None, y = None, prox_method = 'rfgap', matrix_type =
 
 
             elif self.prox_method == 'rfgap':
-                # TODO: make arguement for non-zero diagonals (default non-zero)
 
                 oob_trees    = np.nonzero(self.oob_indices[ind, :])[0]
                 in_bag_trees = np.nonzero(self.in_bag_indices[ind, :])[0]
@@ -330,7 +347,12 @@ def RFGAP(prediction_type = None, y = None, prox_method = 'rfgap', matrix_type =
 
                 if self.non_zero_diagonal:
                     S_in  = np.count_nonzero(self.in_bag_indices[ind, :])
-                    prox_vec[ind] = np.sum(np.divide(match_counts[ind, in_bag_trees], ks_in)) / S_in
+                    
+                    # TODO: Check behavior here
+                    if S_in > 0:
+                        prox_vec[ind] = np.sum(np.divide(match_counts[ind, in_bag_trees], ks_in)) / S_in
+                    else: 
+                        prox_vec[ind] = np.sum(np.divide(match_counts[ind, in_bag_trees], ks_in))
 
                     prox_vec = prox_vec / np.max(prox_vec)
                     prox_vec[ind] = 1
@@ -388,6 +410,7 @@ def RFGAP(prediction_type = None, y = None, prox_method = 'rfgap', matrix_type =
             
             else:
                 return prox_sparse
+
 
         def prox_extend(self, data):
             """Method to compute proximities between the original training 
@@ -454,7 +477,6 @@ def RFGAP(prediction_type = None, y = None, prox_method = 'rfgap', matrix_type =
                     rows.extend(rows_temp)
                     prox_vals.extend(prox_temp)
 
-            # DO we still need this extension?
             elif self.prox_method == 'rfgap':
   
                 for ind in range(n_ext):
