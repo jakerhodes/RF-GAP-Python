@@ -8,10 +8,11 @@ This package can be used to generate three types of random forest proximities wh
 The rfgap class is conditionally built upon the Sklearn RandomForestClassifier or RandomForestRegressor with the additional functionality of proximity generation via the method get_proximities. The factory function RFGAP requires the user to either provide a vector of labels, y, or to determine the prediction_type ("classification" or "regression"). If y is provided, the type of forest to by built will be determined automatically. In addition to any arguements used in RandomForestClassifier or RandomForestRegressor, an rfgap class takes the arguements prox_method (default: "rfgap") which, determines the proximity type to be constructed: "rfgap", "original", or "oob". The option to generate sparse or dense proximities is determined by the arguement matrix_type. See an example below:
 
 
-```python 
+```python
+from rfgap import RFGAP
 prediction_type = 'classification'
 
-rf = rfgap(prediction_type = prediction_type)
+rf = RFGAP(prediction_type = prediction_type)
 rf.fit(x, y)
 
 proximities = rf.get_proximities()
