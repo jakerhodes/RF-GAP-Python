@@ -25,7 +25,7 @@ from sklearn.utils.validation import check_is_fitted
 
 def RFGAP(prediction_type = None, y = None, prox_method = 'rfgap', 
           matrix_type = 'sparse', triangular = True,
-          non_zero_diagonal = False, **kwargs):
+          non_zero_diagonal = False, force_symmetric = False, **kwargs):
     """
     A factory method to conditionally create the RFGAP class based on RandomForestClassifier or RandomForestRegressor (depdning on the type of response, y)
 
@@ -60,6 +60,9 @@ def RFGAP(prediction_type = None, y = None, prox_method = 'rfgap',
         Only used for RF-GAP proximities. Should the diagonal entries be computed as non-zero? 
         If True, the proximities are also normalized to be between 0 (min) and 1 (max).
         (default is True)
+
+    force_symmetric : bool
+        Enforce symmetry of proximities. (default is False)
 
     **kwargs
         Keyward arguements specific to the RandomForestClassifer or 
@@ -103,6 +106,7 @@ def RFGAP(prediction_type = None, y = None, prox_method = 'rfgap',
             self.triangular  = triangular
             self.prediction_type = prediction_type
             self.non_zero_diagonal = non_zero_diagonal
+            self.force_symmetric = force_symmetric
 
 
         def fit(self, X, y, sample_weight = None, x_test = None):
@@ -403,7 +407,7 @@ def RFGAP(prediction_type = None, y = None, prox_method = 'rfgap',
             else:
                 prox_sparse = sparse.csr_matrix((np.array(prox_vals), (np.array(rows), np.array(cols))), shape = (n, n)) 
 
-            if self.prox_method == 'rfgap':
+            if self.force_symmetric:
                 prox_sparse = (prox_sparse + prox_sparse.transpose()) / 2
 
             if self.matrix_type == 'dense':
