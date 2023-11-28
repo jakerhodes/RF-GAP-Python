@@ -23,10 +23,11 @@ else:
 from sklearn.utils.validation import check_is_fitted
 
 
-def RFGAP(prediction_type = None, y = None, prox_method = 'rfgap', matrix_type = 'sparse', triangular = True,
-          non_zero_diagonal = True, **kwargs):
+def RFGAP(prediction_type = None, y = None, prox_method = 'rfgap', 
+          matrix_type = 'sparse', triangular = True,
+          non_zero_diagonal = False, **kwargs):
     """
-    A factory method to conditionally create the RFGAP class based on RandomForestClassifier or RandomForestRegressor
+    A factory method to conditionally create the RFGAP class based on RandomForestClassifier or RandomForestRegressor (depdning on the type of response, y)
 
     This class takes on a random forest predictors (sklearn) and adds methods to 
     construct proximities from the random forest object. 
@@ -36,7 +37,7 @@ def RFGAP(prediction_type = None, y = None, prox_method = 'rfgap', matrix_type =
     ----------
 
     prediction_type : str
-        Options are 'regression' or 'classification'
+        Options are `regression` or `classification`
 
     y : array-like of shape (n_samples,) or (n_samples, n_outputs)
         The target values (class labels in classification, real numbers in regression).
@@ -44,8 +45,8 @@ def RFGAP(prediction_type = None, y = None, prox_method = 'rfgap', matrix_type =
         should be used
 
     prox_method : str
-        The type of proximity to be constructed.  Options are 'original', 'oob', 
-        or 'rfgap' (default is 'oob')
+        The type of proximity to be constructed.  Options are `original`, `oob`, 
+        or `rfgap` (default is `oob`)
 
     matrix_type : str
         Whether the matrix returned proximities whould be sparse or dense 
@@ -91,8 +92,9 @@ def RFGAP(prediction_type = None, y = None, prox_method = 'rfgap', matrix_type =
 
     class RFGAP(rf):
 
-        def __init__(self, prox_method = prox_method, matrix_type = matrix_type, triangular = triangular,
-                     non_zero_diagonal = non_zero_diagonal, **kwargs):
+        def __init__(self, prox_method = prox_method, matrix_type = matrix_type, 
+                     triangular = triangular, non_zero_diagonal = non_zero_diagonal,
+                     **kwargs):
 
             super(RFGAP, self).__init__(**kwargs)
 
@@ -264,7 +266,7 @@ def RFGAP(prediction_type = None, y = None, prox_method = 'rfgap', matrix_type =
             ----------
             leaf_matrix : (n_samples, n_estimators) array_like
             oob_indices : (n_samples, n_estimators) array_like
-            method      : string: methods may be 'original', 'oob', or 'rfgap (default is 'oob')
+            method      : string: methods may be `original`, `oob`, or `rfgap` (default is `oob`)
             
             Returns
             -------
@@ -348,7 +350,6 @@ def RFGAP(prediction_type = None, y = None, prox_method = 'rfgap', matrix_type =
                 if self.non_zero_diagonal:
                     S_in  = np.count_nonzero(self.in_bag_indices[ind, :])
                     
-                    # TODO: Check behavior here
                     if S_in > 0:
                         prox_vec[ind] = np.sum(np.divide(match_counts[ind, in_bag_trees], ks_in)) / S_in
                     else: 
@@ -372,10 +373,10 @@ def RFGAP(prediction_type = None, y = None, prox_method = 'rfgap', matrix_type =
             Returns
             -------
             array-like
-                (if self.matrix_type == 'dense') matrix of pair-wise proximities
+                (if self.matrix_type == `dense`) matrix of pair-wise proximities
 
             csr_matrix
-                (if self.matrix_type == 'sparse') a sparse crs_matrix of pair-wise proximities
+                (if self.matrix_type == `sparse`) a sparse crs_matrix of pair-wise proximities
             
             """
             check_is_fitted(self)
@@ -423,11 +424,11 @@ def RFGAP(prediction_type = None, y = None, prox_method = 'rfgap', matrix_type =
             Returns
             -------
             array-like
-                (if self.matrix_type == 'dense') matrix of pair-wise proximities between
+                (if self.matrix_type == `dense`) matrix of pair-wise proximities between
                 the training data and the new observations
 
             csr_matrix
-                (if self.matrix_type == 'sparse') a sparse crs_matrix of pair-wise proximities
+                (if self.matrix_type == `sparse`) a sparse crs_matrix of pair-wise proximities
                 between the training data and the new observations
             """
             check_is_fitted(self)
