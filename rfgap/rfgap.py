@@ -25,7 +25,8 @@ from sklearn.utils.validation import check_is_fitted
 
 def RFGAP(prediction_type = None, y = None, prox_method = 'rfgap', 
           matrix_type = 'sparse', triangular = True,
-          non_zero_diagonal = False, force_symmetric = False, **kwargs):
+          non_zero_diagonal = False, force_symmetric = False, 
+          weighted = False, **kwargs):
     """
     A factory method to conditionally create the RFGAP class based on RandomForestClassifier or RandomForestRegressor (depdning on the type of response, y)
 
@@ -93,6 +94,9 @@ def RFGAP(prediction_type = None, y = None, prox_method = 'rfgap',
     elif prediction_type == 'regression':
         rf = RandomForestRegressor
 
+    # For weighted proximities
+
+
     class RFGAP(rf):
 
         def __init__(self, prox_method = prox_method, matrix_type = matrix_type, 
@@ -107,6 +111,7 @@ def RFGAP(prediction_type = None, y = None, prox_method = 'rfgap',
             self.prediction_type = prediction_type
             self.non_zero_diagonal = non_zero_diagonal
             self.force_symmetric = force_symmetric
+            self.weighted = weighted
 
 
         def fit(self, X, y, sample_weight = None, x_test = None):
@@ -137,6 +142,19 @@ def RFGAP(prediction_type = None, y = None, prox_method = 'rfgap',
             """
             super().fit(X, y, sample_weight)
             self.leaf_matrix = self.apply(X)
+
+            # For class-weighted proximities
+            # TODO: Do we want these weights to be calculated at the tree level, i.e., using the bootstrap sample?
+            # Note: np.bincount requires integer (0-indexed) class labels
+
+            if (prediction_type == 'regression') & (weighted):
+                raise ValueError('Weighted proximities are only available for classification problems')
+    
+
+            if self.weighted:
+                self.y = y
+                self.n = len(y)
+                self.weights = np.array([self.n / (len(y) * np.bincount(y)[i]) for i in y])
 
             
             if x_test is not None:
@@ -350,6 +368,10 @@ def RFGAP(prediction_type = None, y = None, prox_method = 'rfgap',
                 S_out = np.count_nonzero(self.oob_indices[ind, :])
 
                 prox_vec = np.sum(np.divide(match_counts[:, oob_trees], ks_out), axis = 1) / S_out
+                
+                # For weighted proximities
+                if self.weighted:
+                    prox_vec = prox_vec * self.weights
 
                 if self.non_zero_diagonal:
                     S_in  = np.count_nonzero(self.in_bag_indices[ind, :])
@@ -359,8 +381,13 @@ def RFGAP(prediction_type = None, y = None, prox_method = 'rfgap',
                     else: 
                         prox_vec[ind] = np.sum(np.divide(match_counts[ind, in_bag_trees], ks_in))
 
-                    prox_vec = prox_vec / np.max(prox_vec)
-                    prox_vec[ind] = 1
+                    # For weighted proximities
+                    if self.weighted:
+                        prox_vec = prox_vec * self.weights
+
+                    #Ignoring now for weighted proximities to test this out
+                    # prox_vec = prox_vec / np.max(prox_vec)
+                    # prox_vec[ind] = 1
 
                 cols = np.nonzero(prox_vec)[0]
                 rows = np.ones(len(cols), dtype = int) * ind
@@ -511,5 +538,25 @@ def RFGAP(prediction_type = None, y = None, prox_method = 'rfgap',
                 return prox_sparse.todense() 
             else:
                 return prox_sparse
+
+
+        def prox_predict(self, y):
+            
+            # TODO: need to compute proximities for new points, test points added
+
+            prox = self.get_proximities()
+
+            if self.prediction_type == 'classification':
+                y_one_hot = np.zeros((y.size, y.max() + 1))
+                y_one_hot[np.arange(y.size), y] = 1
+
+                prox_preds = np.argmax(prox @ y_one_hot, axis = 1)
+                self.prox_predict_score = sklearn.metrics.accuracy_score(y, prox_preds)
+                return prox_preds
+            
+            else:
+                prox_preds = prox @ y
+                self.prox_predict_score = sklearn.metrics.mean_squared_error(y, prox_preds)
+                return prox_preds
 
     return RFGAP(prox_method = prox_method, matrix_type = matrix_type, triangular = triangular, **kwargs)
