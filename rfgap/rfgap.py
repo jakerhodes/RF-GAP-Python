@@ -511,5 +511,25 @@ def RFGAP(prediction_type = None, y = None, prox_method = 'rfgap',
                 return prox_sparse.todense() 
             else:
                 return prox_sparse
+            
+
+        def prox_predict(self, y):
+            
+            # TODO: need to compute proximities for new points, test points added
+
+            prox = self.get_proximities()
+
+            if self.prediction_type == 'classification':
+                y_one_hot = np.zeros((y.size, y.max() + 1))
+                y_one_hot[np.arange(y.size), y] = 1
+
+                prox_preds = np.argmax(prox @ y_one_hot, axis = 1)
+                self.prox_predict_score = sklearn.metrics.accuracy_score(y, prox_preds)
+                return prox_preds
+            
+            else:
+                prox_preds = prox @ y
+                self.prox_predict_score = sklearn.metrics.mean_squared_error(y, prox_preds)
+                return prox_preds
 
     return RFGAP(prox_method = prox_method, matrix_type = matrix_type, triangular = triangular, **kwargs)
