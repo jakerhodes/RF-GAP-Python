@@ -535,10 +535,11 @@ def RFGAP(prediction_type = None, y = None, prox_method = 'rfgap',
                 self.prox_predict_score = sklearn.metrics.mean_squared_error(y, prox_preds)
                 return prox_preds
             
-
-        def oob_prediction_intervals(self, y, alpha = 0.05):
+        # May want to make this function automatic when oob_score is true?
+        def oob_prediction_se(self, y, alpha = 0.05):
 
             #TODO: Ensure MSE is used for oob_score, if eventually used.
+            #TODO: Add any additional checks
 
             if self.prediction_type == 'classification':
                 raise ValueError('Prediction intervals are only available for regression models')
@@ -549,16 +550,48 @@ def RFGAP(prediction_type = None, y = None, prox_method = 'rfgap',
             # if self.proximitites is None:
             self.proximities = self.get_proximities()
 
-            t_val = stats.t.ppf(1 - alpha / 2, len(y) - 2)
+
 
             self.weighted_errors = self.proximities @ (self.oob_prediction_ - y)**2
             self.weighted_differences_matrix = self.proximities.toarray() * np.subtract.outer(self.oob_prediction_, self.oob_prediction_)**2
             self.weighted_differences = np.sum(self.weighted_differences_matrix, axis = 1)
 
+            # self.weighted_oob_se = np.sqrt(self.weighted_errors + self.weighted_differences)
+            # self.weighted_oob_se = np.sqrt(self.weighted_errors + self.weighted_differences)
+            self.weighted_oob_se = np.sqrt(self.weighted_errors)
 
-            self.weighted_oob_se = np.sqrt(self.weighted_errors + self.weighted_differences)
 
-            return t_val * self.weighted_oob_se
+            # Perhaps instead of t, need oob quantiles?
+
+            errors = self.oob_prediction_ - y
+            # self.errors_quantiles = np.quantile(errors, [alpha, 1 - alpha])
+            self.errors_quantiles = np.quantile(errors, [alpha / 2, 1 - alpha / 2])
+            # self.t_val = stats.t.ppf(1 - alpha / 2, len(y) - 2)
+
+            self.oob_pi = self.weighted_oob_se
+            # self.oob_pi = self.t_val * self.weighted_oob_se
+            # self.oob_pi = self.errors_quantiles[1] + self.weighted_oob_se
+
+            self.ub = self.oob_prediction_ + self.oob_pi
+            self.lb = self.oob_prediction_ - self.oob_pi
+
+            self.oob_pi_coverage = np.mean((y >= self.lb) & (y <= self.ub))
+            
+            return self.oob_pi
+
+
+        def oob_quantile_se(self, y, alpha = 0.05):
+
+            errors = self.oob_prediction_ - y
+            self.errors_quantiles = np.quantile(errors, [alpha / 2, 1 - alpha / 2])
+
+            self.ub_q = self.oob_prediction_ + self.errors_quantiles[1]
+            self.lb_q = self.oob_prediction_ + self.errors_quantiles[0]
+
+            self.q_pi_coverage = np.mean((y >= self.lb_q) & (y <= self.ub_q))
+        
+
+
 
 
 # # Reshape for broadcasting
