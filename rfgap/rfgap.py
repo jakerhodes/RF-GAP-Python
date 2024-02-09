@@ -21,7 +21,7 @@ else:
     from sklearn.ensemble import forest
 
 from sklearn.utils.validation import check_is_fitted
-
+from scipy import stats
 
 def RFGAP(prediction_type = None, y = None, prox_method = 'rfgap', 
           matrix_type = 'sparse', triangular = True,
@@ -82,6 +82,7 @@ def RFGAP(prediction_type = None, y = None, prox_method = 'rfgap',
     
 
     if prediction_type is None and y is not None:
+
         if np.dtype(y) == 'float64' or np.dtype(y) == 'float32':
             prediction_type = 'regression'
         else:
@@ -516,20 +517,65 @@ def RFGAP(prediction_type = None, y = None, prox_method = 'rfgap',
         def prox_predict(self, y):
             
             # TODO: need to compute proximities for new points, test points added
+            # Need to make useful for other proximity types
 
-            prox = self.get_proximities()
+            # if self.proximitites is None:
+            self.proximities = self.get_proximities()
 
             if self.prediction_type == 'classification':
                 y_one_hot = np.zeros((y.size, y.max() + 1))
                 y_one_hot[np.arange(y.size), y] = 1
 
-                prox_preds = np.argmax(prox @ y_one_hot, axis = 1)
+                prox_preds = np.argmax(self.proximities @ y_one_hot, axis = 1)
                 self.prox_predict_score = sklearn.metrics.accuracy_score(y, prox_preds)
                 return prox_preds
             
             else:
-                prox_preds = prox @ y
+                prox_preds = self.proximities @ y
                 self.prox_predict_score = sklearn.metrics.mean_squared_error(y, prox_preds)
                 return prox_preds
+            
+
+        def oob_prediction_intervals(self, y, alpha = 0.05):
+
+            #TODO: Ensure MSE is used for oob_score, if eventually used.
+
+            if self.prediction_type == 'classification':
+                raise ValueError('Prediction intervals are only available for regression models')
+
+            if self.oob_score_ is None:
+                raise ValueError('Model has not been fit with oob_score = True')
+            
+            # if self.proximitites is None:
+            self.proximities = self.get_proximities()
+
+            t_val = stats.t.ppf(1 - alpha / 2, len(y) - 2)
+
+            self.weighted_errors = self.proximities @ (self.oob_prediction_ - y)**2
+            self.weighted_differences_matrix = self.proximities.toarray() * np.subtract.outer(self.oob_prediction_, self.oob_prediction_)**2
+            self.weighted_differences = np.sum(self.weighted_differences_matrix, axis = 1)
+
+
+            self.weighted_oob_se = np.sqrt(self.weighted_errors + self.weighted_differences)
+
+            return t_val * self.weighted_oob_se
+
+
+# # Reshape for broadcasting
+# oob_preds_reshaped = oob_preds.reshape(-1, 1)
+# y_noise_reshaped = y_noise.reshape(-1, 1)
+
+# # Compute covar
+# covar = proximities * (oob_preds - y_noise_reshaped)**2
+
+# # Compute y_diffs
+# y_diffs = proximities * (oob_preds_reshaped - oob_preds)**2
+
+            # y_diffs = proximities * np.outer((oob_preds - oob_preds[:, np.newaxis])**2, np.ones_like(oob_preds))
+
+
+
+
+            
 
     return RFGAP(prox_method = prox_method, matrix_type = matrix_type, triangular = triangular, **kwargs)
