@@ -138,10 +138,13 @@ def RFGAP(prediction_type = None, y = None, prox_method = 'rfgap',
             """
             super().fit(X, y, sample_weight)
             self.leaf_matrix = self.apply(X)
+            self.y = y
+            self.n = len(y)
 
             
             if x_test is not None:
-                n_test = np.shape(x_test)[0]
+                self.x_test = x_test
+                self.n_test = np.shape(x_test)[0]
                 
                 self.leaf_matrix_test = self.apply(x_test)
                 self.leaf_matrix = np.concatenate((self.leaf_matrix, self.leaf_matrix_test), axis = 0)
@@ -151,7 +154,7 @@ def RFGAP(prediction_type = None, y = None, prox_method = 'rfgap',
                 self.oob_indices = self.get_oob_indices(X)
                 
                 if x_test is not None:
-                    self.oob_indices = np.concatenate((self.oob_indices, np.ones((n_test, self.n_estimators))))
+                    self.oob_indices = np.concatenate((self.oob_indices, np.ones((self.n_test, self.n_estimators))))
                 
                 self.oob_leaves = self.oob_indices * self.leaf_matrix
 
@@ -162,13 +165,17 @@ def RFGAP(prediction_type = None, y = None, prox_method = 'rfgap',
 
                 
                 if x_test is not None:
-                    self.oob_indices = np.concatenate((self.oob_indices, np.ones((n_test, self.n_estimators))))
-                    self.in_bag_counts = np.concatenate((self.in_bag_counts, np.zeros((n_test, self.n_estimators))))                
+                    self.oob_indices = np.concatenate((self.oob_indices, np.ones((self.n_test, self.n_estimators))))
+                    self.in_bag_counts = np.concatenate((self.in_bag_counts, np.zeros((self.n_test, self.n_estimators))))                
                                 
                 self.in_bag_indices = 1 - self.oob_indices
 
                 self.in_bag_leaves = self.in_bag_indices * self.leaf_matrix
                 self.oob_leaves = self.oob_indices * self.leaf_matrix
+
+            # TODO: call pis if oob_score (problem: we don't always want to build proximities..)
+            # if self.oob_score:
+            #     self.oob_prediction_se(y)
             
 
         
@@ -518,6 +525,8 @@ def RFGAP(prediction_type = None, y = None, prox_method = 'rfgap',
             
             # TODO: need to compute proximities for new points, test points added
             # Need to make useful for other proximity types
+            # Idea for quantification: measure the distance from the intervals to the true values, 0 if covered.
+            # Perhaps somehow penalized by width?
 
             # if self.proximitites is None:
             self.proximities = self.get_proximities()
@@ -536,10 +545,14 @@ def RFGAP(prediction_type = None, y = None, prox_method = 'rfgap',
                 return prox_preds
             
         # May want to make this function automatic when oob_score is true?
-        def oob_prediction_se(self, y, alpha = 0.05):
+        def oob_prediction_se(self):
+
+            if self.prox_method != 'rfgap':
+                raise ValueError('This method is only available for RF-GAP proximities')
 
             #TODO: Ensure MSE is used for oob_score, if eventually used.
             #TODO: Add any additional checks
+            # Alpha not currently used.
 
             if self.prediction_type == 'classification':
                 raise ValueError('Prediction intervals are only available for regression models')
@@ -548,48 +561,81 @@ def RFGAP(prediction_type = None, y = None, prox_method = 'rfgap',
                 raise ValueError('Model has not been fit with oob_score = True')
             
             # if self.proximitites is None:
-            self.proximities = self.get_proximities()
+            self.proximities = self.get_proximities().toarray()
 
+            # Test this part out
+            if self.x_test is not None:
+                self.proximities = self.proximities[:self.n, :self.n]
 
-
-            self.weighted_errors = self.proximities @ (self.oob_prediction_ - y)**2
-            self.weighted_differences_matrix = self.proximities.toarray() * np.subtract.outer(self.oob_prediction_, self.oob_prediction_)**2
-            self.weighted_differences = np.sum(self.weighted_differences_matrix, axis = 1)
+            self.oob_errors = self.oob_prediction_ - self.y
+            self.weighted_oob_errors = self.proximities @ (self.oob_errors)**2
+            # self.weighted_differences_matrix = self.proximities.toarray() * np.subtract.outer(self.oob_prediction_, self.oob_prediction_)**2
+            # self.weighted_differences = np.sum(self.weighted_differences_matrix, axis = 1)
 
             # self.weighted_oob_se = np.sqrt(self.weighted_errors + self.weighted_differences)
-            # self.weighted_oob_se = np.sqrt(self.weighted_errors + self.weighted_differences)
-            self.weighted_oob_se = np.sqrt(self.weighted_errors)
+            self.weighted_oob_se = np.sqrt(self.weighted_oob_errors)
 
 
-            # Perhaps instead of t, need oob quantiles?
 
-            errors = self.oob_prediction_ - y
-            # self.errors_quantiles = np.quantile(errors, [alpha, 1 - alpha])
-            self.errors_quantiles = np.quantile(errors, [alpha / 2, 1 - alpha / 2])
+            # self.errors_quantiles = np.quantile(oob_errors, [alpha / 2, 1 - alpha / 2])
             # self.t_val = stats.t.ppf(1 - alpha / 2, len(y) - 2)
 
-            self.oob_pi = self.weighted_oob_se
-            # self.oob_pi = self.t_val * self.weighted_oob_se
-            # self.oob_pi = self.errors_quantiles[1] + self.weighted_oob_se
+            self.ub = self.oob_prediction_ + self.weighted_oob_se
+            self.lb = self.oob_prediction_ - self.weighted_oob_se
 
-            self.ub = self.oob_prediction_ + self.oob_pi
-            self.lb = self.oob_prediction_ - self.oob_pi
-
-            self.oob_pi_coverage = np.mean((y >= self.lb) & (y <= self.ub))
-            
-            return self.oob_pi
+            self.oob_pi_coverage = np.mean((self.y >= self.lb) & (self.y <= self.ub))
 
 
-        def oob_quantile_se(self, y, alpha = 0.05):
+        def oob_quantile_se(self, alpha = 0.05):
 
-            errors = self.oob_prediction_ - y
+            errors = self.oob_prediction_ - self.y
             self.errors_quantiles = np.quantile(errors, [alpha / 2, 1 - alpha / 2])
 
             self.ub_q = self.oob_prediction_ + self.errors_quantiles[1]
             self.lb_q = self.oob_prediction_ + self.errors_quantiles[0]
 
-            self.q_pi_coverage = np.mean((y >= self.lb_q) & (y <= self.ub_q))
-        
+            self.q_pi_coverage = np.mean((self.y >= self.lb_q) & (self.y <= self.ub_q))
+
+        def get_prediction_intervals(self, y_test = None):
+            
+            if self.x_test is None:
+                raise ValueError('x_test must be provided for prediction intervals')
+            
+            if self.prox_method != 'rfgap':
+                raise ValueError('Prediction intervals are only available for RF-GAP proximities')
+            
+            # TODO: Need a check to see if these are already computed
+
+            # Rewrite this; perhaps make this function run the oob pis first.
+
+            self.test_proximities = self.prox_extend(self.x_test).toarray()[:, :self.n]
+       
+            # Need original y here...
+            self.oob_errors = self.oob_prediction_ - self.y
+
+
+            # Need test predictions for centerpoints for intervals
+            self.test_preds = self.predict(self.x_test)
+
+            self.weighted_test_errors = np.sqrt(self.test_proximities @ (self.oob_errors)**2)
+
+            self.test_ub = self.test_preds  + self.weighted_test_errors
+            self.test_lb = self.test_preds  - self.weighted_test_errors     
+
+            self.test_covered = (y_test >= self.test_lb) & (y_test <= self.test_ub)
+
+            self.test_coverage = np.mean(np.mean(self.test_covered))
+
+            # test_start_idx = len(self.proximities) - len(self.x_test)
+
+
+            # print('test_start_idx: ', test_start_idx)
+            # self.weighted_test_errors = self.wighted_test_errors[test_start_idx:]
+
+
+
+            # TODO: Finish this; build proximities to test points, got prox-weighted oob errors, build ub, lb
+
 
 
 
