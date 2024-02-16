@@ -638,6 +638,35 @@ def RFGAP(prediction_type = None, y = None, prox_method = 'rfgap',
 
 
 
+        def proximity_covar(self):
+
+            # Test this part out
+
+            self.proximities = self.get_proximities().toarray()
+            
+            if self.x_test is not None:
+                self.proximities = self.proximities[:self.n, :self.n]
+
+            self.prox_covar = np.zeros((self.n, self.n))
+
+            for i in range(len(self.proximities)):
+                for j in range(len(self.proximities)):
+                    self.prox_covar[i, j] = self.proximities[i, j] * (self.y[i]- np.mean(self.y)) * (self.y[j] - np.mean(self.y))
+
+
+            # Calculate mean of y
+            y_mean = np.mean(self.y)
+
+            # Reshape y to 2D arrays
+            y_2d_i = (self.y - y_mean)[:, np.newaxis]
+            y_2d_j = (self.y - y_mean)[np.newaxis, :]
+
+            # Compute the product
+            self.prox_covar_2 = self.proximities * y_2d_i * y_2d_j
+
+
+
+
 
 
 # # Reshape for broadcasting
