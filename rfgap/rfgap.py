@@ -141,7 +141,8 @@ def RFGAP(prediction_type = None, y = None, prox_method = 'rfgap',
             self.y = y
             self.n = len(y)
 
-            
+            # This way of using x_test messes other functions up! Just use prox_extend and append the proximities matrix.
+            # TODO: Fix this...
             if x_test is not None:
                 self.x_test = x_test
                 self.n_test = np.shape(x_test)[0]
@@ -520,8 +521,9 @@ def RFGAP(prediction_type = None, y = None, prox_method = 'rfgap',
             else:
                 return prox_sparse
             
-
-        def prox_predict(self, y):
+        # Should only require x_test... not y!
+        # May need separate function for test prediction
+        def prox_predict(self, x = None, oob_predict = False):
             
             # TODO: need to compute proximities for new points, test points added
             # Need to make useful for other proximity types
@@ -529,30 +531,46 @@ def RFGAP(prediction_type = None, y = None, prox_method = 'rfgap',
             # Perhaps somehow penalized by width?
 
             # if self.proximitites is None:
-            self.proximities = self.get_proximities()
+
+            # NOT OKAY IF PASSING IN TRAINING DATA
+            # What to do to make work with SHAP?
+            if oob_predict:
+                # Validate x.shape same as training data size
+                if 'self.proximities' in locals():
+                    proximities = self.proximities
+                else:
+                    proximities = self.get_proximities().toarray()
+
+            else:
+                # Not optimal for SHAP; reruns proximities for each observation.
+                proximities = self.prox_extend(x).toarray()
+
+            try:
+                proximities = proximities.toarray()
+            except:
+                proximities = proximities
+
 
             if self.prediction_type == 'classification':
-                y_one_hot = np.zeros((y.size, y.max() + 1))
-                y_one_hot[np.arange(y.size), y] = 1
+                y_one_hot = np.zeros((self.y.size, self.y.max() + 1))
+                y_one_hot[np.arange(self.y.size), self.y] = 1
 
-                prox_preds = np.argmax(self.proximities @ y_one_hot, axis = 1)
-                self.prox_predict_score = sklearn.metrics.accuracy_score(y, prox_preds)
+                prox_preds = np.argmax(proximities @ y_one_hot, axis = 1)
+                self.prox_predict_score = sklearn.metrics.accuracy_score(self.y, prox_preds)
                 return prox_preds
             
             else:
-                prox_preds = self.proximities @ y
-                self.prox_predict_score = sklearn.metrics.mean_squared_error(y, prox_preds)
+                # TODO: check  dimensions in this and classification cases
+                prox_preds = proximities @ self.y
+                # prox_preds = self.y @ proximities
+                # self.prox_predict_score = sklearn.metrics.mean_squared_error(self.y, prox_preds)
                 return prox_preds
             
         # May want to make this function automatic when oob_score is true?
-        def oob_prediction_se(self):
+        def get_weighted_oob_rmse(self):
 
             if self.prox_method != 'rfgap':
                 raise ValueError('This method is only available for RF-GAP proximities')
-
-            #TODO: Ensure MSE is used for oob_score, if eventually used.
-            #TODO: Add any additional checks
-            # Alpha not currently used.
 
             if self.prediction_type == 'classification':
                 raise ValueError('Prediction intervals are only available for regression models')
@@ -561,42 +579,49 @@ def RFGAP(prediction_type = None, y = None, prox_method = 'rfgap',
                 raise ValueError('Model has not been fit with oob_score = True')
             
             # if self.proximitites is None:
-            self.proximities = self.get_proximities().toarray()
+
+            if not 'self.proximities' in locals():
+                self.proximities = self.get_proximities().toarray()
 
             # Test this part out
             if self.x_test is not None:
                 self.proximities = self.proximities[:self.n, :self.n]
 
             self.oob_errors = self.oob_prediction_ - self.y
+            self.squared_oob_errors = self.oob_errors**2
+
+
             self.weighted_oob_errors = self.proximities @ (self.oob_errors)**2
-            # self.weighted_differences_matrix = self.proximities.toarray() * np.subtract.outer(self.oob_prediction_, self.oob_prediction_)**2
-            # self.weighted_differences = np.sum(self.weighted_differences_matrix, axis = 1)
+            self.weighted_oob_mse = self.proximities @ (self.squared_oob_errors)
+            self.weighted_oob_rmse = np.sqrt(self.weighted_oob_errors)
 
-            # self.weighted_oob_se = np.sqrt(self.weighted_errors + self.weighted_differences)
-            self.weighted_oob_se = np.sqrt(self.weighted_oob_errors)
+            self.oob_ub = self.oob_prediction_ + self.weighted_oob_rmse
+            self.oob_lb = self.oob_prediction_ - self.weighted_oob_rmse
 
+            self.oob_rmse_coverage = np.mean((self.y >= self.oob_lb) & (self.y <= self.oob_ub))
 
+            return self.weighted_oob_rmse
 
+            
             # self.errors_quantiles = np.quantile(oob_errors, [alpha / 2, 1 - alpha / 2])
             # self.t_val = stats.t.ppf(1 - alpha / 2, len(y) - 2)
 
-            self.ub = self.oob_prediction_ + self.weighted_oob_se
-            self.lb = self.oob_prediction_ - self.weighted_oob_se
 
-            self.oob_pi_coverage = np.mean((self.y >= self.lb) & (self.y <= self.ub))
+        def get_oob_prediction_interval(self, alpha = 0.05):
 
+            self.oob_errors = self.oob_prediction_ - self.y
+            self.errors_quantiles = np.quantile(self.oob_errors, [alpha / 2, 1 - alpha / 2])
 
-        def oob_quantile_se(self, alpha = 0.05):
-
-            errors = self.oob_prediction_ - self.y
-            self.errors_quantiles = np.quantile(errors, [alpha / 2, 1 - alpha / 2])
-
-            self.ub_q = self.oob_prediction_ + self.errors_quantiles[1]
-            self.lb_q = self.oob_prediction_ + self.errors_quantiles[0]
+            self.oob_pi_ub = self.oob_prediction_ + self.errors_quantiles[1]
+            self.oob_pi_lb = self.oob_prediction_ + self.errors_quantiles[0]
 
             self.q_pi_coverage = np.mean((self.y >= self.lb_q) & (self.y <= self.ub_q))
 
-        def get_prediction_intervals(self, y_test = None):
+            return self.oob_pi_lb, self.oob_pi_ub
+
+
+        # Is this for test intervals?
+        def get_test_intervals(self, y_test = None):
             
             if self.x_test is None:
                 raise ValueError('x_test must be provided for prediction intervals')
@@ -622,68 +647,102 @@ def RFGAP(prediction_type = None, y = None, prox_method = 'rfgap',
             self.test_ub = self.test_preds  + self.weighted_test_errors
             self.test_lb = self.test_preds  - self.weighted_test_errors     
 
-            self.test_covered = (y_test >= self.test_lb) & (y_test <= self.test_ub)
-
-            self.test_coverage = np.mean(np.mean(self.test_covered))
-
-            # test_start_idx = len(self.proximities) - len(self.x_test)
+            if y_test is not None:
+                self.test_covered = (y_test >= self.test_lb) & (y_test <= self.test_ub)
+                self.test_coverage = np.mean(np.mean(self.test_covered))
 
 
-            # print('test_start_idx: ', test_start_idx)
-            # self.weighted_test_errors = self.wighted_test_errors[test_start_idx:]
+        def proximity_cov(self):
 
+            if self.prox_method != 'rfgap':
+                raise ValueError('This method is only available for RF-GAP proximities')
 
+            if self.prediction_type == 'classification':
+                raise ValueError('Proximity covariance is only available for regression models')
 
-            # TODO: Finish this; build proximities to test points, got prox-weighted oob errors, build ub, lb
-
-
-
-        def proximity_covar(self):
-
-            # Test this part out
-
-            self.proximities = self.get_proximities().toarray()
+            if not 'self.proximities' in locals():
+                self.proximities = self.get_proximities().toarray()
             
             if self.x_test is not None:
                 self.proximities = self.proximities[:self.n, :self.n]
 
-            self.prox_covar = np.zeros((self.n, self.n))
 
-            for i in range(len(self.proximities)):
-                for j in range(len(self.proximities)):
-                    self.prox_covar[i, j] = self.proximities[i, j] * (self.y[i]- np.mean(self.y)) * (self.y[j] - np.mean(self.y))
-
-
-            # Calculate mean of y
             y_mean = np.mean(self.y)
 
             # Reshape y to 2D arrays
-            y_2d_i = (self.y - y_mean)[:, np.newaxis]
-            y_2d_j = (self.y - y_mean)[np.newaxis, :]
+            y_i = (self.y - y_mean)[:, np.newaxis]
+            y_j = (self.y - y_mean)[np.newaxis, :]
 
             # Compute the product
-            self.prox_covar_2 = self.proximities * y_2d_i * y_2d_j
+            self.prox_covar = self.proximities * y_i * y_j       
 
 
+        def get_trust_scores(self):
+            # TODO: Can use trust scores to improve prediction?
+            # TODO: Incorporate predict proba for trust?
+            # TODO: How does this approach differ from using predict proba values?
+            # How to validate/measure trust scores?
 
+            if self.non_zero_diagonal:
+                raise ValueError('Trust scores are only available for RF-GAP proximities with zero diagonal')
+            
+            if self.prediction_type != 'classification':
+                raise ValueError('Classification trust scores are only available for regression models')   
+            
+            if self.prox_method != 'rfgap':
+                raise ValueError('Trust scores are only available for RF-GAP proximities')
+            
+            self.oob_proba = self.oob_decision_function_
+            self.oob_predictions = np.argmax(self.oob_proba, axis = 1)
+            self.is_correct_oob = self.oob_predictions == self.y
 
+            if not 'self.proximities' in locals():
+                self.proximities = self.get_proximities().toarray()
 
-
-# # Reshape for broadcasting
-# oob_preds_reshaped = oob_preds.reshape(-1, 1)
-# y_noise_reshaped = y_noise.reshape(-1, 1)
-
-# # Compute covar
-# covar = proximities * (oob_preds - y_noise_reshaped)**2
-
-# # Compute y_diffs
-# y_diffs = proximities * (oob_preds_reshaped - oob_preds)**2
-
-            # y_diffs = proximities * np.outer((oob_preds - oob_preds[:, np.newaxis])**2, np.ones_like(oob_preds))
-
-
-
+            # 0 - 1 indication as weighted average of correct predictions
+            self.trust_scores = self.proximities @ self.is_correct_oob
 
             
+            # Only keeping largest proba value if prediction is correct
+            # self.trust_max_proba = self.proximities @ np.max(self.oob_proba, axis = 1) * self.is_correct_oob
+            self.trust_max_proba = self.proximities @ (self.is_correct_oob * np.max(self.oob_proba, axis = 1)) 
+
+
+            # Only keeping correct proba value of correct class if prediction is correct
+            # self.trust_correct_proba = self.proximities @ self.oob_proba[np.arange(self.n), self.y] * self.is_correct_oob
+            self.trust_correct_proba = self.proximities @ (self.is_correct_oob * self.oob_proba[np.arange(self.n), self.y])
+
+            self.trust_minus = self.proximities @ (self.is_correct_oob * self.oob_proba[np.arange(self.n), self.y])
+            self.trust_minus -= self.proximities @ ((1 - self.is_correct_oob) * np.max(self.oob_proba, axis = 1)) # Maybe not quite this
+
+            # TODO: Add condition: if correct, keep correct proba, else, keep... ?
+
+            return self.trust_scores
+        
+        def get_test_trust(self, x_test):
+
+            if self.non_zero_diagonal:
+                raise ValueError('Trust scores are only available for RF-GAP proximities with zero diagonal')
+            
+            if self.prediction_type != 'classification':
+                raise ValueError('Classification trust scores are only available for regression models')   
+            
+            if self.prox_method != 'rfgap':
+                raise ValueError('Trust scores are only available for RF-GAP proximities')       
+
+            self.oob_proba = self.oob_decision_function_
+            self.oob_predictions = np.argmax(self.oob_proba, axis = 1)
+            self.is_correct_oob = self.oob_predictions == self.y 
+
+            self.test_proximities = self.prox_extend(x_test).toarray()#[:, :self.n] # Check this last part.
+
+            self.trust_scores_test = self.test_proximities @ self.is_correct_oob
+            self.trust_max_proba_test = self.test_proximities @ (self.is_correct_oob * np.max(self.oob_proba, axis = 1))
+            self.trust_correct_proba_test = self.test_proximities @ (self.is_correct_oob * self.oob_proba[np.arange(self.n), self.y])
+            self.trust_minus_test = self.test_proximities @ (self.is_correct_oob * self.oob_proba[np.arange(self.n), self.y])
+            self.trust_minus_test -= self.test_proximities @ ((1 - self.is_correct_oob) * np.max(self.oob_proba, axis = 1))
+
+
+             
 
     return RFGAP(prox_method = prox_method, matrix_type = matrix_type, triangular = triangular, **kwargs)
