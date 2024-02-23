@@ -609,13 +609,15 @@ def RFGAP(prediction_type = None, y = None, prox_method = 'rfgap',
 
         def get_oob_prediction_interval(self, alpha = 0.05):
 
+            # From the paper "Random Forest Prediction Intervals"
+
             self.oob_errors = self.oob_prediction_ - self.y
             self.errors_quantiles = np.quantile(self.oob_errors, [alpha / 2, 1 - alpha / 2])
 
             self.oob_pi_ub = self.oob_prediction_ + self.errors_quantiles[1]
             self.oob_pi_lb = self.oob_prediction_ + self.errors_quantiles[0]
 
-            self.q_pi_coverage = np.mean((self.y >= self.lb_q) & (self.y <= self.ub_q))
+            self.q_pi_coverage = np.mean((self.y >= self.oob_pi_lb) & (self.y <= self.oob_pi_ub))
 
             return self.oob_pi_lb, self.oob_pi_ub
 
@@ -742,7 +744,51 @@ def RFGAP(prediction_type = None, y = None, prox_method = 'rfgap',
             self.trust_minus_test = self.test_proximities @ (self.is_correct_oob * self.oob_proba[np.arange(self.n), self.y])
             self.trust_minus_test -= self.test_proximities @ ((1 - self.is_correct_oob) * np.max(self.oob_proba, axis = 1))
 
+        # Def need new name (punny)
+        def boost_predict(self, x_test):
 
-             
+            if self.prox_method != 'rfgap':
+                raise ValueError('This method is only available for RF-GAP proximities')
+
+            if self.prediction_type == 'classification':
+                raise ValueError('Prediction intervals are only available for regression models')
+
+            if self.oob_score_ is None:
+                raise ValueError('Model has not been fit with oob_score = True')
+            
+            # if self.proximitites is None:
+
+            if not 'self.proximities' in locals():
+                self.proximities = self.get_proximities().toarray()
+
+            # Test this part out
+            if self.x_test is not None:
+                self.proximities = self.proximities[:self.n, :self.n]
+
+            # May want to run this on fit if oob_score is true
+            self.oob_errors = self.oob_prediction_ - self.y
+            self.oob_error_direction = np.sign(self.oob_errors)
+
+            self.squared_oob_errors = self.oob_errors**2
+
+            self.test_proximities = self.prox_extend(self.x_test).toarray()[:, :self.n]
+            self.weighted_test_errors = np.sqrt(self.test_proximities @ self.squared_oob_errors)
+
+            self.weighted_error_direction = self.test_proximities @ self.oob_error_direction
+
+
+
+            # Need test predictions for centerpoints for intervals
+            self.test_preds = self.predict(x_test)
+
+
+            # Not sure if we will want the weighted direction here; just a 1 or -1
+            self.boosted_test_preds = self.test_preds - self.weighted_test_errors * self.weighted_error_direction
+
+
+            self.boosted_test_preds2 = self.test_preds - self.test_proximities @ self.oob_errors
+
+            return self.boosted_test_preds
+
 
     return RFGAP(prox_method = prox_method, matrix_type = matrix_type, triangular = triangular, **kwargs)
