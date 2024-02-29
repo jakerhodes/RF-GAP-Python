@@ -717,9 +717,86 @@ def RFGAP(prediction_type = None, y = None, prox_method = 'rfgap',
             self.trust_minus = self.proximities @ (self.is_correct_oob * self.oob_proba[np.arange(self.n), self.y])
             self.trust_minus -= self.proximities @ ((1 - self.is_correct_oob) * np.max(self.oob_proba, axis = 1)) # Maybe not quite this
 
+
+            self.trust_proba_diff = self.proximities @ np.partition(self.oob_proba, -2, axis = 1)[:, -1] - np.partition(self.oob_proba, -2, axis = 1)[:, -2]
+
             # TODO: Add condition: if correct, keep correct proba, else, keep... ?
 
             return self.trust_scores
+
+        # TODO: Get trust scores for test set
+        # TODO: Get trust scores per class w/ predict_proba
+        
+
+        def get_trust_threshold(self, threshold = 0.7):
+
+
+            if self.non_zero_diagonal:
+                raise ValueError('Trust scores are only available for RF-GAP proximities with zero diagonal')
+            
+            if self.prediction_type != 'classification':
+                raise ValueError('Classification trust scores are only available for regression models')   
+            
+            if self.prox_method != 'rfgap':
+                raise ValueError('Trust scores are only available for RF-GAP proximities')       
+
+            self.oob_proba = self.oob_decision_function_
+            self.oob_predictions = np.argmax(self.oob_proba, axis = 1)
+            self.is_correct_oob = self.oob_predictions == self.y
+
+            if not 'self.proximities' in locals():
+                self.proximities = self.get_proximities().toarray()
+
+
+            self.diff_top_2_proba = np.partition(self.oob_proba, -2, axis = 1)[:, -1] - np.partition(self.oob_proba, -2, axis = 1)[:, -2]
+
+            self.diff_keep = self.diff_top_2_proba < threshold
+
+
+            # Idea: If correctly classified, keep it.  If not, keep it if missclassified with low trust. Ditch high probability but misclassified.
+
+            # Still not correct.
+            self.trust_threshold = self.proximities @ (np.logical_or(np.logical_and(self.diff_keep, ~self.is_correct_oob), self.is_correct_oob) * self.diff_top_2_proba)
+
+        
+
+            # self.trust_scores = self.proximities @ self.is_correct_oob
+            # self.trust_max_proba = self.proximities @ (self.is_correct_oob * np.max(self.oob_proba, axis = 1))
+            # self.trust_correct_proba = self.proximities @ (self.is_correct_oob * self.oob_proba[np.arange(self.n), self.y])
+            # self.trust_minus = self.proximities @ (self.is_correct_oob * self.oob_proba[np.arange(self.n), self.y])
+            # self.trust_minus -= self.proximities @ ((1 - self.is_correct_oob) * np.max(self.oob_proba, axis = 1))
+
+            # self.trust_threshold = self.trust_scores > threshold
+
+            return self.trust_threshold
+        
+
+        def get_max_2_proba_diffs(self):
+
+            if self.non_zero_diagonal:
+                raise ValueError('Trust scores are only available for RF-GAP proximities with zero diagonal')
+            
+            if self.prediction_type != 'classification':
+                raise ValueError('Classification trust scores are only available for regression models')   
+            
+            if self.prox_method != 'rfgap':
+                raise ValueError('Trust scores are only available for RF-GAP proximities')    
+            
+
+            # Write this block of code as a separate function; to be called if oob_score is true
+            self.oob_proba = self.oob_decision_function_
+            self.oob_predictions = np.argmax(self.oob_proba, axis = 1)
+            self.is_correct_oob = self.oob_predictions == self.y
+
+
+            self.diff_top_2_proba = np.partition(self.oob_proba, -2, axis = 1)[:, -1] - np.partition(self.oob_proba, -2, axis = 1)[:, -2]
+
+
+            return self.diff_top_2_proba
+
+
+
+
         
         def get_test_trust(self, x_test):
 
