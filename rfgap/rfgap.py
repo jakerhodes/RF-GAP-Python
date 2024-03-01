@@ -714,8 +714,12 @@ def RFGAP(prediction_type = None, y = None, prox_method = 'rfgap',
             # self.trust_correct_proba = self.proximities @ self.oob_proba[np.arange(self.n), self.y] * self.is_correct_oob
             self.trust_correct_proba = self.proximities @ (self.is_correct_oob * self.oob_proba[np.arange(self.n), self.y])
 
-            self.trust_minus = self.proximities @ (self.is_correct_oob * self.oob_proba[np.arange(self.n), self.y])
-            self.trust_minus -= self.proximities @ ((1 - self.is_correct_oob) * np.max(self.oob_proba, axis = 1)) # Maybe not quite this
+            # self.trust_minus = self.proximities @ (self.is_correct_oob * self.oob_proba[np.arange(self.n), self.y])
+            # self.trust_minus -= self.proximities @ ((1 - self.is_correct_oob) * np.max(self.oob_proba, axis = 1)) # Maybe not quite this
+
+            print('Currently minus not taking oob_correct into account')
+            self.trust_minus = self.proximities @ (np.max(self.oob_proba, axis = 1))
+            self.trust_minus -= self.proximities @ np.partition(self.oob_proba, -2, axis=1)[:, -2]
 
 
             self.trust_proba_diff = self.proximities @ np.partition(self.oob_proba, -2, axis = 1)[:, -1] - np.partition(self.oob_proba, -2, axis = 1)[:, -2]
@@ -818,8 +822,11 @@ def RFGAP(prediction_type = None, y = None, prox_method = 'rfgap',
             self.trust_scores_test = self.test_proximities @ self.is_correct_oob
             self.trust_max_proba_test = self.test_proximities @ (self.is_correct_oob * np.max(self.oob_proba, axis = 1))
             self.trust_correct_proba_test = self.test_proximities @ (self.is_correct_oob * self.oob_proba[np.arange(self.n), self.y])
-            self.trust_minus_test = self.test_proximities @ (self.is_correct_oob * self.oob_proba[np.arange(self.n), self.y])
-            self.trust_minus_test -= self.test_proximities @ ((1 - self.is_correct_oob) * np.max(self.oob_proba, axis = 1))
+
+            self.trust_minus_test = self.test_proximities @ (np.max(self.oob_proba, axis = 1))
+            self.trust_minus_test -= self.test_proximities @ np.partition(self.oob_proba, -2, axis=1)[:, -2]
+            # self.trust_minus_test = self.test_proximities @ (self.is_correct_oob * self.oob_proba[np.arange(self.n), self.y])
+            # self.trust_minus_test -= self.test_proximities @ ((1 - self.is_correct_oob) * np.max(self.oob_proba, axis = 1))
 
         # Def need new name (punny)
         def boost_predict(self, x_test):
