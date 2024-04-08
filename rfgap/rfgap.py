@@ -704,6 +704,8 @@ def RFGAP(prediction_type = None, y = None, prox_method = 'rfgap',
             # 0 - 1 indication as weighted average of correct predictions
             self.trust_scores = self.proximities @ self.is_correct_oob
 
+            self.trust_quantiles = np.quantile(self.trust_scores, np.linspace(0, 0.99, 100))
+
             
             # Only keeping largest proba value if prediction is correct
             # self.trust_max_proba = self.proximities @ np.max(self.oob_proba, axis = 1) * self.is_correct_oob
@@ -820,6 +822,9 @@ def RFGAP(prediction_type = None, y = None, prox_method = 'rfgap',
             self.test_proximities = self.prox_extend(x_test).toarray()#[:, :self.n] # Check this last part.
 
             self.trust_scores_test = self.test_proximities @ self.is_correct_oob
+            self.trust_quantiles_test = np.quantile(self.trust_scores_test, np.linspace(0, 0.99, 100))
+
+
             self.trust_max_proba_test = self.test_proximities @ (self.is_correct_oob * np.max(self.oob_proba, axis = 1))
             self.trust_correct_proba_test = self.test_proximities @ (self.is_correct_oob * self.oob_proba[np.arange(self.n), self.y])
 
@@ -828,6 +833,9 @@ def RFGAP(prediction_type = None, y = None, prox_method = 'rfgap',
             # self.trust_minus_test = self.test_proximities @ (self.is_correct_oob * self.oob_proba[np.arange(self.n), self.y])
             # self.trust_minus_test -= self.test_proximities @ ((1 - self.is_correct_oob) * np.max(self.oob_proba, axis = 1))
 
+            return self.trust_scores_test
+
+            
         # Def need new name (punny)
         def boost_predict(self, x_test):
 
