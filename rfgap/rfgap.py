@@ -709,22 +709,22 @@ def RFGAP(prediction_type = None, y = None, prox_method = 'rfgap',
             
             # Only keeping largest proba value if prediction is correct
             # self.trust_max_proba = self.proximities @ np.max(self.oob_proba, axis = 1) * self.is_correct_oob
-            self.trust_max_proba = self.proximities @ (self.is_correct_oob * np.max(self.oob_proba, axis = 1)) 
+            # self.trust_max_proba = self.proximities @ (self.is_correct_oob * np.max(self.oob_proba, axis = 1)) 
 
 
             # Only keeping correct proba value of correct class if prediction is correct
             # self.trust_correct_proba = self.proximities @ self.oob_proba[np.arange(self.n), self.y] * self.is_correct_oob
-            self.trust_correct_proba = self.proximities @ (self.is_correct_oob * self.oob_proba[np.arange(self.n), self.y])
+            # self.trust_correct_proba = self.proximities @ (self.is_correct_oob * self.oob_proba[np.arange(self.n), self.y])
 
             # self.trust_minus = self.proximities @ (self.is_correct_oob * self.oob_proba[np.arange(self.n), self.y])
             # self.trust_minus -= self.proximities @ ((1 - self.is_correct_oob) * np.max(self.oob_proba, axis = 1)) # Maybe not quite this
 
-            print('Currently minus not taking oob_correct into account')
-            self.trust_minus = self.proximities @ (np.max(self.oob_proba, axis = 1))
-            self.trust_minus -= self.proximities @ np.partition(self.oob_proba, -2, axis=1)[:, -2]
+            # print('Currently minus not taking oob_correct into account')
+            # self.trust_minus = self.proximities @ (np.max(self.oob_proba, axis = 1))
+            # self.trust_minus -= self.proximities @ np.partition(self.oob_proba, -2, axis=1)[:, -2]
 
 
-            self.trust_proba_diff = self.proximities @ np.partition(self.oob_proba, -2, axis = 1)[:, -1] - np.partition(self.oob_proba, -2, axis = 1)[:, -2]
+            # self.trust_proba_diff = self.proximities @ np.partition(self.oob_proba, -2, axis = 1)[:, -1] - np.partition(self.oob_proba, -2, axis = 1)[:, -2]
 
             # TODO: Add condition: if correct, keep correct proba, else, keep... ?
 
@@ -825,11 +825,11 @@ def RFGAP(prediction_type = None, y = None, prox_method = 'rfgap',
             self.trust_quantiles_test = np.quantile(self.trust_scores_test, np.linspace(0, 0.99, 100))
 
 
-            self.trust_max_proba_test = self.test_proximities @ (self.is_correct_oob * np.max(self.oob_proba, axis = 1))
-            self.trust_correct_proba_test = self.test_proximities @ (self.is_correct_oob * self.oob_proba[np.arange(self.n), self.y])
+            # self.trust_max_proba_test = self.test_proximities @ (self.is_correct_oob * np.max(self.oob_proba, axis = 1))
+            # self.trust_correct_proba_test = self.test_proximities @ (self.is_correct_oob * self.oob_proba[np.arange(self.n), self.y])
 
-            self.trust_minus_test = self.test_proximities @ (np.max(self.oob_proba, axis = 1))
-            self.trust_minus_test -= self.test_proximities @ np.partition(self.oob_proba, -2, axis=1)[:, -2]
+            # self.trust_minus_test = self.test_proximities @ (np.max(self.oob_proba, axis = 1))
+            # self.trust_minus_test -= self.test_proximities @ np.partition(self.oob_proba, -2, axis=1)[:, -2]
             # self.trust_minus_test = self.test_proximities @ (self.is_correct_oob * self.oob_proba[np.arange(self.n), self.y])
             # self.trust_minus_test -= self.test_proximities @ ((1 - self.is_correct_oob) * np.max(self.oob_proba, axis = 1))
 
