@@ -22,8 +22,8 @@ datasets = ['hepatitis', 'lymphography', 'iris', 'audiology', 'parkinsons',
 save_figs = True
 
 for data_name in datasets:
-
     print(data_name)
+
     data   = pd.read_csv('../datasets/' + data_name + '.csv', sep = ',')
     x, y   = dataprep(data, scale = None)
     n, d   = x.shape
@@ -140,6 +140,11 @@ for data_name in datasets:
     n_test_dropped = np.array(n_test_dropped)
 
 
+    n_oob_dropped
+
+
+    oob_trust_quantiles
+
 
     def nearest_value_index(arr, value):
         return np.argmin(np.abs(arr - value))
@@ -156,12 +161,12 @@ for data_name in datasets:
     axes[0].vlines(x = oob_trust_quantiles[nearest_value_index(np.round(n_oob_dropped / n, 2), 0.1)], color = 'purple', linestyle = '--',
                 ymin = 0, ymax = 100)
 
-    axes[0].text(oob_trust_quantiles[nearest_value_index(np.round(n_oob_dropped / n, 2), 0.1)] - 0.015, 50, '10% Unclassifiable', rotation=90, verticalalignment='bottom')
+    axes[0].text(oob_trust_quantiles[nearest_value_index(np.round(n_oob_dropped / n, 2), 0.1)] - 0.025, 50, '10% Unclassifiable', rotation=90, verticalalignment='bottom')
 
     axes[1].vlines(x = test_trust_quantiles[nearest_value_index(np.round(n_test_dropped / n_test, 2), 0.1)], color = 'purple', linestyle = '--',
                 ymin = 0, ymax = 100)
 
-    axes[1].text(test_trust_quantiles[nearest_value_index(np.round(n_test_dropped / n_test, 2), 0.1)] - 0.015, 50, '10% Unclassifiable', rotation=90, verticalalignment='bottom')
+    axes[1].text(test_trust_quantiles[nearest_value_index(np.round(n_test_dropped / n_test, 2), 0.1)] - 0.025, 50, '10% Unclassifiable', rotation=90, verticalalignment='bottom')
 
     # Horizontal Lines
     # Horizontal Lines
@@ -258,8 +263,8 @@ for data_name in datasets:
     axes[1].vlines(x = test_trust_quantiles[nearest_value_index(np.round(n_test_dropped / n_test, 2), 0.1)], color = 'purple', linestyle = '--',
                 ymin = np.min(oob_drop_accuracy) * 100, ymax = 100)
 
-    axes[0].text(oob_trust_quantiles[nearest_value_index(np.round(n_oob_dropped / n, 2), 0.1)] - 0.015, 100, '10% Unclassifiable', rotation=90, verticalalignment='top')
-    axes[1].text(test_trust_quantiles[nearest_value_index(np.round(n_test_dropped / n_test, 2), 0.1)] - 0.015, 100, '10% Unclassifiable', rotation=90, verticalalignment='top')
+    axes[0].text(oob_trust_quantiles[nearest_value_index(np.round(n_oob_dropped / n, 2), 0.1)] - 0.025, 100, '10% Unclassifiable', rotation=90, verticalalignment='top')
+    axes[1].text(test_trust_quantiles[nearest_value_index(np.round(n_test_dropped / n_test, 2), 0.1)] - 0.025, 100, '10% Unclassifiable', rotation=90, verticalalignment='top')
 
     # Horizontal Lines
     x_value = oob_trust_quantiles[nearest_value_index(np.round(n_oob_dropped / n, 2), 0.1)]
@@ -274,10 +279,10 @@ for data_name in datasets:
 
     axes[0].set_title('Out-of-Bag')
     axes[0].set_ylabel('Accuracy (%) After Dropping Low Trust Points')
-    axes[0].set_xlabel('Trust Score Threshold')
+    axes[0].set_xlabel('RF-ICE Threshold')
 
     axes[1].set_title('Test Trust')
-    axes[1].set_xlabel('Trust Score Threshold')
+    axes[1].set_xlabel('RF-ICE Threshold')
 
     plt.tight_layout()
 
@@ -292,7 +297,7 @@ for data_name in datasets:
 
     qs = [0.7, 0.8, 0.85, 0.9, 0.95]
 
-    fig, axes = plt.subplots(1, 5, figsize = (25, 5), sharex = True, sharey = True)
+    fig, axes = plt.subplots(1, 5, figsize = (18, 4), sharex = True, sharey = True)
     plt.subplots_adjust(hspace = 0.5, wspace = 0.025)
     color_palette = sns.color_palette('vlag', as_cmap = True)
 
@@ -310,9 +315,12 @@ for data_name in datasets:
         sns.scatterplot(ax = ax, x = emb[idx_temp, 0], y = emb[idx_temp, 1],
                         hue = colormap[idx_temp],
                         hue_norm = hue_norm,
-                        sizes = size[idx_temp],
+                        size = size[idx_temp],
+                        sizes = (5, 50),
+                        size_norm = hue_norm,
                         palette = color_palette,
-                        legend = False)  # Disable legend for each subplot
+                        legend = False,
+                        edgecolor = None)  # Disable legend for each subplot
         
         ax.set_title(f'Trust Score > {q}, Accuracy: {np.mean(y[idx_temp] == oob_preds):.2f}')
         ax.set_xticks([])
@@ -359,31 +367,29 @@ for data_name in datasets:
 
     fig.suptitle(str.title(data_name) + ': Drop Unclassifiable', fontsize=16)
 
-
     thresholds_table = np.linspace(0.05, 0.95, int(0.95 / 0.05))
-
 
     int(0.95 / 0.05)
 
 
-
     # Table of results
-    thresholds_table = np.round(np.linspace(0.05, .95, 19), 2)
+    quantiles_table = np.round(np.linspace(0.05, .95, 19), 2)
     # oob_trust_quantiles_table = np.quantile(trust_scores_oob, quantiles_table)
-    dataset_name_table = np.repeat(data_name, len(thresholds_table))
-    oob_drop_accuracy_table = oob_drop_accuracy[[int(quantile * 100) for quantile in thresholds_table]]
-    n_oob_dropped_table = n_oob_dropped[[int(quantile * 100) for quantile in thresholds_table]]
-    oob_accuracy_table = np.repeat(rf.oob_score_, len(thresholds_table))
+    dataset_name_table = np.repeat(data_name, len(quantiles_table))
+    trust_table = oob_trust_quantiles[[int(quantile * 100) for quantile in quantiles_table]]
+    oob_drop_accuracy_table = oob_drop_accuracy[[int(quantile * 100) for quantile in quantiles_table]] # This is not correct! These are the quantiles, not thresholds!!
+    n_oob_dropped_table = n_oob_dropped[[int(quantile * 100) for quantile in quantiles_table]]
+    oob_accuracy_table = np.repeat(rf.oob_score_, len(quantiles_table))
     accuracy_diff_table = oob_drop_accuracy_table - oob_accuracy_table
     accuracy_drop_ratio = (accuracy_diff_table) / (n_oob_dropped_table / n)
 
     # Headers
 
-    headers = ['Dataset', 'Trust Threshold', 'Baseline Accuracy', 
+    headers = ['Dataset', 'Quantiles', 'Trust', 'Baseline Accuracy', 
             'Classifiable Accuracy','Accuracy Diff', 'Pct. Dropped',
             'Accuracy Drop Ratio']
 
-    table = pd.DataFrame(np.vstack([dataset_name_table, thresholds_table, 
+    table = pd.DataFrame(np.vstack([dataset_name_table, quantiles_table, trust_table,
                                     oob_accuracy_table, oob_drop_accuracy_table,
                                     accuracy_diff_table, n_oob_dropped_table / n,
                                         accuracy_drop_ratio]).T, columns = headers)
@@ -391,16 +397,5 @@ for data_name in datasets:
 
     if save_figs:
         table.to_csv('./trust_tables/' + data_name + '_trust_table.csv', index = False)
-
-
-    table # Wrong: Not quantiles, but thresholds!
-
-
-    fig = sns.lineplot(x = thresholds_table, y = accuracy_drop_ratio)
-
-    fig.set_title('Increased Accuracy / Pct. Dropped Points')
-    fig.set_xlabel('Trust Score Drop Threshold')
-    fig.set_ylabel('(Accuracy Increase / Pct. Dropped Points)')
-
 
 
