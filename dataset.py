@@ -43,3 +43,18 @@ def dataprep(data, label_col_idx = 0, scale = 'normalize'):
         return x, y
         # return np.array(x), y
 
+
+
+def load_regression(path):
+    x = pd.read_csv(path + '/x.txt', sep = ' ', header = None)
+
+    categorical_cols = []
+    for col in x.columns:
+        if x[col].dtype == 'object' or x[col].dtype == 'int64' or x[col].dtype == 'category':
+            categorical_cols.append(col)
+            x[col] = pd.Categorical(x[col]).codes
+
+
+    y = pd.read_csv(path + '/y.txt', sep = ' ', header = None).squeeze()
+
+    return x, y
