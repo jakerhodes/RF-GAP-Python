@@ -4,6 +4,7 @@ import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
 import seaborn as sns
+import random
 
 from dataset import dataprep
 from phate import PHATE
@@ -14,14 +15,35 @@ from sklearn.preprocessing import MinMaxScaler
 
 # Read in and prepare the data
 
-datasets = ['hepatitis', 'lymphography', 'iris', 'audiology', 'parkinsons', 
+data_names = ['hepatitis', 'lymphography', 'iris', 'audiology', 'parkinsons', 
                        'wine', 'glass', 'heart_failure', 'ionosphere', 'seeds',
                        'audiology', 'flare1', 'heart_disease', 'crx', 'balance_scale',
                        'hill_valley', 'breast_cancer', 'diabetes', 'titanic', 'car', 
                        'treeData', 'chess', 'tic-tac-toe', 'optdigits', 'waveform', 'mnist_test']
+
+
+random.seed(42)
+random_states = [random.randint(0, 10000) for _ in range(10)]
+
 save_figs = True
 
-for data_name in datasets:
+
+# Helper functions for plots
+def reverse_scale(x, min_size = 5, max_size = 100, log_scale = False):
+    
+    if log_scale:
+        x = np.log(x + np.finfo(np.float64).eps)
+        x_scaled = max_size - (x - x.min())/(x.max() - x.min()) * max_size + min_size
+    else:
+        x_scaled = max_size - (x - x.min())/(x.max() - x.min()) * max_size + min_size
+
+    return x_scaled
+
+def nearest_value_index(arr, value):
+    return np.argmin(np.abs(arr - value))
+
+
+def run_all(data_name, random_state):
     print(data_name)
 
     data   = pd.read_csv('../datasets/' + data_name + '.csv', sep = ',')
@@ -29,19 +51,19 @@ for data_name in datasets:
     n, d   = x.shape
     n_classes = len(y.unique())
 
-    x_train, x_test, y_train, y_test, inds_train, inds_test = train_test_split(x, y, np.arange(n), test_size=0.1, random_state = 42)
+    x_train, x_test, y_train, y_test, inds_train, inds_test = train_test_split(x, y, np.arange(n), test_size=0.1, random_state = random_state)
 
     n_test = x_test.shape[0]
 
 
     # Random forest on all data for PHATE embedding visualization
-    rfphate = RFGAP(oob_score = True, non_zero_diagonal = True, random_state = 42)
+    rfphate = RFGAP(oob_score = True, non_zero_diagonal = True, random_state = random_state)
     rfphate.fit(x, y)
     prox_phate = rfphate.get_proximities()
 
 
     # Random forest for uncertainty measures; using split datasets
-    rf = RFGAP(oob_score = True, random_state = 42)
+    rf = RFGAP(oob_score = True, random_state = random_state)
     rf.fit(x_train, y_train)
     prox = rf.get_proximities()
 
@@ -51,26 +73,8 @@ for data_name in datasets:
     trust_scores_test = rf.get_test_trust(x_test)
 
 
-    def reverse_scale_sklearn(x, min_size = 5, max_size = 100):
-        scaler = MinMaxScaler(feature_range = (min_size, max_size))
-
-        return max_size - scaler.fit_transform(x) + min_size
-
-
-    # Helper functions for plots
-    def reverse_scale(x, min_size = 5, max_size = 100, log_scale = False):
-        
-        if log_scale:
-            x = np.log(x + np.finfo(np.float64).eps)
-            x_scaled = max_size - (x - x.min())/(x.max() - x.min()) * max_size + min_size
-        else:
-            x_scaled = max_size - (x - x.min())/(x.max() - x.min()) * max_size + min_size
-
-        return x_scaled
-
-
     # RF-PHATE embedding for scatterplots
-    phate_op = PHATE(knn_dist = 'precomputed', verbose = 0)
+    phate_op = PHATE(knn_dist = 'precomputed', verbose = 0, random_state = random_state)
     emb = phate_op.fit_transform(prox_phate)
 
 
@@ -119,7 +123,7 @@ for data_name in datasets:
     plt.tight_layout()
 
     if save_figs:
-        plt.savefig('./figures/' + data_name + '_trust_scores_oob_test.pdf')
+        plt.savefig('./figures/' + data_name + '_' + str(random_state) + '_trust_scores_oob_test.pdf')
 
 
     # Get trust score quantiles for both OOB and Test points
@@ -137,17 +141,8 @@ for data_name in datasets:
 
     for q in oob_trust_quantiles:
         n_test_dropped.append(np.sum(trust_scores_test < q))
+
     n_test_dropped = np.array(n_test_dropped)
-
-
-    n_oob_dropped
-
-
-    oob_trust_quantiles
-
-
-    def nearest_value_index(arr, value):
-        return np.argmin(np.abs(arr - value))
 
 
     # Plot of test  and oob trust score quantiles
@@ -193,7 +188,7 @@ for data_name in datasets:
     plt.tight_layout()
 
     if save_figs:
-        plt.savefig('./figures/' + data_name + '_pct_dropped.pdf')
+        plt.savefig('./figures/' + data_name + '_' + str(random_state) + '_pct_dropped.pdf')
 
 
     # Check accuracy after dropping unclassifiable points
@@ -287,10 +282,10 @@ for data_name in datasets:
     plt.tight_layout()
 
     if save_figs:
-        plt.savefig('./figures/' + data_name + '_accuracy_after_dropped.pdf')
+        plt.savefig('./figures/' + data_name + '_' + str(random_state) + '_accuracy_after_dropped.pdf')
 
 
-    rffull = RFGAP(oob_score = True, random_state = 42)
+    rffull = RFGAP(oob_score = True, random_state = random_state)
     rffull.fit(x, y)
     full_trust_scores = rffull.get_trust_scores()
 
@@ -330,10 +325,10 @@ for data_name in datasets:
 
     plt.tight_layout()
     if save_figs:
-        plt.savefig('./figures/' + data_name + '_trust_scores_sequence.pdf')
+        plt.savefig('./figures/' + data_name + '_' + str(random_state) + '_trust_scores_sequence.pdf')
 
 
-    phate_op = PHATE(t = 150, gamma = 0, verbose = 0)
+    phate_op = PHATE(t = 150, gamma = 0, verbose = 0, random_state = random_state)
     phate_emb = phate_op.fit_transform(x)
 
 
@@ -396,6 +391,11 @@ for data_name in datasets:
 
 
     if save_figs:
-        table.to_csv('./trust_tables/' + data_name + '_trust_table.csv', index = False)
+        table.to_csv('./trust_tables/' + data_name + '_' + str(random_state) + '_trust_table.csv', index = False)
 
 
+
+from joblib import Parallel, delayed
+
+# Assuming random_states is your list of random states
+results = Parallel(n_jobs=-1)(delayed(run_all)(data_name, random_state) for random_state in random_states for data_name in data_names)
