@@ -23,6 +23,8 @@ else:
 from sklearn.utils.validation import check_is_fitted
 from scipy import stats
 
+import warnings
+
 def RFGAP(prediction_type = None, y = None, prox_method = 'rfgap', 
           matrix_type = 'sparse', triangular = True,
           non_zero_diagonal = False, force_symmetric = False, **kwargs):
@@ -968,6 +970,10 @@ def RFGAP(prediction_type = None, y = None, prox_method = 'rfgap',
 
                     ## Remove zero proximities so they will not be included in quantile
                     nearest_neighbor_residuals[test_proximities_sorted < 1e-10] = np.nan
+
+                case 'all':
+                    n_neighbors = nearest_neighbor_residuals.shape[1]
+                    
                 case _:
                     raise ValueError('n_neighbors must be an integer or "auto"')
                 
