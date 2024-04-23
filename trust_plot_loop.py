@@ -362,11 +362,6 @@ for data_name in datasets:
 
     thresholds_table = np.linspace(0.05, 0.95, int(0.95 / 0.05))
 
-
-    int(0.95 / 0.05)
-
-
-
     # Table of results
     thresholds_table = np.round(np.linspace(0.05, .95, 19), 2)
     # oob_trust_quantiles_table = np.quantile(trust_scores_oob, quantiles_table)
