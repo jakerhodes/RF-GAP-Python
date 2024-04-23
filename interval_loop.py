@@ -105,21 +105,16 @@ if __name__ == '__main__':
     random.seed(42)
     random_states = [random.randint(0, 10000) for _ in range(10)] 
 
-    n_jobs = 25
+    n_jobs = -3
 
-    # data_names = ['AirfoilSelfNoise', 'AirQuality', 'Automobile', 'AutoMPG',
-    #             'BeijingPM25', 'CommunityCrime', 'ComputerHardware',
-    #             'ConcreateCompressiveStrength', 'ConcreteSlumpTest', 
-    #             'CyclePowerPlant', 'EnergyEfficiency', 'FacebookMetrics',
-    #             'FiveCitiesPM25', 'Hydrodynamics', 'IstanbulStock', 
-    #             'Naval Propulsion Plants', 'OpticalNetwork', 
-    #             'Parkinsons', 'Protein', 'SML2010']
+    data_names = ['AirfoilSelfNoise', 'AirQuality', 'Automobile', 'AutoMPG',
+                'BeijingPM25', 'CommunityCrime', 'ComputerHardware',
+                'ConcreateCompressiveStrength', 'ConcreteSlumpTest', 
+                'CyclePowerPlant', 'EnergyEfficiency', 'FacebookMetrics',
+                'FiveCitiesPM25', 'Hydrodynamics', 'IstanbulStock', 
+                'Naval Propulsion Plants', 'OpticalNetwork', 
+                'Parkinsons', 'Protein', 'SML2010']
     
-    data_names = ['BeijingPM25']
-
-
-    # data_names = data_names[::-1]
-
     levels = [0.80, 0.90, 0.95, 0.99]
     levels = levels[::-1]
 
@@ -135,8 +130,6 @@ if __name__ == '__main__':
                 for random_state in random_states
                 ]
 
-
-    # Run the interval_loop function in parallel
     Parallel(n_jobs = n_jobs)(delayed(interval_loop)(*args) for args in arguments)
 
     

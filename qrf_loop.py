@@ -72,15 +72,6 @@ def interval_loop(data_name = None, level = 0.95, random_state = 42, test_size =
                                                                                random_state = random_state)
 
 
-    # rf = RFGAP(oob_score = True, random_state = random_state, y = y_test)
-    # rf.fit(x_train, y_train)
-
-
-
-    # y_pred_test, y_pred_lwr_test, y_pred_upr_test = rf.predict_interval(X_test = x_test,
-    #                                                                 n_neighbors = n_neighbors,
-    #                                                                 level = level)
-
 
     upr_quantile = 1 - (1 - level) / 2
     lwr_quantile = (1 - level) / 2
@@ -89,10 +80,7 @@ def interval_loop(data_name = None, level = 0.95, random_state = 42, test_size =
     qrf.fit(x_train, y_train)
 
     lwr = qrf.predict(x_test, quantiles = lwr_quantile)
-    # med = qrf.predict(x_test, quantiles = 0.5)
     upr = qrf.predict(x_test, quantiles = upr_quantile)
-
-    # results['oob_score'] = qrf.predict(x_train, quantiles = 0.5, oob_score = True)
 
     results['oob_score'] = np.nan
     results['test_score'] = np.nan
@@ -111,7 +99,6 @@ def interval_loop(data_name = None, level = 0.95, random_state = 42, test_size =
         json.dump(results, f)
 
 
-    
 if __name__ == '__main__':
 
     random.seed(42)
@@ -140,8 +127,6 @@ if __name__ == '__main__':
                 for random_state in random_states
                 ]
 
-
-    # Run the interval_loop function in parallel
     Parallel(n_jobs = n_jobs)(delayed(interval_loop)(*args) for args in arguments)
 
     
