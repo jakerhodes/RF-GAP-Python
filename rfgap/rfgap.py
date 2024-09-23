@@ -27,7 +27,7 @@ def RFGAP(prediction_type = None, y = None, prox_method = 'rfgap',
           matrix_type = 'sparse', triangular = True,
           non_zero_diagonal = False, force_symmetric = False, **kwargs):
     """
-    A factory method to conditionally create the RFGAP class based on RandomForestClassifier or RandomForestRegressor (depdning on the type of response, y)
+    A factory method to conditionally create the RFGAP class based on RandomForestClassifier or RandomForestRegressor (depending on the type of response, y)
 
     This class takes on a random forest predictors (sklearn) and adds methods to 
     construct proximities from the random forest object. 
