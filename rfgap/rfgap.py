@@ -136,6 +136,10 @@ def RFGAP(prediction_type = None, y = None, prox_method = 'rfgap',
 
             """
             super().fit(X, y, sample_weight)
+
+            # TODO: Check y type; make sure works with the rest of code.
+            self.y = y
+            self.n = len(y)
             self.leaf_matrix = self.apply(X)
 
             
@@ -417,6 +421,69 @@ def RFGAP(prediction_type = None, y = None, prox_method = 'rfgap',
                 return prox_sparse
 
 
+        def get_test_proximities(self, x_test: np.ndarray) -> np.ndarray:
+            """
+            Computes proximity values between test samples and the trained model using RF-GAP or OOB proximities.
+
+            This function modifies the internal proximity calculation attributes temporarily to compute
+            test proximities and then restores the original values.
+
+            Parameters
+            ----------
+            x_test : np.ndarray
+                Test dataset of shape (n_test, n_features) for which proximities are to be calculated.
+
+            Returns
+            -------
+            prox_test : np.ndarray
+                A proximity matrix of shape (n_test, n_train) representing the similarity between 
+                test samples and training samples.
+
+            Raises
+            ------
+            ValueError
+                If `x_test` is not a valid NumPy array or has an incorrect shape.
+            """
+
+            if not isinstance(x_test, np.ndarray):
+                raise ValueError("`x_test` must be a NumPy array.")
+
+            n_test, _ = x_test.shape
+
+            # Store current attributes to restore later
+            leaf_matrix_temp = self.leaf_matrix
+
+            try:
+                # Apply test data to obtain leaf assignments
+                self.leaf_matrix = self.apply(x_test)
+
+                # Temporarily adjust attributes for different proximity methods
+                if self.prox_method in ['oob', 'rfgap']:
+                    oob_indices_temp, self.oob_indices = self.oob_indices, np.ones((n_test, self.n_estimators))
+                    oob_leaves_temp, self.oob_leaves = self.oob_leaves, self.oob_indices * self.leaf_matrix
+
+                if self.prox_method == 'rfgap':
+                    in_bag_indices_temp, self.in_bag_indices = self.in_bag_indices, np.zeros((n_test, self.n_estimators))
+                    in_bag_leaves_temp, self.in_bag_leaves = self.in_bag_leaves, self.in_bag_indices * self.leaf_matrix
+                    in_bag_counts_temp, self.in_bag_counts = self.in_bag_counts, np.zeros((n_test, self.n_estimators))
+
+                # Calculate proximities using updated test attributes
+                prox_test = self.get_proximities()
+
+            finally:
+                # Restore original attributes
+                self.leaf_matrix = leaf_matrix_temp
+                if self.prox_method in ['oob', 'rfgap']:
+                    self.oob_indices, self.oob_leaves = oob_indices_temp, oob_leaves_temp
+                if self.prox_method == 'rfgap':
+                    self.in_bag_indices, self.in_bag_leaves, self.in_bag_counts = (
+                        in_bag_indices_temp, in_bag_leaves_temp, in_bag_counts_temp
+                    )
+
+            return prox_test
+
+
+
         def prox_extend(self, data):
             """Method to compute proximities between the original training 
             observations and a set of new observations.
@@ -582,7 +649,7 @@ def RFGAP(prediction_type = None, y = None, prox_method = 'rfgap',
             self.trust_quantiles = np.quantile(self.trust_scores, quantile_levels)
 
             # Compute accuracy rejection curve metrics
-            self.trust_auc, self.trust_accuracy_drop, self.trust_n_drop = self.accuracy_rejection_curve_area(
+            self.trust_auc, self.trust_accuracy_drop, self.trust_n_drop = self.accuracy_rejection_auc(
                 self.trust_quantiles, self.trust_scores
             )
 
@@ -854,7 +921,7 @@ def RFGAP(prediction_type = None, y = None, prox_method = 'rfgap',
                 self.conformity_quantiles = np.quantile(self.conformity_scores, np.linspace(0, 0.99, 100))
 
                 # Compute accuracy rejection curve metrics
-                self.conformity_auc, self.conformity_accuracy_drop, self.conformity_n_drop = self.accuracy_rejection_curve_area(
+                self.conformity_auc, self.conformity_accuracy_drop, self.conformity_n_drop = self.accuracy_rejection_auc(
                     self.conformity_quantiles, self.conformity_scores
                 )
 
@@ -892,5 +959,68 @@ def RFGAP(prediction_type = None, y = None, prox_method = 'rfgap',
             finally:
                 # Restore the original proximity method
                 self.prox_method = original_prox_method
+
+
+        def accuracy_rejection_auc(self, quantiles: np.ndarray, scores: np.ndarray) -> tuple:
+            """
+            Computes the area under the accuracy-rejection curve (AUC) based on 
+            nonconformity scores and rejection quantiles.
+
+            The function evaluates model accuracy at different levels of rejection 
+            (i.e., removing samples with high nonconformity scores). The result helps 
+            assess the trade-off between data rejection and classification accuracy.
+
+            Parameters
+            ----------
+            quantiles : np.ndarray
+                Array of quantile thresholds used for rejection.
+            
+            scores : np.ndarray
+                Array of nonconformity scores for each sample, used to determine 
+                which samples should be rejected at each quantile level.
+
+            Returns
+            -------
+            auc : float
+                The area under the accuracy-rejection curve, computed using the trapezoidal rule.
+            
+            accuracy_drop : np.ndarray
+                An array of accuracy values at different rejection levels.
+            
+            n_dropped : np.ndarray
+                An array representing the proportion of rejected samples at each quantile.
+            
+            Raises
+            ------
+            ValueError
+                If `quantiles` and `scores` have incompatible dimensions.
+            """
+
+            if not isinstance(quantiles, np.ndarray) or not isinstance(scores, np.ndarray):
+                raise ValueError("Both `quantiles` and `scores` must be NumPy arrays.")
+            
+            if scores.shape[0] != self.y.shape[0]:
+                raise ValueError("Mismatch between `scores` length and the number of target labels in `self.y`.")
+
+            # Get out-of-bag (OOB) predictions from the RandomForest model
+            oob_preds = np.argmax(self.oob_decision_function_, axis=1)
+
+            # Compute the proportion of dropped samples for each quantile threshold
+            n_dropped = np.array([np.sum(scores <= q) / len(scores) for q in quantiles])
+
+            # Compute classification accuracy among remaining samples for each quantile threshold
+            accuracy_drop = np.array([
+                np.mean(self.y[scores >= q] == oob_preds[scores >= q]) if np.any(scores >= q) else 1.0 
+                for q in quantiles
+            ])
+
+            # Compute the area under the accuracy-rejection curve (AUC)
+            auc = np.trapz(accuracy_drop, n_dropped)
+
+            return auc, accuracy_drop, n_dropped
+
+
+
+
 
     return RFGAP(prox_method = prox_method, matrix_type = matrix_type, triangular = triangular, **kwargs)
