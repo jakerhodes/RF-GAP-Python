@@ -81,12 +81,19 @@ def RFGAP(prediction_type = None, y = None, prox_method = 'rfgap',
     
 
     if prediction_type is None and y is not None:
-        y_dtype = y.dtype if isinstance(y, (np.ndarray, pd.Series)) else np.array(y).dtype
-        if np.issubdtype(y_dtype, np.floating):
-            prediction_type = 'regression'
+        if isinstance(y, pd.Series):
+            y_array = y.to_numpy()
         else:
-            prediction_type = 'classification'
+            y_array = np.array(y)
 
+        try:
+            if np.issubdtype(y_array.dtype, np.floating):
+                prediction_type = 'regression'
+            else:
+                prediction_type = 'classification'
+        except TypeError:
+            prediction_type = 'classification'
+            y_array = y_array.astype(str)
 
     if prediction_type == 'classification':
         rf = RandomForestClassifier
