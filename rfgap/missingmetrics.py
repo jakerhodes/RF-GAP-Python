@@ -7,7 +7,7 @@ from sklearn.metrics.cluster import mutual_info_score
 
 from scipy.stats import entropy, wasserstein_distance, spearmanr, gaussian_kde
 import numpy as np
-from ot import sliced_wasserstein_distance
+# from ot import sliced_wasserstein_distance
 
 
 #----------------------------------------------------------------------------#
@@ -281,43 +281,43 @@ def feature_metrics(x, imputed, missing=None):
 #------------------------------------------------------------------------#
 
 # Do we need to separate for variable type?
-def joint_metrics(x, imputed, n_projections = 100, random_state = None):
+# def joint_metrics(x, imputed, n_projections = 100, random_state = None):
 
-    """
-    Compute the sliced Wasserstein distance between the original data (x) 
-    and the imputed data.
+#     """
+#     Compute the sliced Wasserstein distance between the original data (x) 
+#     and the imputed data.
 
-    Parameters
-    ----------
-    x : array-like
-        Original data.
-    imputed : array-like
-        Imputed data.
-    n_projections : int, optional, default=100
-        Number of random projections.
+#     Parameters
+#     ----------
+#     x : array-like
+#         Original data.
+#     imputed : array-like
+#         Imputed data.
+#     n_projections : int, optional, default=100
+#         Number of random projections.
 
-    Returns
-    -------
-    float
-        The sliced Wasserstein distance as a measure of discrepancy.
-    """
+#     Returns
+#     -------
+#     float
+#         The sliced Wasserstein distance as a measure of discrepancy.
+#     """
 
-    if random_state is not None:
-        np.random.seed(random_state)
+#     if random_state is not None:
+#         np.random.seed(random_state)
 
-    x = np.asarray(x)
-    imputed = np.asarray(imputed)
+#     x = np.asarray(x)
+#     imputed = np.asarray(imputed)
 
-    # Ensure the inputs have the same shape
-    if x.shape != imputed.shape:
-        raise ValueError(f"Shape mismatch: x has shape {x.shape}, "
-                         f"while imputed has shape {imputed.shape}.")
+#     # Ensure the inputs have the same shape
+#     if x.shape != imputed.shape:
+#         raise ValueError(f"Shape mismatch: x has shape {x.shape}, "
+#                          f"while imputed has shape {imputed.shape}.")
 
-    # Validate the number of projections
-    if not isinstance(n_projections, int) or n_projections <= 0:
-        raise ValueError("n_projections must be a positive integer.")
+#     # Validate the number of projections
+#     if not isinstance(n_projections, int) or n_projections <= 0:
+#         raise ValueError("n_projections must be a positive integer.")
 
-    return sliced_wasserstein_distance(x, imputed, n_projections=n_projections, seed = random_state)
+#     return sliced_wasserstein_distance(x, imputed, n_projections=n_projections, seed = random_state)
 
 
 
