@@ -1,24 +1,23 @@
 # Imports
 import numpy as np
 from scipy import sparse
-from sklearn.preprocessing import normalize
+import pandas as pd
 
-#sklearn imports
+# sklearn imports
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.ensemble import RandomForestRegressor
 import sklearn
+from sklearn import metrics
 
 from distutils.version import LooseVersion
 if LooseVersion(sklearn.__version__) >= LooseVersion("0.24"):
     # In sklearn version 0.24, forest module changed to be private.
     from sklearn.ensemble._forest import _generate_unsampled_indices
-    from sklearn.ensemble import _forest as forest
     from sklearn.ensemble._forest import _generate_sample_indices
 else:
     # Before sklearn version 0.24, forest was public, supporting this.
     from sklearn.ensemble.forest import _generate_unsampled_indices # Remove underscore from _forest
     from sklearn.ensemble.forest import _generate_sample_indices # Remove underscore from _forest
-    from sklearn.ensemble import forest
 
 from sklearn.utils.validation import check_is_fitted
 import warnings
@@ -82,7 +81,8 @@ def RFGAP(prediction_type = None, y = None, prox_method = 'rfgap',
     
 
     if prediction_type is None and y is not None:
-        if np.dtype(y) == 'float64' or np.dtype(y) == 'float32':
+        y_dtype = y.dtype if isinstance(y, (np.ndarray, pd.Series)) else np.array(y).dtype
+        if np.issubdtype(y_dtype, np.floating):
             prediction_type = 'regression'
         else:
             prediction_type = 'classification'
@@ -582,8 +582,6 @@ def RFGAP(prediction_type = None, y = None, prox_method = 'rfgap',
 
         def prox_predict(self, y):
             
-            # TODO: need to compute proximities for new points, test points added
-
             prox = self.get_proximities()
 
             if self.prediction_type == 'classification':
@@ -591,12 +589,12 @@ def RFGAP(prediction_type = None, y = None, prox_method = 'rfgap',
                 y_one_hot[np.arange(y.size), y] = 1
 
                 prox_preds = np.argmax(prox @ y_one_hot, axis = 1)
-                self.prox_predict_score = sklearn.metrics.accuracy_score(y, prox_preds)
+                self.prox_predict_score = metrics.accuracy_score(y, prox_preds)
                 return prox_preds
             
             else:
                 prox_preds = prox @ y
-                self.prox_predict_score = sklearn.metrics.mean_squared_error(y, prox_preds)
+                self.prox_predict_score = metrics.mean_squared_error(y, prox_preds)
                 return prox_preds
             
 
@@ -636,7 +634,8 @@ def RFGAP(prediction_type = None, y = None, prox_method = 'rfgap',
 
             # Ensure proximities are computed
             if not hasattr(self, "proximities"):
-                self.proximities = self.get_proximities().toarray()
+                proximities_result = self.get_proximities()
+                self.proximities = proximities_result.toarray() if isinstance(proximities_result, sparse.csr_matrix) else proximities_result
 
             elif isinstance(self.proximities, sparse.csr_matrix):
                 self.proximities = self.proximities.toarray()
