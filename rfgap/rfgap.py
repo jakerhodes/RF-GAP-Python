@@ -422,7 +422,7 @@ def RFGAP(prediction_type = None, y = None, prox_method = 'rfgap',
                 prox_sparse = (prox_sparse + prox_sparse.transpose()) / 2
 
             if self.matrix_type == 'dense':
-                return np.array(prox_sparse.todense())
+                return np.array(prox_sparse.toarray())
             
             else:
                 return prox_sparse
@@ -582,7 +582,7 @@ def RFGAP(prediction_type = None, y = None, prox_method = 'rfgap',
             prox_sparse = sparse.csr_matrix((np.array(prox_vals), (np.array(cols), np.array(rows))), shape = (n_ext, n))
 
             if self.matrix_type == 'dense':
-                return prox_sparse.todense() 
+                return prox_sparse.toarray() 
             else:
                 return prox_sparse
             
