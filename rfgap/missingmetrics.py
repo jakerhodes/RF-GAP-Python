@@ -7,7 +7,6 @@ from sklearn.metrics.cluster import mutual_info_score
 
 from scipy.stats import entropy, wasserstein_distance, spearmanr, gaussian_kde
 import numpy as np
-import pandas as pd
 from ot import sliced_wasserstein_distance
 
 

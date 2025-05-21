@@ -1,3 +1,2 @@
 from .rfgap import RFGAP
-from .rfgap import missingmetrics
-from .rfgap import impute
+from .impute import rfgap_impute
