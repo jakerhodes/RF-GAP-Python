@@ -2,7 +2,7 @@ from sklearn.impute import KNNImputer
 import pandas as pd
 import numpy as np
 from rfgap import RFGAP
-from missingmetrics import missing_metrics
+from .missingmetrics import missing_metrics
 import warnings
 
 # TODO: Return RF from best model?
