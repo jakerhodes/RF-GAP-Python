@@ -1042,7 +1042,11 @@ def RFGAP(prediction_type = None, y = None, prox_method = 'rfgap',
             outlier_scores : np.ndarray
                 Standardized outlier scores (higher = more outlier-like)
             """
-            y_arr = y.to_numpy()
+            try:
+                y_arr = y.to_numpy()
+            except:
+                y_arr = np.asarray(y)
+                
             n_samples = len(y_arr)
 
             non_zero_diagonal = self.non_zero_diagonal
