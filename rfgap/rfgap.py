@@ -1047,12 +1047,18 @@ def RFGAP(prediction_type = None, y = None, prox_method = 'rfgap',
 
             non_zero_diagonal = self.non_zero_diagonal
 
+            is_symmetric = self.force_symmetric
+
             if non_zero_diagonal:
                 self.non_zero_diagonal = False
+                if is_symmetric:
+                    self.force_symmetric = False
+
                 proximities = self.get_proximities()
                 proximities = proximities.toarray() if isinstance(proximities, sparse.csr_matrix) else proximities
 
             self.non_zero_diagonal = non_zero_diagonal
+            self.force_symmetric = is_symmetric
 
             # Ensure matrix is dense
             if not isinstance(proximities, np.ndarray):
