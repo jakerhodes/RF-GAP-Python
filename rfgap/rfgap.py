@@ -1026,85 +1026,85 @@ def RFGAP(prediction_type = None, y = None, prox_method = 'rfgap',
             return auc, accuracy_drop, n_dropped
 
 
-    def get_outlier_scores(self, y, scaling = 'normalize'):
-        """
-        Compute class-relative outlier scores based on proximity matrix.
+        def get_outlier_scores(self, y, scaling = 'normalize'):
+            """
+            Compute class-relative outlier scores based on proximity matrix.
 
-        Parameters:
-        -----------
-        y_train : pandas Series
-            Class labels for training samples (e.g., '0', '1', ...)
-        prox_matrix : scipy.sparse matrix or np.ndarray
-            Square proximity matrix (n_samples x n_samples)
+            Parameters:
+            -----------
+            y_train : pandas Series
+                Class labels for training samples (e.g., '0', '1', ...)
+            prox_matrix : scipy.sparse matrix or np.ndarray
+                Square proximity matrix (n_samples x n_samples)
 
-        Returns:
-        --------
-        outlier_scores : np.ndarray
-            Standardized outlier scores (higher = more outlier-like)
-        """
-        y_arr = y.to_numpy()
-        n_samples = len(y_arr)
+            Returns:
+            --------
+            outlier_scores : np.ndarray
+                Standardized outlier scores (higher = more outlier-like)
+            """
+            y_arr = y.to_numpy()
+            n_samples = len(y_arr)
 
-        non_zero_diagonal = self.non_zero_diagonal
+            non_zero_diagonal = self.non_zero_diagonal
 
-        if non_zero_diagonal:
-            self.non_zero_diagonal = False
-            proximities = self.get_proximities()
-            proximities = proximities.toarray() if isinstance(proximities, sparse.csr_matrix) else proximities
+            if non_zero_diagonal:
+                self.non_zero_diagonal = False
+                proximities = self.get_proximities()
+                proximities = proximities.toarray() if isinstance(proximities, sparse.csr_matrix) else proximities
 
-        self.non_zero_diagonal = non_zero_diagonal
+            self.non_zero_diagonal = non_zero_diagonal
 
-        # Ensure matrix is dense
-        if not isinstance(proximities, np.ndarray):
-            prox_dense = proximities.toarray()
-        else:
-            prox_dense = proximities
-
-        # Compute average squared proximities to same-class samples
-        avg_prox = np.zeros(n_samples)
-        for cls in np.unique(y_arr):
-            idx = np.where(y_arr == cls)[0]
-            prox_sub = prox_dense[np.ix_(idx, idx)]
-            avg_prox[idx] = np.sum(prox_sub ** 2, axis=1)
-
-        # Check this out
-        if np.any(avg_prox == 0):
-            print("Warning: Some samples have zero average proximity to same-class samples. This may affect outlier score calculation.")
-
-        avg_prox[avg_prox == 0] = 1e-10
-
-        # Compute raw outlier scores
-        raw_scores = n_samples / avg_prox
-
-        # Standardize within each class
-        outlier_scores = np.zeros_like(raw_scores)
-        for cls in np.unique(y_arr):
-            idx = np.where(y_arr == cls)[0]
-            class_scores = raw_scores[idx]
-
-            median = np.median(class_scores)
-            abs_dev = np.median(np.abs(class_scores - median))
-
-            if abs_dev == 0:
-                outlier_scores[idx] = 0
+            # Ensure matrix is dense
+            if not isinstance(proximities, np.ndarray):
+                prox_dense = proximities.toarray()
             else:
-                outlier_scores[idx] = np.abs((class_scores - median)) / abs_dev
+                prox_dense = proximities
 
-        if scaling == 'log':
-            # Apply log scaling to outlier scores
-            outlier_scores = np.log1p(outlier_scores)
+            # Compute average squared proximities to same-class samples
+            avg_prox = np.zeros(n_samples)
+            for cls in np.unique(y_arr):
+                idx = np.where(y_arr == cls)[0]
+                prox_sub = prox_dense[np.ix_(idx, idx)]
+                avg_prox[idx] = np.sum(prox_sub ** 2, axis=1)
 
-        elif scaling == 'normalize':
-            # Normalize outlier scores to [0, 1] range
-            min_score = np.min(outlier_scores)
-            max_score = np.max(outlier_scores)
+            # Check this out
+            if np.any(avg_prox == 0):
+                print("Warning: Some samples have zero average proximity to same-class samples. This may affect outlier score calculation.")
 
-            if max_score - min_score > 0:
-                outlier_scores = (outlier_scores - min_score) / (max_score - min_score)
-            else:
-                outlier_scores = np.zeros_like(outlier_scores)
+            avg_prox[avg_prox == 0] = 1e-10
 
-        return outlier_scores
+            # Compute raw outlier scores
+            raw_scores = n_samples / avg_prox
+
+            # Standardize within each class
+            outlier_scores = np.zeros_like(raw_scores)
+            for cls in np.unique(y_arr):
+                idx = np.where(y_arr == cls)[0]
+                class_scores = raw_scores[idx]
+
+                median = np.median(class_scores)
+                abs_dev = np.median(np.abs(class_scores - median))
+
+                if abs_dev == 0:
+                    outlier_scores[idx] = 0
+                else:
+                    outlier_scores[idx] = np.abs((class_scores - median)) / abs_dev
+
+            if scaling == 'log':
+                # Apply log scaling to outlier scores
+                outlier_scores = np.log1p(outlier_scores)
+
+            elif scaling == 'normalize':
+                # Normalize outlier scores to [0, 1] range
+                min_score = np.min(outlier_scores)
+                max_score = np.max(outlier_scores)
+
+                if max_score - min_score > 0:
+                    outlier_scores = (outlier_scores - min_score) / (max_score - min_score)
+                else:
+                    outlier_scores = np.zeros_like(outlier_scores)
+
+            return outlier_scores
 
 
 
