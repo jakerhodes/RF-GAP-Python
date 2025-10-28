@@ -9,7 +9,7 @@ from sklearn.ensemble import RandomForestRegressor
 import sklearn
 from sklearn import metrics
 
-from distutils.version import LooseVersion
+from packaging.version import Version as LooseVersion  # Handles python>3.12
 if LooseVersion(sklearn.__version__) >= LooseVersion("0.24"):
     # In sklearn version 0.24, forest module changed to be private.
     from sklearn.ensemble._forest import _generate_unsampled_indices
@@ -24,7 +24,7 @@ import warnings
 
 def RFGAP(prediction_type = None, y = None, prox_method = 'rfgap', 
           matrix_type = 'sparse', triangular = True,
-          non_zero_diagonal = False, force_symmetric = False, **kwargs):
+          non_zero_diagonal = True, force_symmetric = False, **kwargs):
     """
     A factory method to conditionally create the RFGAP class based on RandomForestClassifier or RandomForestRegressor (depdning on the type of response, y)
 
