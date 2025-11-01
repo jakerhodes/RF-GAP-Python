@@ -8,6 +8,7 @@ __pycache__/
 
 # Experiments
 experiments/
+datasets/
 nohup.out
 
 # macOS system files
