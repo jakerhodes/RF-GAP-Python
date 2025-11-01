@@ -8,6 +8,11 @@ __pycache__/
 
 # Experiments
 experiments/
+nohup.out
+
+# macOS system files
+.DS_Store
+**/.DS_Store
 
 # Distribution / packaging
 .Python
