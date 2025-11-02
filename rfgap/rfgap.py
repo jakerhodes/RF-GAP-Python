@@ -249,7 +249,7 @@ def RFGAP(prediction_type = None, y = None, prox_method = 'rfgap',
     class RFGAP(rf):
 
         def __init__(self, prox_method = prox_method, matrix_type = matrix_type, 
-                     non_zero_diagonal = non_zero_diagonal, normalize = normalize,
+                     non_zero_diagonal = non_zero_diagonal, normalize = normalize, force_symmetric = force_symmetric,
                      **kwargs):
 
             super(RFGAP, self).__init__(**kwargs)
