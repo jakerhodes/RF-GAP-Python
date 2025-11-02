@@ -264,8 +264,8 @@ def RFGAP(prediction_type = None, y = None, prox_method = 'rfgap',
 
 
         #TODO: x_test is confusing here. rfgap does not accomodate test-test proximities, so passing x_test
-        # results in full zeros for test-test proximities in get_proximities(). Consider making it deprecated, and only
-        # use prox_extend() for test-train proximities, unless test-test proximities make sense (e.g. using prox_method='oob' or 'original')
+        # results in full zeros for test-test proximities in get_proximities(). This makes sense for other prox_method though.
+        # This could be useful for constructing semi-supervised kernel matrix with an adapted RFGAP definition for test-test proximities. To be continued...
         def fit(self, X, y, sample_weight = None, x_test = None):
 
             """Fits the random forest and generates necessary pieces to fit proximities
