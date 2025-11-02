@@ -259,6 +259,7 @@ def RFGAP(prediction_type = None, y = None, prox_method = 'rfgap',
             self.prediction_type = prediction_type
             self.non_zero_diagonal = non_zero_diagonal
             self.normalize = normalize
+            self.min_diag = None  # To store min diagonal value for extended proximity normalization (not recommended)
             self.force_symmetric = force_symmetric
 
 
