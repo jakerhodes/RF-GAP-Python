@@ -6,6 +6,15 @@ __pycache__/
 # C extensions
 *.so
 
+# Experiments
+experiments/
+datasets/
+nohup.out
+
+# macOS system files
+.DS_Store
+**/.DS_Store
+
 # Distribution / packaging
 .Python
 build/
