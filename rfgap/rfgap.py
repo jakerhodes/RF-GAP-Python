@@ -171,7 +171,7 @@ def _get_prox_extend_tree_chunk_rfgap(t, extended_leaf_matrix, train_leaves_subs
 
 def RFGAP(prediction_type = None, y = None, prox_method = 'rfgap', 
           matrix_type = 'sparse',
-          non_zero_diagonal = True, normalize = False, force_symmetric = False, **kwargs):
+          non_zero_diagonal = False, normalize = False, force_symmetric = False, **kwargs):
     """
     A factory method to conditionally create the RFGAP class based on RandomForestClassifier or RandomForestRegressor (depending on the type of response, y)
 
@@ -200,7 +200,7 @@ def RFGAP(prediction_type = None, y = None, prox_method = 'rfgap',
 
     non_zero_diagonal : bool
         Only used for RF-GAP proximities. Should the diagonal entries be computed as non-zero? 
-        (default is True)
+        (default is False, as in original RF-GAP definition)
     
     normalize : bool
         Only used for RF-GAP proximities with non-zero diagonal. Should the proximities be normalized to be between 0 (min) and 1 (max)?
