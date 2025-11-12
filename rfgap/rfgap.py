@@ -171,7 +171,7 @@ def _get_prox_extend_tree_chunk_rfgap(t, extended_leaf_matrix, train_leaves_subs
 
 def RFGAP(prediction_type = None, y = None, prox_method = 'rfgap', 
           matrix_type = 'sparse',
-          non_zero_diagonal = False, normalize = False, force_symmetric = False, **kwargs):
+          non_zero_diagonal = False, force_symmetric = False, **kwargs):
     """
     A factory method to conditionally create the RFGAP class based on RandomForestClassifier or RandomForestRegressor (depending on the type of response, y)
 
@@ -201,10 +201,6 @@ def RFGAP(prediction_type = None, y = None, prox_method = 'rfgap',
     non_zero_diagonal : bool
         Only used for RF-GAP proximities. Should the diagonal entries be computed as non-zero? 
         (default is False, as in original RF-GAP definition)
-    
-    normalize : bool
-        Only used for RF-GAP proximities with non-zero diagonal. Should the proximities be normalized to be between 0 (min) and 1 (max)?
-        Otherwise, the proximities are not normalized. (default is False)
 
     force_symmetric : bool
         Enforce symmetry of proximities. (default is False)
@@ -249,7 +245,7 @@ def RFGAP(prediction_type = None, y = None, prox_method = 'rfgap',
     class RFGAP(rf):
 
         def __init__(self, prox_method = prox_method, matrix_type = matrix_type, 
-                     non_zero_diagonal = non_zero_diagonal, normalize = normalize, force_symmetric = force_symmetric,
+                     non_zero_diagonal = non_zero_diagonal, force_symmetric = force_symmetric,
                      **kwargs):
 
             super(RFGAP, self).__init__(**kwargs)
@@ -258,8 +254,6 @@ def RFGAP(prediction_type = None, y = None, prox_method = 'rfgap',
             self.matrix_type = matrix_type
             self.prediction_type = prediction_type
             self.non_zero_diagonal = non_zero_diagonal
-            self.normalize = normalize
-            self.min_diag = None  # To store min diagonal value for extended proximity normalization (not recommended)
             self.force_symmetric = force_symmetric
 
 
@@ -611,40 +605,8 @@ def RFGAP(prediction_type = None, y = None, prox_method = 'rfgap',
                     Terms_ii = Ratios_ii * self.in_bag_indices
                     Diagonal_sum = np.sum(Terms_ii, axis=1)
                     Diagonal_vec = Diagonal_sum / S_in_i_safe
-                    self.min_diag = np.min(Diagonal_vec)  # Store min diagonal value to properly normalize extended proximities later
-
-                    if self.normalize:
-                        if self.verbose:
-                            print("Normalizing 'rfgap' proximities using row maximums...")
-
-                        # Create a temporary matrix that includes the calculated diagonal
-                        diag_matrix_temp = sparse.diags(Diagonal_vec, format='csr')
-                        
-                        # Add diagonal to current prox_sparse before finding max
-                        prox_matrix_with_diag = prox_sparse + diag_matrix_temp
-
-                        # Find the maximum value in each row
-                        max_vals_per_row = prox_matrix_with_diag.max(axis=1).toarray().ravel()
-
-                        # Avoid division by zero
-                        max_vals_per_row_safe = max_vals_per_row.copy()
-                        max_vals_per_row_safe[max_vals_per_row_safe == 0] = 1.0
-
-                        # Create inverse scaler
-                        inv_max_scaler = sparse.diags(1.0 / max_vals_per_row_safe, format='csr')
-
-                        # Scale the matrix (including diagonal) by row maximums
-                        # Store result back into prox_sparse
-                        prox_sparse = inv_max_scaler @ prox_matrix_with_diag
-
-                        # Explicitly set the diagonal to 1 AFTER scaling
-                        with warnings.catch_warnings():
-                            warnings.simplefilter("ignore", category=sparse.SparseEfficiencyWarning)
-                        prox_sparse.setdiag(1.0)
-
-                    else: # Not normalizing, just add diagonal
-                         diag_matrix = sparse.diags(Diagonal_vec, format='csr')
-                         prox_sparse = prox_sparse + diag_matrix # Add diagonal directly
+                    diag_matrix = sparse.diags(Diagonal_vec, format='csr')
+                    prox_sparse = prox_sparse + diag_matrix # Add diagonal directly
 
             else:
                  raise ValueError(f"Proximity method '{self.prox_method}' not recognized.")
@@ -778,22 +740,6 @@ def RFGAP(prediction_type = None, y = None, prox_method = 'rfgap',
                 # --- END: PARALLEL MODIFICATION ---
                 
                 prox_sparse = prox_matrix_sum / num_trees
-                
-                # Apply Normalization to extended proximities (NOT RECOMMENDED)
-                if self.non_zero_diagonal and self.normalize:
-                    if self.verbose:
-                        print("Applying 'rfgap' normalization to extended proximities...")
-
-                    if self.min_diag is not None and self.min_diag > 0:
-                        prox_sparse.data = prox_sparse.data / self.min_diag
-
-                    # Vectorized normalization
-                    if prox_sparse.nnz > 0:  # Check if there are non-zero entries
-                        max_vals_per_row = prox_sparse.max(axis=1).toarray().ravel()  # Get max per row
-                        max_vals_per_row[max_vals_per_row <= 1] = 1.0  #  Ceiling at 1 to avoid inflating test proximities
-                        inv_scalers = 1.0 / max_vals_per_row  # Normalize rows by their max
-                        inv_scaler_matrix = sparse.diags(inv_scalers, format='csr')
-                        prox_sparse = inv_scaler_matrix @ prox_sparse
             
             else:
                  raise ValueError(f"Proximity method '{self.prox_method}' not recognized.")
