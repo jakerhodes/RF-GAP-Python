@@ -257,9 +257,6 @@ def RFGAP(prediction_type = None, y = None, prox_method = 'rfgap',
             self.force_symmetric = force_symmetric
 
 
-        #TODO: x_test is confusing here. rfgap does not accomodate test-test proximities, so passing x_test
-        # results in full zeros for test-test proximities in get_proximities(). This makes sense for other prox_method though.
-        # This could be useful for constructing semi-supervised kernel matrix with an adapted RFGAP definition for test-test proximities. To be continued...
         def fit(self, X, y, sample_weight = None, x_test = None):
 
             """Fits the random forest and generates necessary pieces to fit proximities
@@ -279,6 +276,10 @@ def RFGAP(prediction_type = None, y = None, prox_method = 'rfgap',
                 create child nodes with net zero or negative weight are ignored while searching 
                 for a split in each node. In the case of classification, splits are also ignored 
                 if they would result in any single class carrying a negative weight in either child node.
+            
+            x_test : {array-like, sparse matrix} of shape (n_test_samples, n_features), default=None
+                Optional test input samples. Internally, its dtype will be converted to dtype=np.float32.
+                If a sparse matrix is provided, it will be converted into a sparse csc_matrix.
 
             Returns
             -------
@@ -294,44 +295,45 @@ def RFGAP(prediction_type = None, y = None, prox_method = 'rfgap',
             # Refer to demo notebook on Iris dataset with string labels.
             self.y = y
             self.n = len(y)
-            self.leaf_matrix = self.apply(X)
-            
+            self.leaf_matrix = self.apply(X) # (n_train, T)
+
+            # Store n_test count, which acts as a flag for get_proximities
+            self.n_test_ = 0
             if x_test is not None:
-                n_test = np.shape(x_test)[0]
-                
-                self.leaf_matrix_test = self.apply(x_test)
-                self.leaf_matrix = np.concatenate((self.leaf_matrix, self.leaf_matrix_test), axis = 0)
-            
-                        
-            if self.prox_method == 'oob':
-                self.oob_indices = self.get_oob_indices(X)
-                
+                self.n_test_ = np.shape(x_test)[0]
+
+            # For original and oob, we concatenate matrices if x_test is provided.
+            # For rfgap, we *ignore* x_test here and only build train-only matrices.
+            if self.prox_method == 'original':
                 if x_test is not None:
+                    self.leaf_matrix_test = self.apply(x_test)
+                    self.leaf_matrix = np.concatenate((self.leaf_matrix, self.leaf_matrix_test), axis = 0)
+            
+            elif self.prox_method == 'oob':
+                self.oob_indices = self.get_oob_indices(X) # (n_train, T)
+                if x_test is not None:
+                    # n_test is defined above
+                    self.leaf_matrix_test = self.apply(x_test)
+                    self.leaf_matrix = np.concatenate((self.leaf_matrix, self.leaf_matrix_test), axis = 0)
                     # Append test set info. Test samples are always OOB (1s)
-                    self.oob_indices = np.concatenate((self.oob_indices, np.ones((n_test, self.n_estimators))))
+                    self.oob_indices = np.concatenate((self.oob_indices, np.ones((self.n_test_, self.n_estimators))))
+            
+            elif self.prox_method == 'rfgap':
+                # RF-GAP logic *only* builds (n_train, T) matrices.
+                # The x_test argument is ignored for this prox_method in fit().
                 
-            
-            if self.prox_method == 'rfgap':
-            
                 # Get OOB status (n_samples, n_trees)
                 self.oob_indices = self.get_oob_indices(X)
                 # Get in-bag counts (M matrix) (n_samples, n_trees)
                 self.in_bag_counts = self.get_in_bag_counts(X)
-            
-                
-                if x_test is not None:
-                    # Append test set info. Test samples are always OOB (1s)
-                    self.oob_indices = np.concatenate((self.oob_indices, np.ones((n_test, self.n_estimators))))
-                    # ...and have zero in-bag counts (0s)
-                    self.in_bag_counts = np.concatenate((self.in_bag_counts, np.zeros((n_test, self.n_estimators))))                
-                                
                 # In-bag status is the inverse of OOB
                 self.in_bag_indices = 1 - self.oob_indices
                 
                 if self.verbose:
                     print("Pre-calculating K matrix (in-bag leaf counts)...")
                 
-                _, T = self.leaf_matrix.shape
+                # Note: self.leaf_matrix is (n_train, T) here, so T is correct
+                _, T = self.leaf_matrix.shape 
                 
                 # --- START: K-Matrix Calculation (Parallelized) ---
                 # This block pre-calculates the K matrix, which is the RF-GAP normalization term.
@@ -367,7 +369,7 @@ def RFGAP(prediction_type = None, y = None, prox_method = 'rfgap',
                 # Run the K-matrix column calculation in parallel for each tree
                 results = Parallel(n_jobs=self.n_jobs_, verbose=self.verbose)(
                     delayed(_get_k_matrix_chunk)(
-                        t, self.leaf_matrix, self.in_bag_counts
+                        t, self.leaf_matrix, self.in_bag_counts # Pass (n_train, T) matrices
                     ) for t in range(T)
                 )
                 
@@ -380,7 +382,7 @@ def RFGAP(prediction_type = None, y = None, prox_method = 'rfgap',
                 K[K == 0] = 1.0 
 
                 # Store the final matrix in the class instance
-                self.K_matrix = K
+                self.K_matrix = K # This is (n_train, T)
             
         
         
@@ -481,14 +483,20 @@ def RFGAP(prediction_type = None, y = None, prox_method = 'rfgap',
             """
             This method produces a proximity matrix for the random forest object.
             
-            It uses a hybrid approach:
-            - 'original': Uses a highly optimized Hamming distance calculation.
-            - 'oob', 'rfgap': Use a fast, parallelized T-loop (looping over trees).
+            - For 'original' and 'oob':
+                - If `x_test` was NOT provided to `fit()`, returns (n_train, n_train) matrix.
+                - If `x_test` WAS provided to `fit()`, returns the full (n_total, n_total) matrix.
+            
+            - For 'rfgap':
+                - *Always* returns the (n_train, n_train) matrix.
+                - Issues a warning if `x_test` was provided, directing user to `prox_extend()`.
             """
             check_is_fitted(self)
-            n, T = self.leaf_matrix.shape
-        
-        
+            
+            # For original/oob, n_rows is n_train or n_total.
+            # For rfgap, n_rows is *always* n_train, as set by fit().
+            n_rows, T = self.leaf_matrix.shape
+
             # -----------------------------------------------------------------
             # 'original' (Not parallelized, already C-optimized)
             # -----------------------------------------------------------------
@@ -501,7 +509,7 @@ def RFGAP(prediction_type = None, y = None, prox_method = 'rfgap',
                 prox_dense = 1 - hamming_dist_matrix
                 np.fill_diagonal(prox_dense, 1)
                 prox_sparse = sparse.csr_matrix(prox_dense)
-        
+
             # -----------------------------------------------------------------
             # 'oob' (Parallelized)
             # -----------------------------------------------------------------
@@ -531,30 +539,38 @@ def RFGAP(prediction_type = None, y = None, prox_method = 'rfgap',
                 cols_all_list = [r[1] for r in results if r[1] is not None]
                 
                 if not rows_all_list:
-                    N_sparse = sparse.csr_matrix((n, n), dtype=np.float32)
+                    N_sparse = sparse.csr_matrix((n_rows, n_rows), dtype=np.float32) # Use n_rows
                 else:
                     rows_all = np.concatenate(rows_all_list)
                     cols_all = np.concatenate(cols_all_list)
                     data_all = np.ones(len(rows_all), dtype=np.float32)
-                    N_sparse = sparse.csr_matrix((data_all, (rows_all, cols_all)), shape=(n, n))
+                    N_sparse = sparse.csr_matrix((data_all, (rows_all, cols_all)), shape=(n_rows, n_rows)) # Use n_rows
                 # --- END: PARALLEL MODIFICATION ---
-        
+
                 # 3. Final Division
                 if self.verbose:
                     print("Finalizing proximity matrix (N / D)...")
                 
                 N_dense = N_sparse.todense()
                 prox_dense = np.divide(N_dense, D_dense, 
-                                       out=np.zeros_like(N_dense), 
-                                       where=D_dense!=0)
+                                        out=np.zeros_like(N_dense), 
+                                        where=D_dense!=0)
                 np.fill_diagonal(prox_dense, 1.0)
                 prox_sparse = sparse.csr_matrix(prox_dense)
-        
-        
+
+
             # -----------------------------------------------------------------
             # 'rfgap' (Parallelized)
             # -----------------------------------------------------------------
             elif self.prox_method == 'rfgap':
+                
+                if self.n_test_ > 0:
+                    warnings.warn(
+                        "prox_method='rfgap' does not support test-test proximities. "
+                        "`get_proximities()` is returning the (n_train, n_train) matrix only. "
+                        "To get test-train proximities, use the `prox_extend()` method.",
+                        UserWarning
+                    )
 
                 if self.verbose:
                     print(f"Calculating 'rfgap' proximities with T-loop (parallelized with n_jobs={self.n_jobs_})...")
@@ -579,12 +595,12 @@ def RFGAP(prediction_type = None, y = None, prox_method = 'rfgap',
                 data_list = [r[2] for r in results if r[2] is not None]
 
                 if not data_list:
-                     prox_matrix_sum = sparse.csr_matrix((n, n), dtype=np.float32)
+                     prox_matrix_sum = sparse.csr_matrix((n_rows, n_rows), dtype=np.float32)
                 else:
                     rows = np.concatenate(rows_list)
                     cols = np.concatenate(cols_list)
                     data = np.concatenate(data_list)
-                    prox_matrix_sum = sparse.csr_matrix((data, (rows, cols)), shape=(n, n))
+                    prox_matrix_sum = sparse.csr_matrix((data, (rows, cols)), shape=(n_rows, n_rows))
                 # --- END: PARALLEL CALCULATION ---
 
                 # Calculate the raw asymmetric proximities
