@@ -349,22 +349,23 @@ def RFGAP(prediction_type = None, y = None, prox_method = 'rfgap',
                 # This is critical for the performance of `prox_extend`.
                 
                 def _get_k_matrix_chunk(t, leaf_matrix, in_bag_counts):
-                    """Calculates a single column (K_t) of the K matrix for tree t."""
-                    n_total = leaf_matrix.shape[0]
-                    leaves_t = leaf_matrix[:, t]  # Leaf IDs for all samples in tree t
-                    counts_t = in_bag_counts[:, t]  # In-bag counts (M) for all samples in tree t
-                    unique_leaves = np.unique(leaves_t)
-                    K_t = np.zeros(n_total, dtype=np.float32) # Initialize column K_t
+                    """
+                    Calculates a single column (K_t) of the K matrix for tree t.
+                    This version is vectorized using bincount for O(n log n) performance.
+                    """
+                    leaves_t = leaf_matrix[:, t]
+                    counts_t = in_bag_counts[:, t]
                     
-                    # For each leaf node in the tree
-                    for leaf_val in unique_leaves:
-                        # Find all samples that landed in this leaf
-                        indices = np.where(leaves_t == leaf_val)[0]
-                        # Sum the in-bag counts (M) of all those samples
-                        total_in_bag_for_this_leaf = np.sum(counts_t[indices])
-                        # Assign this total sum to all samples in that leaf
-                        K_t[indices] = total_in_bag_for_this_leaf
-                    return K_t
+                    # 1. Find unique leaf IDs and map all samples to an integer index [0...n_unique_leaves-1]
+                    unique_leaves, leaf_indices = np.unique(leaves_t, return_inverse=True)
+                    
+                    # 2. Use bincount to sum 'counts_t' for each unique leaf index
+                    leaf_sums = np.bincount(leaf_indices, weights=counts_t)
+                    
+                    # 3. Map the sums back to all n samples.
+                    K_t = leaf_sums[leaf_indices]
+                    
+                    return K_t.astype(np.float32)
             
                 # Run the K-matrix column calculation in parallel for each tree
                 results = Parallel(n_jobs=self.n_jobs_, verbose=self.verbose)(
