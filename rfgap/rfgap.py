@@ -1,7 +1,6 @@
 # Imports
 import numpy as np
 from scipy import sparse
-from scipy.spatial.distance import pdist, squareform, cdist
 import pandas as pd
 
 # sklearn imports
@@ -25,153 +24,11 @@ import warnings
 
 from joblib import Parallel, delayed, effective_n_jobs
 
-# -----------------------------------------------------------------
-# --- START NEW PARALLEL HELPER FUNCTIONS ---
-# These must be at the module level (outside the class) for joblib
-# -----------------------------------------------------------------
-
-
-def _get_prox_tree_chunk_oob(t, leaf_matrix, oob_indices):
-    """Helper function to compute 'oob' proximities for a single tree."""
-    rows_t, cols_t = [], []
-    n, T = leaf_matrix.shape
-    
-    oob_indices_t = np.where(oob_indices[:, t] == 1)[0]
-    if oob_indices_t.size == 0:
-        return np.array([], dtype=int), np.array([], dtype=int), None
-
-    leaves_t = leaf_matrix[oob_indices_t, t]
-    
-    unique_leaves = np.unique(leaves_t)
-    for leaf_val in unique_leaves:
-        indices_in_leaf = oob_indices_t[np.where(leaves_t == leaf_val)[0]]
-        
-        if indices_in_leaf.size == 0:
-            continue
-            
-        i_coords, j_coords = np.meshgrid(indices_in_leaf, indices_in_leaf)
-        
-        rows_t.append(i_coords.ravel())
-        cols_t.append(j_coords.ravel())
-
-    if not rows_t:
-        return np.array([], dtype=int), np.array([], dtype=int), None
-
-    return np.concatenate(rows_t), np.concatenate(cols_t), None
-
-def _get_prox_tree_chunk_rfgap(t, leaf_matrix, oob_indices, in_bag_counts, K_matrix):
-    """Helper function to compute 'rfgap' proximities for a single tree."""
-    data_t, rows_t, cols_t = [], [], []
-    n, T = leaf_matrix.shape
-
-    leaves_t = leaf_matrix[:, t]
-    K_t = K_matrix[:, t]
-    in_bag_counts_t = in_bag_counts[:, t]
-    unique_leaves_t = np.unique(leaves_t)
-    
-    for leaf_val in unique_leaves_t:
-        i_mask = (leaves_t == leaf_val) & (oob_indices[:, t] == 1)
-        i_in_leaf = np.where(i_mask)[0]
-        j_mask = (leaves_t == leaf_val) & (in_bag_counts_t > 0)
-        j_in_leaf = np.where(j_mask)[0]
-        
-        if i_in_leaf.size == 0 or j_in_leaf.size == 0:
-            continue
-            
-        i_coords, j_coords = np.meshgrid(i_in_leaf, j_in_leaf)
-        i_flat = i_coords.ravel()
-        j_flat = j_coords.ravel()
-        
-        M_values = in_bag_counts_t[j_flat]
-        K_values = K_t[i_flat]
-        data_for_this_leaf = M_values / K_values
-        
-        rows_t.append(i_flat)
-        cols_t.append(j_flat)
-        data_t.append(data_for_this_leaf)
-    
-    if not rows_t:
-        return np.array([], dtype=int), np.array([], dtype=int), np.array([], dtype=np.float32)
-
-    return np.concatenate(rows_t), np.concatenate(cols_t), np.concatenate(data_t)
-
-def _get_prox_extend_tree_chunk_oob(t, extended_leaf_matrix, train_leaves_subset, train_oob_subset):
-    """Helper function to compute 'oob' extended proximities for a single tree."""
-    rows_t, cols_t = [], []
-    
-    train_oob_t = train_oob_subset[:, t]
-    train_indices_oob_t = np.where(train_oob_t == 1)[0] # Indices into subset
-    
-    if train_indices_oob_t.size == 0:
-        return np.array([], dtype=int), np.array([], dtype=int), None
-        
-    train_leaves_oob_t = train_leaves_subset[train_indices_oob_t, t]
-    test_leaves_t = extended_leaf_matrix[:, t]
-
-    unique_leaves = np.unique(train_leaves_oob_t)
-    for leaf_val in unique_leaves:
-        i_in_leaf = np.where(test_leaves_t == leaf_val)[0]
-        j_in_leaf_subset = np.where(train_leaves_oob_t == leaf_val)[0]
-        j_in_leaf = train_indices_oob_t[j_in_leaf_subset]
-        
-        if i_in_leaf.size == 0 or j_in_leaf.size == 0:
-            continue
-            
-        i_coords, j_coords = np.meshgrid(i_in_leaf, j_in_leaf)
-        rows_t.append(i_coords.ravel()) # test index
-        cols_t.append(j_coords.ravel()) # train subset index
-
-    if not rows_t:
-        return np.array([], dtype=int), np.array([], dtype=int), None
-    
-    return np.concatenate(rows_t), np.concatenate(cols_t), None
-
-def _get_prox_extend_tree_chunk_rfgap(t, extended_leaf_matrix, train_leaves_subset, K_sub, train_in_bag_counts_subset):
-    """Helper function to compute 'rfgap' extended proximities for a single tree."""
-    data_t, rows_t, cols_t = [], [], []
-
-    test_leaves_t = extended_leaf_matrix[:, t]
-    train_leaves_t = train_leaves_subset[:, t]
-    K_t = K_sub[:, t]
-    in_bag_counts_t = train_in_bag_counts_subset[:, t]
-
-    unique_leaves_t = np.unique(test_leaves_t)
-    for leaf_val in unique_leaves_t:
-        i_in_leaf = np.where(test_leaves_t == leaf_val)[0]
-        j_mask = (train_leaves_t == leaf_val) & (in_bag_counts_t > 0)
-        j_in_leaf = np.where(j_mask)[0]
-        
-        if i_in_leaf.size == 0 or j_in_leaf.size == 0:
-            continue
-
-        i_coords, j_coords = np.meshgrid(i_in_leaf, j_in_leaf)
-        i_flat = i_coords.ravel() # test index
-        j_flat = j_coords.ravel() # train subset index
-        
-        M_values = in_bag_counts_t[j_flat]
-        K_values = K_t[j_flat]
-        
-        data_for_this_leaf = M_values / K_values
-        
-        rows_t.append(i_flat)
-        cols_t.append(j_flat)
-        data_t.append(data_for_this_leaf)
-
-    if not rows_t:
-        return np.array([], dtype=int), np.array([], dtype=int), np.array([], dtype=np.float32)
-
-    return np.concatenate(rows_t), np.concatenate(cols_t), np.concatenate(data_t)
-
-# -----------------------------------------------------------------
-# --- END NEW PARALLEL HELPER FUNCTIONS ---
-# -----------------------------------------------------------------
-
-
 
 
 def RFGAP(prediction_type = None, y = None, prox_method = 'rfgap', 
-          matrix_type = 'sparse',
-          non_zero_diagonal = False, force_symmetric = False, **kwargs):
+          matrix_type = 'sparse', triangular = True,
+          non_zero_diagonal = False, force_symmetric = False, batch_size = "auto", **kwargs):
     """
     A factory method to conditionally create the RFGAP class based on RandomForestClassifier or RandomForestRegressor (depending on the type of response, y)
 
@@ -197,6 +54,9 @@ def RFGAP(prediction_type = None, y = None, prox_method = 'rfgap',
     matrix_type : str
         Whether the matrix returned proximities whould be sparse or dense 
         (default is sparse)
+    
+    triangular : bool
+        Whether the proximity matrix is filled triangularly in original and oob proximities. (default is True)
 
     non_zero_diagonal : bool
         Only used for RF-GAP proximities. Should the diagonal entries be computed as non-zero? 
@@ -204,6 +64,10 @@ def RFGAP(prediction_type = None, y = None, prox_method = 'rfgap',
 
     force_symmetric : bool
         Enforce symmetry of proximities. (default is False)
+    
+    batch_size : int or 'auto'
+        The size of batches to use when computing proximities. If set to 'auto', the batch size
+        will be determined heuristically based on the number of samples. (default is 'auto')
 
     **kwargs
         Keyward arguements specific to the RandomForestClassifer or 
@@ -244,17 +108,18 @@ def RFGAP(prediction_type = None, y = None, prox_method = 'rfgap',
 
     class RFGAP(rf):
 
-        def __init__(self, prox_method = prox_method, matrix_type = matrix_type, 
+        def __init__(self, prox_method = prox_method, matrix_type = matrix_type, triangular = triangular,
                      non_zero_diagonal = non_zero_diagonal, force_symmetric = force_symmetric,
-                     **kwargs):
-
+                     batch_size = batch_size, **kwargs):
             super(RFGAP, self).__init__(**kwargs)
 
             self.prox_method = prox_method
             self.matrix_type = matrix_type
+            self.triangular = triangular
             self.prediction_type = prediction_type
             self.non_zero_diagonal = non_zero_diagonal
             self.force_symmetric = force_symmetric
+            self.batch_size = batch_size
 
 
         def fit(self, X, y, sample_weight = None, x_test = None):
@@ -278,7 +143,9 @@ def RFGAP(prediction_type = None, y = None, prox_method = 'rfgap',
                 if they would result in any single class carrying a negative weight in either child node.
             
             x_test : {array-like, sparse matrix} of shape (n_test_samples, n_features), default=None
-                Optional test input samples. Internally, its dtype will be converted to dtype=np.float32.
+                Optional test input samples to generate full proximity matrix between both labeled (X) and unlabeled (x_test) data.
+                Only available for `original` and `oob` proximity methods. 'rfgap' proximity method only supports proximities to points used to train the underlying RF model.
+                Internally, its dtype will be converted to dtype=np.float32.
                 If a sparse matrix is provided, it will be converted into a sparse csc_matrix.
 
             Returns
@@ -297,7 +164,7 @@ def RFGAP(prediction_type = None, y = None, prox_method = 'rfgap',
             self.n = len(y)
             self.leaf_matrix = self.apply(X) # (n_train, T)
 
-            # Store n_test count, which acts as a flag for get_proximities
+            # Store n_test count
             self.n_test_ = 0
             if x_test is not None:
                 self.n_test_ = np.shape(x_test)[0]
@@ -310,83 +177,23 @@ def RFGAP(prediction_type = None, y = None, prox_method = 'rfgap',
                     self.leaf_matrix = np.concatenate((self.leaf_matrix, self.leaf_matrix_test), axis = 0)
             
             elif self.prox_method == 'oob':
-                self.oob_indices = self.get_oob_indices(X) # (n_train, T)
+                self.oob_indices = self.get_oob_indices(X)  # (n_train, T)
                 if x_test is not None:
-                    # n_test is defined above
                     self.leaf_matrix_test = self.apply(x_test)
-                    self.leaf_matrix = np.concatenate((self.leaf_matrix, self.leaf_matrix_test), axis = 0)
-                    # Append test set info. Test samples are always OOB (1s)
-                    self.oob_indices = np.concatenate((self.oob_indices, np.ones((self.n_test_, self.n_estimators))))
-            
+                    self.leaf_matrix = np.concatenate((self.leaf_matrix, self.leaf_matrix_test), axis=0)
+                    self.oob_indices = np.concatenate(
+                        (self.oob_indices, np.ones((self.n_test_, self.n_estimators), dtype=int)),
+                        axis=0)  # Append test set info. Test samples are always OOB (1s)
+                self.oob_leaves = self.oob_indices * self.leaf_matrix
+                
             elif self.prox_method == 'rfgap':
                 # RF-GAP logic *only* builds (n_train, T) matrices.
                 # The x_test argument is ignored for this prox_method in fit().
-                
-                # Get OOB status (n_samples, n_trees)
-                self.oob_indices = self.get_oob_indices(X)
-                # Get in-bag counts (M matrix) (n_samples, n_trees)
-                self.in_bag_counts = self.get_in_bag_counts(X)
-                # In-bag status is the inverse of OOB
-                self.in_bag_indices = 1 - self.oob_indices
-                
-                if self.verbose:
-                    print("Pre-calculating K matrix (in-bag leaf counts)...")
-                
-                # Note: self.leaf_matrix is (n_train, T) here, so T is correct
-                _, T = self.leaf_matrix.shape 
-                
-                # --- START: K-Matrix Calculation (Parallelized) ---
-                # This block pre-calculates the K matrix, which is the RF-GAP normalization term.
-                #
-                # What is K?
-                # K_jt: Total in-bag count (sum of M_it) for ALL samples 'i'
-                #       that land in the *same leaf* as sample 'j' in tree 't'.
-                # Shape: (n_total_samples, n_trees)
-                #
-                # Why pre-calculate?
-                # This is an expensive T-loop. We compute it once during `fit()`
-                # so that `get_proximities()` and `prox_extend()` can reuse it.
-                # This is critical for the performance of `prox_extend`.
-                
-                def _get_k_matrix_chunk(t, leaf_matrix, in_bag_counts):
-                    """
-                    Calculates a single column (K_t) of the K matrix for tree t.
-                    This version is vectorized using bincount for O(n log n) performance.
-                    """
-                    leaves_t = leaf_matrix[:, t]
-                    counts_t = in_bag_counts[:, t]
-                    
-                    # 1. Find unique leaf IDs and map all samples to an integer index [0...n_unique_leaves-1]
-                    unique_leaves, leaf_indices = np.unique(leaves_t, return_inverse=True)
-                    
-                    # 2. Use bincount to sum 'counts_t' for each unique leaf index
-                    leaf_sums = np.bincount(leaf_indices, weights=counts_t)
-                    
-                    # 3. Map the sums back to all n samples.
-                    K_t = leaf_sums[leaf_indices]
-                    
-                    return K_t.astype(np.float32)
-            
-                # Run the K-matrix column calculation in parallel for each tree
-                results = Parallel(n_jobs=self.n_jobs_, verbose=self.verbose)(
-                    delayed(_get_k_matrix_chunk)(
-                        t, self.leaf_matrix, self.in_bag_counts # Pass (n_train, T) matrices
-                    ) for t in range(T)
-                )
-                
-                # Reconstruct the full (n_total, T) K matrix from the parallel results
-                K = np.array(results).T.astype(np.float32)
-
-                # --- END: K-Matrix Calculation (Parallelized) ---
-                
-                # Avoid division by zero in subsequent proximity calculations
-                K[K == 0] = 1.0 
-
-                # Store the final matrix in the class instance
-                self.K_matrix = K # This is (n_train, T)
-            
-        
-        
+                self.oob_indices = self.get_oob_indices(X)  # Get OOB status (n_samples, n_trees)
+                self.in_bag_counts = self.get_in_bag_counts(X)  # Get in-bag counts (M matrix) (n_samples, n_trees)
+                self.in_bag_indices = 1 - self.oob_indices  # In-bag status is the inverse of OOB
+                self.in_bag_leaves = self.in_bag_indices * self.leaf_matrix
+                self.oob_leaves = self.oob_indices * self.leaf_matrix
         
         def _get_oob_samples(self, data):
             
@@ -405,8 +212,6 @@ def RFGAP(prediction_type = None, y = None, prox_method = 'rfgap',
                 oob_samples.append(oob_indices)
         
             return oob_samples
-        
-        
         
         def get_oob_indices(self, data):
             
@@ -478,292 +283,326 @@ def RFGAP(prediction_type = None, y = None, prox_method = 'rfgap',
         
             return in_bag_matrix
         
+        def get_proximity_vector(self, ind):
+            """This method produces a vector of proximity values for a given observation
+            index. This is typically used in conjunction with get_proximities.
+            
+            Fully sparse version: returns only (data, rows, cols) for row 'ind'.
+        
+            All computations follow the exact same math as old code,
+            but without allocating dense prox_vec arrays.
+
+            Parameters
+            ----------
+            ind : int
+                Index of the observation for which to compute the proximity vector.
+
+            Returns
+            -------
+            data : list
+                Proximity values for the given observation.
+            rows : list
+                Row indices corresponding to the proximity values.
+            cols : list
+                Column indices corresponding to the proximity values.
+            """
+            check_is_fitted(self)
+            _, T = self.leaf_matrix.shape
+            method = self.prox_method
+        
+            # ORIGINAL proximities
+            if method == "original":
+        
+                tree_inds = self.leaf_matrix[ind, :]
+        
+                if self.triangular:
+                    comp = (tree_inds == self.leaf_matrix[ind:, :])
+                    sim = comp.sum(axis=1)
+                    nz = np.where(sim != 0)[0]
+                    cols = nz + ind
+                    data = sim[nz] / T
+                    rows = np.full(len(cols), ind, dtype=int)
+        
+                else:
+                    comp = (tree_inds == self.leaf_matrix)
+                    sim = comp.sum(axis=1)
+                    cols = np.nonzero(sim)[0]
+                    data = sim[cols] / T
+                    rows = np.full(len(cols), ind, dtype=int)
+        
+                return data.tolist(), rows.tolist(), cols.tolist()
+        
+            # OOB proximities
+            if method == "oob":
+        
+                ind_oob = np.nonzero(self.oob_leaves[ind])[0]
+                if ind_oob.size == 0:
+                    return [], [], []
+        
+                if self.triangular:
+                    comp_leaves = self.oob_leaves[ind:, ind_oob]
+                    comp_oob    = self.oob_indices[ind:, ind_oob]
+                else:
+                    comp_leaves = self.oob_leaves[:, ind_oob]
+                    comp_oob    = self.oob_indices[:, ind_oob]
+        
+                tree_counts = (self.oob_indices[ind, ind_oob] == comp_oob).sum(axis=1)
+                tree_counts[tree_counts == 0] = 1
+        
+                prox_counts = (self.oob_leaves[ind, ind_oob] == comp_leaves).sum(axis=1)
+                prox_vec = prox_counts / tree_counts
+        
+                nz = np.nonzero(prox_vec)[0]
+        
+                if self.triangular:
+                    cols = nz + ind
+                else:
+                    cols = nz
+        
+                data = prox_vec[nz]
+                rows = np.full(len(cols), ind, dtype=int)
+                return data.tolist(), rows.tolist(), cols.tolist()
+        
+            # RFGAP proximities  (full sparse)
+            # exact same math as original — but sparse only
+            oob_trees    = np.nonzero(self.oob_indices[ind])[0]
+            in_bag_trees = np.nonzero(self.in_bag_indices[ind])[0]
+        
+            terminals = self.leaf_matrix[ind]
+            matches = (terminals == self.in_bag_leaves)
+        
+            match_counts = np.where(matches, self.in_bag_counts, 0)
+        
+            ks = match_counts.sum(axis=0)
+            ks[ks == 0] = 1
+        
+            ks_out = ks[oob_trees]
+            S_out  = len(oob_trees) if len(oob_trees) > 0 else 1
+        
+            prox_vec = (match_counts[:, oob_trees] / ks_out).sum(axis=1) / S_out
+        
+            # diagonal adjustments
+            if self.non_zero_diagonal:
+                ks_in = ks[in_bag_trees]
+                S_in  = len(in_bag_trees)
+        
+                if S_in > 0:
+                    prox_vec[ind] = (match_counts[ind, in_bag_trees] / ks_in).sum() / S_in
+                else:
+                    prox_vec[ind] = 0
+        
+            cols = np.nonzero(prox_vec)[0]
+            rows = np.full(len(cols), ind, dtype=int)
+            data = prox_vec[cols]
+        
+            return data.tolist(), rows.tolist(), cols.tolist()
+        
+
+        def _run_batched_parallel(self, n_rows, row_fn, out_shape, label="[Batch]"):
+            """
+            Shared batching logic for get_proximities() and prox_extend().
+        
+            Parameters
+            ----------
+            n_rows : int
+                Number of rows to compute (n or n_ext).
+        
+            row_fn : callable
+                Function that takes a single row index and returns (data, rows, cols).
+        
+            out_shape : tuple
+                Shape of final sparse matrix.
+        
+            label : str
+                Label for printing progress.
+        
+            Returns
+            -------
+            csr_matrix of shape out_shape
+            """
+
+            if self.batch_size == "auto":
+                # "auto" heuristic to target ~50 batches, but not too small or too large (100<B<2000)
+                B = int(max(100, min(2000, n_rows // 50)))
+                # Handle n_rows < 100 case
+                if n_rows <= 100: 
+                    B = n_rows 
+                if B == 0: # Handle n_rows == 0
+                    B = 1 
+            else:
+                # Use the user-provided value
+                B = int(self.batch_size)
+            
+            n_batches = (n_rows + B - 1) // B 
+        
+            if self.verbose:
+                print(f"{label}, batch_size={B}, n_rows={n_rows}, n_batches={n_batches}")
+        
+            blocks = []
+        
+            if n_batches == 0:
+                return sparse.csr_matrix(out_shape) # Handle empty input
+        
+            for b in range(n_batches):
+                start = b * B
+                end   = min((b + 1) * B, n_rows)
+                idxs  = range(start, end)
+        
+                if self.verbose:
+                    print(f"{label} {b+1}/{n_batches} rows {start}→{end}")
+        
+                # Parallel per-row computation
+                results = Parallel(
+                    n_jobs=self.n_jobs,
+                    batch_size=1,
+                    prefer="threads"
+                )(delayed(row_fn)(i) for i in idxs)
+        
+                # Merge batch into CSR block
+                data, rows, cols = [], [], []
+                for d, r, c in results:
+                    data.extend(d)
+                    rows.extend(r)
+                    cols.extend(c)
+        
+                block = sparse.csr_matrix(
+                    (np.array(data, dtype=np.float32),
+                     (np.array(rows, dtype=np.int32),
+                      np.array(cols, dtype=np.int32))),
+                    shape=out_shape
+                )
+        
+                blocks.append(block)
+        
+                del data, rows, cols, results
+        
+            return sum(blocks)
+        
+
         
         def get_proximities(self):
+            """This method produces a proximity matrix for the random forest object.
             
-            """
-            This method produces a proximity matrix for the random forest object.
             
-            - For 'original' and 'oob':
-                - If `x_test` was NOT provided to `fit()`, returns (n_train, n_train) matrix.
-                - If `x_test` WAS provided to `fit()`, returns the full (n_total, n_total) matrix.
+            Returns
+            -------
+            array-like
+                (if self.matrix_type == 'dense') matrix of pair-wise proximities
             
-            - For 'rfgap':
-                - *Always* returns the (n_train, n_train) matrix.
-                - Issues a warning if `x_test` was provided, directing user to `prox_extend()`.
+            csr_matrix
+                (if self.matrix_type == 'sparse') a sparse crs_matrix of pair-wise proximities
+            
             """
             check_is_fitted(self)
+            n, _ = self.leaf_matrix.shape
+        
+            # shared batch logic
+            prox_sparse = self._run_batched_parallel(
+                n_rows=n,
+                row_fn=self.get_proximity_vector,
+                out_shape=(n, n),
+                label="[get_proximities]"
+            )
+        
+            # Post-process symmetry
+            if self.triangular and self.prox_method != "rfgap":
+                prox_sparse = prox_sparse + prox_sparse.T
+                prox_sparse.setdiag(1.0)
+        
+            if self.prox_method == "rfgap" and self.force_symmetric:
+                prox_sparse = (prox_sparse + prox_sparse.T) / 2
+        
+            return prox_sparse.todense() if self.matrix_type == "dense" else prox_sparse
+
+
+
+        def prox_extend(self, X_new, training_indices=None):
+            """Compute proximities between specified training indices and new observations.
             
-            # For original/oob, n_rows is n_train or n_total.
-            # For rfgap, n_rows is *always* n_train, as set by fit().
-            n_rows, T = self.leaf_matrix.shape
-
-            # -----------------------------------------------------------------
-            # 'original' (Not parallelized, already C-optimized)
-            # -----------------------------------------------------------------
-            if self.prox_method == 'original':
-                if self.verbose:
-                    print("Calculating 'original' proximities with Hamming distance...")
-                
-                hamming_dist_condensed = pdist(self.leaf_matrix, metric='hamming')
-                hamming_dist_matrix = squareform(hamming_dist_condensed)
-                prox_dense = 1 - hamming_dist_matrix
-                np.fill_diagonal(prox_dense, 1)
-                prox_sparse = sparse.csr_matrix(prox_dense)
-
-            # -----------------------------------------------------------------
-            # 'oob' (Parallelized)
-            # -----------------------------------------------------------------
-            elif self.prox_method == 'oob':
-                if self.verbose:
-                    print(f"Calculating 'oob' proximities with T-loop (parallelized with n_jobs={self.n_jobs_})...")
-                
-                # 1. Denominator (Not parallelized, fast matmul)
-                if self.verbose:
-                    print("Calculating OOB co-occurrence (Denominator)...")
-                oob_float = self.oob_indices.astype(np.float32)
-                D_dense = oob_float @ oob_float.T
-                
-                # 2. Numerator (Parallelized T-loop)
-                if self.verbose:
-                    print("Calculating OOB leaf co-occurrence (Numerator)...")
-                
-                # --- START: PARALLEL MODIFICATION ---
-                results = Parallel(n_jobs=self.n_jobs_, verbose=self.verbose)(
-                    delayed(_get_prox_tree_chunk_oob)(
-                        t, self.leaf_matrix, self.oob_indices
-                    ) for t in range(T)
-                )
-                
-                # Reduce step: concatenate all results
-                rows_all_list = [r[0] for r in results if r[0] is not None]
-                cols_all_list = [r[1] for r in results if r[1] is not None]
-                
-                if not rows_all_list:
-                    N_sparse = sparse.csr_matrix((n_rows, n_rows), dtype=np.float32) # Use n_rows
-                else:
-                    rows_all = np.concatenate(rows_all_list)
-                    cols_all = np.concatenate(cols_all_list)
-                    data_all = np.ones(len(rows_all), dtype=np.float32)
-                    N_sparse = sparse.csr_matrix((data_all, (rows_all, cols_all)), shape=(n_rows, n_rows)) # Use n_rows
-                # --- END: PARALLEL MODIFICATION ---
-
-                # 3. Final Division
-                if self.verbose:
-                    print("Finalizing proximity matrix (N / D)...")
-                
-                N_dense = N_sparse.todense()
-                prox_dense = np.divide(N_dense, D_dense, 
-                                        out=np.zeros_like(N_dense), 
-                                        where=D_dense!=0)
-                np.fill_diagonal(prox_dense, 1.0)
-                prox_sparse = sparse.csr_matrix(prox_dense)
-
-
-            # -----------------------------------------------------------------
-            # 'rfgap' (Parallelized)
-            # -----------------------------------------------------------------
-            elif self.prox_method == 'rfgap':
-                
-                if self.n_test_ > 0:
-                    warnings.warn(
-                        "prox_method='rfgap' does not support test-test proximities. "
-                        "`get_proximities()` is returning the (n_train, n_train) matrix only. "
-                        "To get test-train proximities, use the `prox_extend()` method.",
-                        UserWarning
-                    )
-
-                if self.verbose:
-                    print(f"Calculating 'rfgap' proximities with T-loop (parallelized with n_jobs={self.n_jobs_})...")
-
-                K = self.K_matrix
-                S_out_i = np.sum(self.oob_indices, axis=1)
-                S_out_i_safe = S_out_i.copy()
-                S_out_i_safe[S_out_i_safe == 0] = 1
-
-                # --- START: PARALLEL CALCULATION of prox_matrix_sum ---
-                if self.verbose:
-                    print("Calculating asymmetric proximities (T-loop list extend)...")
-
-                results = Parallel(n_jobs=self.n_jobs_, verbose=self.verbose)(
-                    delayed(_get_prox_tree_chunk_rfgap)(
-                        t, self.leaf_matrix, self.oob_indices, self.in_bag_counts, self.K_matrix
-                    ) for t in range(T)
-                )
-
-                rows_list = [r[0] for r in results if r[0] is not None]
-                cols_list = [r[1] for r in results if r[1] is not None]
-                data_list = [r[2] for r in results if r[2] is not None]
-
-                if not data_list:
-                     prox_matrix_sum = sparse.csr_matrix((n_rows, n_rows), dtype=np.float32)
-                else:
-                    rows = np.concatenate(rows_list)
-                    cols = np.concatenate(cols_list)
-                    data = np.concatenate(data_list)
-                    prox_matrix_sum = sparse.csr_matrix((data, (rows, cols)), shape=(n_rows, n_rows))
-                # --- END: PARALLEL CALCULATION ---
-
-                # Calculate the raw asymmetric proximities
-                inv_S_out_i_scaler = sparse.diags(1.0 / S_out_i_safe, format='csr')
-                prox_sparse = inv_S_out_i_scaler @ prox_matrix_sum # Initialize prox_sparse here
-
-                if self.non_zero_diagonal:
-                    if self.verbose:
-                        print("Calculating 'rfgap' self-similarity (diagonal)...")
-
-                    # Calculate diagonal (self-similarity)
-                    S_in_i = np.sum(self.in_bag_indices, axis=1)
-                    S_in_i_safe = S_in_i.copy()
-                    S_in_i_safe[S_in_i_safe == 0] = 1
-                    M_ii_t = self.in_bag_counts
-                    K_diag = K[:M_ii_t.shape[0], :]
-                    Ratios_ii = M_ii_t / K_diag
-                    Terms_ii = Ratios_ii * self.in_bag_indices
-                    Diagonal_sum = np.sum(Terms_ii, axis=1)
-                    Diagonal_vec = Diagonal_sum / S_in_i_safe
-                    diag_matrix = sparse.diags(Diagonal_vec, format='csr')
-                    prox_sparse = prox_sparse + diag_matrix # Add diagonal directly
-
-            else:
-                 raise ValueError(f"Proximity method '{self.prox_method}' not recognized.")
-
-            if self.force_symmetric:  # RFGAP is asymmetric, others are symmetric by definition
-                prox_sparse = (prox_sparse + prox_sparse.transpose()) / 2
-
-            if self.matrix_type == 'dense':
-                return np.array(prox_sparse.todense())
-            else:
-                return prox_sparse
-
-
-
-        def prox_extend(self, data, training_indices=None):
-            """
-            Compute proximities between new test data and specified training data.
+            Parameters
+            ----------
+            X_new : (n_samples, n_features) array_like (numeric)
+                New observations (out-of-sample) for which to compute proximities.
+            training_indices : array-like
+                Indices of training observations to compute proximities for. Default is None, which uses all training observations.
             
-            This method uses the most efficient strategy for each proximity type:
-            - 'original': Fully vectorized Hamming distance calculation (cdist).
-            - 'oob', 'rfgap': Fast T-loop (looping over trees) to avoid slow
-                n-loops over samples.
+            Returns
+            -------
+            array-like or csr_matrix
+                Pair-wise proximities between the specified training data and new observations.
             """
             check_is_fitted(self)
-            n_train_total, num_trees = self.leaf_matrix.shape
+        
+            leaf_train = self.leaf_matrix
+            n_train, T = leaf_train.shape
+        
+            leaf_new = self.apply(X_new)
+            n_ext = leaf_new.shape[0]
         
             if training_indices is None:
-                training_indices = np.arange(n_train_total)
-            
-            n_sub = len(training_indices)
-            
-            extended_leaf_matrix = self.apply(data)
-            n_ext, _ = extended_leaf_matrix.shape
-            
-            train_leaves_subset = self.leaf_matrix[training_indices, :]
-            
-            prox_sparse = None
+                training_indices = np.arange(n_train)
+            training_indices = np.asarray(training_indices)
+            n_tr = len(training_indices)
         
-            # -----------------------------------------------------------------
-            # 'original' (Not parallelized, already C-optimized)
-            # -----------------------------------------------------------------
-            if self.prox_method == 'original':
-                if self.verbose:
-                    print("Calculating 'original' extended proximities with Hamming cdist...")
-                
-                hamming_dist_matrix = cdist(extended_leaf_matrix, train_leaves_subset, metric='hamming')
-                prox_dense = 1 - hamming_dist_matrix
-                prox_sparse = sparse.csr_matrix(prox_dense)
+            # Pre-slice data only once for efficiency
+            if self.prox_method == "original":
+                leaf_tr = leaf_train[training_indices]
         
-            # -----------------------------------------------------------------
-            # 'oob' (Parallelized)
-            # -----------------------------------------------------------------
-            elif self.prox_method == 'oob':
-                if self.verbose:
-                    print(f"Calculating 'oob' extended proximities with T-loop (parallelized with n_jobs={self.n_jobs_})...")
+            elif self.prox_method == "oob":
+                leaf_tr = leaf_train[training_indices]
+                oob_tr_bool = self.oob_indices[training_indices].astype(bool)
         
-                train_oob_subset = self.oob_indices[training_indices, :]
-                
-                # Denominator (Not parallelized, fast vector op)
-                if self.verbose:
-                    print("Calculating OOB denominator (D_j)...")
-                D_vec = np.sum(train_oob_subset, axis=1, dtype=np.float32)
-                D_vec_safe = D_vec.copy()
-                D_vec_safe[D_vec_safe == 0] = 1.0
-                
-                # Numerator (Parallelized T-loop)
-                if self.verbose:
-                    print("Calculating OOB leaf co-occurrence (Numerator N_ij)...")
+            elif self.prox_method == "rfgap":
+                in_bag_leaves_tr = self.in_bag_leaves[training_indices]
+                in_bag_counts_tr = self.in_bag_counts[training_indices]
+                oob_trees_tr = np.nonzero(self.oob_indices[training_indices].sum(axis=0))[0]
+                S_out_tr = max(1, len(oob_trees_tr))
         
-                # --- START: PARALLEL MODIFICATION ---
-                results = Parallel(n_jobs=self.n_jobs_, verbose=self.verbose)(
-                    delayed(_get_prox_extend_tree_chunk_oob)(
-                        t, extended_leaf_matrix, train_leaves_subset, train_oob_subset
-                    ) for t in range(num_trees)
-                )
+            # Per-row function
+            def get_proximity_vector_extend(ext_i):
+                leaves_i = leaf_new[ext_i]
         
-                rows_all_list = [r[0] for r in results if r[0] is not None]
-                cols_all_list = [r[1] for r in results if r[1] is not None]
-                
-                if not rows_all_list:
-                    N_sparse = sparse.csr_matrix((n_ext, n_sub), dtype=np.float32)
-                else:
-                    rows_all = np.concatenate(rows_all_list)
-                    cols_all = np.concatenate(cols_all_list)
-                    data_all = np.ones(len(rows_all), dtype=np.float32)
-                    N_sparse = sparse.csr_matrix((data_all, (rows_all, cols_all)), shape=(n_ext, n_sub))
-                # --- END: PARALLEL MODIFICATION ---
+                if self.prox_method == "original":
+                    comp = (leaves_i == leaf_tr)
+                    sim = comp.sum(axis=1)
+                    nz = np.nonzero(sim)[0]
+                    data = (sim[nz] / T).astype(np.float32)
+                    rows = np.full(len(nz), ext_i, dtype=np.int32)
+                    return data, rows, nz
         
-                # Final Division
-                if self.verbose:
-                    print("Finalizing proximity matrix (N / D)...")
-                
-                inv_D_vec_scaler = 1.0 / D_vec_safe
-                inv_D_scaler_matrix = sparse.diags(inv_D_vec_scaler, format='csr')
-                prox_sparse = N_sparse @ inv_D_scaler_matrix
+                if self.prox_method == "oob":
+                    match = (leaves_i == leaf_tr)
+                    oob_new = (leaves_i != 0)
+                    prox_counts = (match & oob_tr_bool).sum(axis=1)
+                    tree_counts = (oob_tr_bool & oob_new).sum(axis=1)
+                    tree_counts[tree_counts == 0] = 1
+                    prox_vec = prox_counts / tree_counts
+                    nz = np.nonzero(prox_vec)[0]
+                    data = prox_vec[nz].astype(np.float32)
+                    rows = np.full(len(nz), ext_i, dtype=np.int32)
+                    return data, rows, nz
         
-            # -----------------------------------------------------------------
-            # 'rfgap' (Parallelized)
-            # -----------------------------------------------------------------
-            elif self.prox_method == 'rfgap':
-                if self.verbose:
-                    print(f"Calculating 'rfgap' extended proximities with T-loop (parallelized with n_jobs={self.n_jobs_})...")
-                
-                train_in_bag_counts_subset = self.in_bag_counts[training_indices, :]
-                
-                if self.verbose:
-                    print("Slicing pre-calculated K matrix for subset...")
-                K_sub = self.K_matrix[training_indices, :]
-            
-                # --- START: PARALLEL MODIFICATION ---
-                if self.verbose:
-                    print("Calculating asymmetric proximities (T-loop list extend)...")
-                
-                results = Parallel(n_jobs=self.n_jobs_, verbose=self.verbose)(
-                    delayed(_get_prox_extend_tree_chunk_rfgap)(
-                        t, extended_leaf_matrix, train_leaves_subset, K_sub, train_in_bag_counts_subset
-                    ) for t in range(num_trees)
-                )
+                # RFGAP
+                matches = (leaves_i == in_bag_leaves_tr)
+                match_counts = np.where(matches, in_bag_counts_tr, 0)
+                ks = match_counts.sum(axis=0)
+                ks[ks == 0] = 1
+                prox_vec = (match_counts[:, oob_trees_tr] / ks[oob_trees_tr]).sum(axis=1) / S_out_tr
+                nz = np.nonzero(prox_vec)[0]
+                data = prox_vec[nz].astype(np.float32)
+                rows = np.full(len(nz), ext_i, dtype=np.int32)
+                return data, rows, nz
         
-                rows_list = [r[0] for r in results if r[0] is not None]
-                cols_list = [r[1] for r in results if r[1] is not None]
-                data_list = [r[2] for r in results if r[2] is not None]
+            # Shared batching process
+            prox_sparse = self._run_batched_parallel(
+                n_rows=n_ext,
+                row_fn=get_proximity_vector_extend,
+                out_shape=(n_ext, n_tr),
+                label="[prox_extend]"
+            )
         
-                if not data_list:
-                    prox_matrix_sum = sparse.csr_matrix((n_ext, n_sub), dtype=np.float32)
-                else:
-                    rows = np.concatenate(rows_list)
-                    cols = np.concatenate(cols_list)
-                    data = np.concatenate(data_list)
-                    prox_matrix_sum = sparse.csr_matrix((data, (rows, cols)), shape=(n_ext, n_sub))
-                # --- END: PARALLEL MODIFICATION ---
-                
-                prox_sparse = prox_matrix_sum / num_trees
-            
-            else:
-                 raise ValueError(f"Proximity method '{self.prox_method}' not recognized.")
+            return prox_sparse.todense() if self.matrix_type == "dense" else prox_sparse
         
-        
-            return prox_sparse.todense() if self.matrix_type == 'dense' else prox_sparse
-            
 
         def prox_predict(self, y):
             
@@ -1116,17 +955,17 @@ def RFGAP(prediction_type = None, y = None, prox_method = 'rfgap',
 
                     # Get the proximities between test samples and training samples (shape n_test, n_train)
                     proximities_test = self.prox_extend(x_test)
-    
+
                     # Convert sparse matrix to dense if necessary
                     if isinstance(proximities_test, sparse.csr_matrix):
                         proximities_test = proximities_test.toarray()
-    
+
                     # Initialize array to store test nonconformity scores, shape (n_test,)
                     self.nonconformity_scores_test = np.zeros_like(self.test_preds, dtype=float)
-    
+
                     # Get the unique predicted labels in the test set
                     unique_test_preds = np.unique(self.test_preds)
-    
+
                     # Iterate through each unique predicted label found in the test set
                     for label in unique_test_preds:
 
@@ -1138,7 +977,7 @@ def RFGAP(prediction_type = None, y = None, prox_method = 'rfgap',
 
                         # Create a boolean mask for training samples with different labels (shape n_train)
                         mask_train_diff = self.y != label
-    
+
                         # Select columns corresponding to same-class training samples for ALL test samples
                         # Shape will be (n_test, n_train_same)
                         same_proximities = proximities_test[:, mask_train_same]
@@ -1146,7 +985,7 @@ def RFGAP(prediction_type = None, y = None, prox_method = 'rfgap',
                         # Select columns corresponding to different-class training samples for ALL test samples
                         # Shape will be (n_test, n_train_diff)
                         diff_proximities = proximities_test[:, mask_train_diff]
-    
+
                         # Partition rows to find the k largest proximities to same-class training samples
                         # Takes the last k columns after partitioning along axis 1 (columns)
                         # Result shape: (n_test, k) - Assumes k <= n_train_same and k <= n_train_diff
@@ -1154,22 +993,22 @@ def RFGAP(prediction_type = None, y = None, prox_method = 'rfgap',
                         same_k = np.partition(same_proximities, -k, axis=1)[:, -k:]
                         # Result shape: (n_test, k)
                         diff_k = np.partition(diff_proximities, -k, axis=1)[:, -k:]
-    
+
                         # Calculate the mean of the k largest proximities for each test sample (row)
                         # Result shapes: (n_test,)
                         same_mean_all = np.mean(same_k, axis=1)
                         diff_mean_all = np.mean(diff_k, axis=1)
-    
+
                         # Select the means only for the test samples predicted as the current label
                         # Result shapes: (n_subset,) where n_subset is the count of test samples predicted as 'label'
                         same_mean = same_mean_all[mask_test]
                         diff_mean = diff_mean_all[mask_test]
-    
+
                         # Avoid zero division by replacing zeros with the smallest non-zero value found in same_mean
                         # This exactly mirrors the training logic
                         min_nonzero_test = np.min(same_mean[same_mean > 0], initial=1e-10)
                         same_mean_safe = np.where(same_mean == 0, min_nonzero_test, same_mean)
-    
+
                         # Calculate and assign nonconformity scores for the subset of test samples
                         self.nonconformity_scores_test[mask_test] = diff_mean / same_mean_safe
         
@@ -1334,4 +1173,4 @@ def RFGAP(prediction_type = None, y = None, prox_method = 'rfgap',
 
 
 
-    return RFGAP(prox_method = prox_method, matrix_type = matrix_type, **kwargs)
+    return RFGAP(prox_method = prox_method, matrix_type = matrix_type, triangular=triangular, non_zero_diagonal = non_zero_diagonal, force_symmetric = force_symmetric, batch_size=batch_size, **kwargs)
