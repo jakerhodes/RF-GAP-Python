@@ -28,7 +28,7 @@ from joblib import Parallel, delayed, effective_n_jobs
 
 def RFGAP(prediction_type = None, y = None, prox_method = 'rfgap', 
           matrix_type = 'sparse', triangular = True,
-          non_zero_diagonal = False, force_symmetric = False, batch_size = "auto", **kwargs):
+          non_zero_diagonal = False, normalize=False, force_symmetric = False, batch_size = "auto", **kwargs):
     """
     A factory method to conditionally create the RFGAP class based on RandomForestClassifier or RandomForestRegressor (depending on the type of response, y)
 
@@ -61,6 +61,9 @@ def RFGAP(prediction_type = None, y = None, prox_method = 'rfgap',
     non_zero_diagonal : bool
         Only used for RF-GAP proximities. Should the diagonal entries be computed as non-zero? 
         (default is False, as in original RF-GAP definition)
+
+    normalize : bool
+        Whether to 0-1 normalize the proximities. (default is False)
 
     force_symmetric : bool
         Enforce symmetry of proximities. (default is False)
@@ -109,7 +112,7 @@ def RFGAP(prediction_type = None, y = None, prox_method = 'rfgap',
     class RFGAP(rf):
 
         def __init__(self, prox_method = prox_method, matrix_type = matrix_type, triangular = triangular,
-                     non_zero_diagonal = non_zero_diagonal, force_symmetric = force_symmetric,
+                     non_zero_diagonal = non_zero_diagonal, normalize = normalize, force_symmetric = force_symmetric,
                      batch_size = batch_size, **kwargs):
             super(RFGAP, self).__init__(**kwargs)
 
@@ -118,6 +121,7 @@ def RFGAP(prediction_type = None, y = None, prox_method = 'rfgap',
             self.triangular = triangular
             self.prediction_type = prediction_type
             self.non_zero_diagonal = non_zero_diagonal
+            self.normalize = normalize
             self.force_symmetric = force_symmetric
             self.batch_size = batch_size
 
@@ -390,6 +394,12 @@ def RFGAP(prediction_type = None, y = None, prox_method = 'rfgap',
                     prox_vec[ind] = (match_counts[ind, in_bag_trees] / ks_in).sum() / S_in
                 else:
                     prox_vec[ind] = 0
+                
+                if self.normalize:
+                        maxv = prox_vec.max()
+                        if maxv > 0:
+                            prox_vec = prox_vec / maxv
+                        prox_vec[ind] = 1.0
         
             cols = np.nonzero(prox_vec)[0]
             rows = np.full(len(cols), ind, dtype=int)
@@ -588,6 +598,10 @@ def RFGAP(prediction_type = None, y = None, prox_method = 'rfgap',
                 ks = match_counts.sum(axis=0)
                 ks[ks == 0] = 1
                 prox_vec = (match_counts[:, oob_trees_tr] / ks[oob_trees_tr]).sum(axis=1) / S_out_tr
+                if self.non_zero_diagonal and self.normalize:
+                    maxv = prox_vec.max()
+                    if maxv > 0:
+                        prox_vec = prox_vec / maxv
                 nz = np.nonzero(prox_vec)[0]
                 data = prox_vec[nz].astype(np.float32)
                 rows = np.full(len(nz), ext_i, dtype=np.int32)
@@ -1173,4 +1187,4 @@ def RFGAP(prediction_type = None, y = None, prox_method = 'rfgap',
 
 
 
-    return RFGAP(prox_method = prox_method, matrix_type = matrix_type, triangular=triangular, non_zero_diagonal = non_zero_diagonal, force_symmetric = force_symmetric, batch_size=batch_size, **kwargs)
+    return RFGAP(prox_method = prox_method, matrix_type = matrix_type, triangular=triangular, non_zero_diagonal = non_zero_diagonal, normalize=normalize, force_symmetric = force_symmetric, batch_size=batch_size, **kwargs)
