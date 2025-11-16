@@ -122,6 +122,7 @@ def RFGAP(prediction_type = None, y = None, prox_method = 'rfgap',
             self.prediction_type = prediction_type
             self.non_zero_diagonal = non_zero_diagonal
             self.normalize = normalize
+            self.min_non_zero_diagonal = None
             self.force_symmetric = force_symmetric
             self.batch_size = batch_size
 
@@ -396,10 +397,17 @@ def RFGAP(prediction_type = None, y = None, prox_method = 'rfgap',
                     prox_vec[ind] = 0
                 
                 if self.normalize:
-                        maxv = prox_vec.max()
-                        if maxv > 0:
-                            prox_vec = prox_vec / maxv
-                        prox_vec[ind] = 1.0
+                    # Store the *minimum* self-similarity across training points
+                    if self.min_non_zero_diagonal is None:
+                        self.min_non_zero_diagonal = prox_vec[ind]
+                    else:
+                        self.min_non_zero_diagonal = min(self.min_non_zero_diagonal, prox_vec[ind])
+                    
+                    # Normalize
+                    maxv = prox_vec.max()
+                    if maxv > 0:
+                        prox_vec = prox_vec / maxv
+                    prox_vec[ind] = 1
         
             cols = np.nonzero(prox_vec)[0]
             rows = np.full(len(cols), ind, dtype=int)
@@ -599,7 +607,8 @@ def RFGAP(prediction_type = None, y = None, prox_method = 'rfgap',
                 ks[ks == 0] = 1
                 prox_vec = (match_counts[:, oob_trees_tr] / ks[oob_trees_tr]).sum(axis=1) / S_out_tr
                 if self.non_zero_diagonal and self.normalize:
-                    maxv = prox_vec.max()
+                    # Normalize
+                    maxv = max(self.min_non_zero_diagonal, prox_vec.max())
                     if maxv > 0:
                         prox_vec = prox_vec / maxv
                 nz = np.nonzero(prox_vec)[0]
