@@ -6,8 +6,7 @@ import pandas as pd
 import gc
 
 # sklearn imports
-from sklearn.ensemble import RandomForestClassifier
-from sklearn.ensemble import RandomForestRegressor
+from sklearn.ensemble import RandomForestClassifier, RandomForestRegressor, ExtraTreesClassifier, ExtraTreesRegressor
 import sklearn
 from sklearn import metrics
 
@@ -26,9 +25,10 @@ import warnings
 
 
 def RFGAP(prediction_type=None, y=None, prox_method='rfgap', 
-          matrix_type='sparse', non_zero_diagonal=False, force_symmetric=False, **kwargs):
+          matrix_type='sparse', non_zero_diagonal=False, force_symmetric=False, 
+          model_type='rf', **kwargs):
     """
-    Factory function to create an optimized Random Forest Proximity object.
+    Factory function to create an optimized Random Forest or Extra Trees Proximity object.
     
     This class takes on a random forest predictors (sklearn) and adds methods to 
     construct proximities from the random forest object.
@@ -46,7 +46,7 @@ def RFGAP(prediction_type=None, y=None, prox_method='rfgap',
     
     y : array-like of shape (n_samples,) or (n_samples, n_outputs)
         The target values (class labels in classification, real numbers in regression).
-        This is an optional way to determine whether RandomForestClassifier or RandomForestRegressor
+        This is an optional way to determine whether RandomForest/ExtraTrees Classifier or Regressor
         should be used
     
     prox_method : str
@@ -64,9 +64,13 @@ def RFGAP(prediction_type=None, y=None, prox_method='rfgap',
     force_symmetric : bool
         Enforce symmetry of proximities. (default is False)
 
+    model_type : str
+        'rf' for RandomForest (default) or 'et' for ExtraTrees.
+        Note: If 'et' is selected, bootstrap will be set to True by default unless explicitly 
+        set to False in kwargs (though True is required for RFGAP proximity calculations).
+
     **kwargs
-        Keyward arguements specific to the RandomForestClassifer or 
-        RandomForestRegressor classes
+        Keyward arguements specific to the RandomForest/ExtraTrees Classifer or Regressor classes
     
         
     Returns
@@ -85,12 +89,26 @@ def RFGAP(prediction_type=None, y=None, prox_method='rfgap',
             else: prediction_type = 'classification'
         except TypeError: prediction_type = 'classification'
 
-    if prediction_type == 'classification': rf = RandomForestClassifier
-    elif prediction_type == 'regression': rf = RandomForestRegressor
+    # Logic to select the correct base class
+    if model_type == 'rf':
+        if prediction_type == 'classification': rf = RandomForestClassifier
+        elif prediction_type == 'regression': rf = RandomForestRegressor
+    elif model_type == 'et':
+        if prediction_type == 'classification': rf = ExtraTreesClassifier
+        elif prediction_type == 'regression': rf = ExtraTreesRegressor
+    else:
+        raise ValueError("model_type must be either 'rf' (RandomForest) or 'et' (ExtraTrees)")
 
     class RFGAP(rf):
         def __init__(self, prox_method=prox_method, matrix_type=matrix_type, non_zero_diagonal=non_zero_diagonal, force_symmetric=force_symmetric,
                      **kwargs):
+            
+            # Enforce bootstrapping for ExtraTrees if not specified.
+            # Scikit-learn ExtraTrees defaults to bootstrap=False, but RFGAP relies on OOB/bagging mechanics.
+            if model_type == 'et':
+                if 'bootstrap' not in kwargs:
+                    kwargs['bootstrap'] = True
+            
             super(RFGAP, self).__init__(**kwargs)
             
             # BLOCK OOB METHOD
@@ -111,7 +129,7 @@ def RFGAP(prediction_type=None, y=None, prox_method='rfgap',
             # Internal Cache
             self.W_mat = None   # The "Target" weights matrix (Right side of dot product)
             self._leaf_offsets = None 
-            self._total_unique_nodes = 0
+            self._total_unique_nodes = None
 
         def fit(self, X, y, sample_weight=None):
             """
