@@ -133,8 +133,9 @@ def RFGAP(prediction_type=None, y=None, prox_method='rfgap',
             
             # [NEW] Unlabeled Data Cache
             self.leaf_matrix_u = None
+            self.W_u_mat = None # Cache for Unlabeled Weights
             self._n_unlabeled_samples = 0
-            self.cached_inverse_M = None  # Caches 1/M for use in P_uu normalization
+            self.cached_inverse_M = None  # Caches 1/M for use in P_uu normalization (in-bag leaf size)
     
         def fit(self, X, y, X_unlabeled=None, sample_weight=None):
             """
@@ -220,7 +221,14 @@ def RFGAP(prediction_type=None, y=None, prox_method='rfgap',
             # COMPLEXITY STEP 3: Build Sparse Weights -> O(N * T)
             # ---------------------------------------------------------
             # We build the W matrix immediately after fit.
+            # This populates self.cached_inverse_M which is needed for W_u_mat
             self._build_W_matrix()
+
+            # ---------------------------------------------------------
+            # [NEW] STEP 4: Build Unlabeled Weights -> O(Nu * T)
+            # ---------------------------------------------------------
+            if self.leaf_matrix_u is not None:
+                self._build_Wu_matrix()
     
             return self
     
@@ -309,32 +317,25 @@ def RFGAP(prediction_type=None, y=None, prox_method='rfgap',
                 # --- Sub-Case: Method = Original ---
                 # This is direct... just concatenate X and X_u (original does not distinguish in-bag/oob trees)
                 if self.prox_method == 'original':
-                    # Stack indices to create one giant set of samples
-                    combined_leaves = np.vstack([self.leaf_matrix, self.leaf_matrix_u])
                     
-                    # Build Q and W for the combined set 
-                    # Note: For 'original', W is just 1/T for everyone. Q is 1.0 for everyone.
+                    # 1. Stack Leaves for Q (Query)
+                    combined_leaves = np.vstack([self.leaf_matrix, self.leaf_matrix_u])
                     Q_all = self._build_Q_matrix(leaves=combined_leaves, is_training=False)
                     
-                    # W matrix for all samples (Original = 1/T)
-                    # We construct this manually here because self.W_mat is specific to Labeled data
-                    N_total = combined_leaves.shape[0]
-                    T = self.n_estimators
-                    global_leaves = self._to_global_leaves(combined_leaves)
+                    # 2. Stack Pre-computed Weights for W (Target)
+                    # This is much faster than rebuilding W from scratch using indices
+                    if self.W_u_mat is None:
+                            raise ValueError("Unlabeled weights not found. Ensure fit() was called with X_unlabeled.")
                     
-                    flat_rows = np.repeat(np.arange(N_total), T)
-                    flat_cols = global_leaves.flatten()
-                    weights = np.full(N_total * T, 1.0 / T, dtype=np.float32)
+                    # Create the giant W matrix by stacking labeled and unlabeled weights
+                    W_all = vstack([self.W_mat, self.W_u_mat], format='csr')
                     
-                    W_all = sparse.csr_matrix(
-                        (weights, (flat_rows, flat_cols)),
-                        shape=(N_total, self._total_unique_nodes),
-                        dtype=np.float32
-                    )
-                    
+                    # 3. Single Giant Dot Product
+                    # We do this as one large operation because 'original' method treats all samples uniformly
                     prox = Q_all.dot(W_all.T)
+                    
                     return prox.todense() if self.matrix_type == 'dense' else prox
-    
+
                 # --- Sub-Case: Method = RFGAP ---
                 elif self.prox_method == 'rfgap':
                     
@@ -372,32 +373,15 @@ def RFGAP(prediction_type=None, y=None, prox_method='rfgap',
                     
                     # 3. P_uu (Unlabeled-Unlabeled)
                     # -----------------------------
-                    # We need W_u_scaled to return 1/M to get (1/T * 1/M) logic consistent with Labeled data.
-                    N_u = self._n_unlabeled_samples
-                    T = self.n_estimators
-                    global_leaves_u = self._to_global_leaves(self.leaf_matrix_u)
+                    # [MODIFIED] Use the pre-computed W_u_mat instead of rebuilding on the fly.
+                    # This dramatically speeds up repeated calls.
                     
-                    flat_rows = np.repeat(np.arange(N_u), T)
-                    flat_cols = global_leaves_u.flatten()
-                    
-                    # [STRICT FIX] Ensure we use density-weighted normalization (1/M)
-                    if self.cached_inverse_M is None:
-                        raise ValueError("RFGAP weights not found. Model must be fitted with prox_method='rfgap'.")
-                    
-                    # Map global leaf IDs to their cached inverse weights
-                    w_vals = self.cached_inverse_M[flat_cols]
-                    
-                    # Retrieve the correct shape from Q_u to ensure dimensions match
-                    expected_cols = Q_u.shape[1] 
-                    
-                    W_u_scaled = sparse.csr_matrix(
-                        (w_vals, (flat_rows, flat_cols)),
-                        shape=(N_u, expected_cols), 
-                        dtype=np.float32
-                    )
-                    
-                    P_uu = Q_u.dot(W_u_scaled.T)
-                    del Q_u, W_u_scaled
+                    if self.W_u_mat is None:
+                        # Fallback/Safety check if somehow fit() didn't run the builder
+                         raise ValueError("RFGAP Unlabeled weights not found. Ensure fit() was called with X_unlabeled.")
+
+                    P_uu = Q_u.dot(self.W_u_mat.T)
+                    del Q_u
                     
                     # 4. Assemble Block Matrix
                     # ------------------------
@@ -412,39 +396,59 @@ def RFGAP(prediction_type=None, y=None, prox_method='rfgap',
     
         def prox_extend(self, X_new, training_indices=None):
             """
-            Calculates proximities between New Data (rows) and Training Data (cols) with the optimized Query-Weight matrix method (sparse)
-            RUNTIME: O(N_test * T * log(N_train) + N_test * T * k_bar)
-                          - Forest Pass: N_test * log(N_train)
-                          - Dot Product: Linear in N_test
-            MEMORY: O(N_test * T) (Query Q overhead) + output O(NNZ_Prox) approx O(N_test * N_train * Density) where density = % of non-zeros in proximity matrix = % points sharing at least 1 leaf
+            Calculates proximities between New Data (rows) and the existing data (cols).
             
+            If fit() was called with X_unlabeled, the output columns will represent:
+            [0 ... N_train-1] (Labeled) followed by [N_train ... N_total-1] (Unlabeled).
+
+            RUNTIME: O(N_test * T * log(N_train) + N_test * T * k_bar)
+            MEMORY: O(N_test * T) (Query Q overhead) + Output Matrix
+
             Parameters
             ----------
-            X_new : (n_samples, n_features) array_like (numeric)
-                New observations (out-of-sample) for which to compute proximities.
-            training_indices : array-like
-                Indices of training observations to compute proximities for. Default is None, which uses all training observations.
-            
+            X_new : (n_samples, n_features) array_like
+                New observations.
+            training_indices : array-like, optional
+                Indices of specific target observations to compute proximities for.
+                If X_unlabeled was used, indices > n_train_samples refer to the unlabeled set.
+                Default is None (computes against ALL labeled + unlabeled data).
+
             Returns
             -------
             array-like or csr_matrix
-                Pair-wise proximities between the specified training data and new observations.
+                Proximities between X_new and the fitted data.
             """
             check_is_fitted(self)
             
-            # Pass X_new to get leaves on the fly
+            # 1. Pass X_new through the forest to get leaf indices
             leaves_new = self.apply(X_new)
             
-            # Build Query Matrix Q for NEW data (X_new)
+            # 2. Build Query Matrix Q for NEW data
+            # Q_new shape: (N_new, Total_Unique_Nodes)
             Q_new = self._build_Q_matrix(leaves=leaves_new, is_training=False)
             
-            # Select Target Weights (W)
-            if training_indices is not None:
-                W_target = self.W_mat[training_indices]
-            else:
-                W_target = self.W_mat
+            # 3. Construct Target Weight Matrix (W_full)
+            # We want proximities to BOTH Labeled and Unlabeled data.
+            if self.leaf_matrix_u is not None:
+                if self.W_u_mat is None:
+                    raise ValueError("Unlabeled weights not found. Ensure fit() was called with X_unlabeled.")
                 
-            # Compute Dot Product
+                # Stack: Labeled on top, Unlabeled on bottom
+                # W_full shape: (N_train + N_unlabeled, Total_Unique_Nodes)
+                W_full = vstack([self.W_mat, self.W_u_mat], format='csr')
+            else:
+                # Labeled only
+                W_full = self.W_mat
+                
+            # 4. Filter Targets (if user requested specific indices)
+            if training_indices is not None:
+                W_target = W_full[training_indices]
+            else:
+                W_target = W_full
+                
+            # 5. Compute Dot Product
+            # P = Q . W^T
+            # Result shape: (N_new, N_targets)
             prox_matrix = Q_new.dot(W_target.T)
             
             return prox_matrix.todense() if self.matrix_type == 'dense' else prox_matrix
@@ -531,6 +535,44 @@ def RFGAP(prediction_type=None, y=None, prox_method='rfgap',
             self.W_mat = sparse.csr_matrix(
                 (weights[mask], (flat_rows[mask], flat_cols[mask])), 
                 shape=(N, total_cols),  # shape: N x N_total_leaves (huge but SPARSE)
+                dtype=np.float32
+            )
+
+        def _build_Wu_matrix(self):
+            """
+            [NEW] Builds the Weight Matrix 'W_u' (N_unlabeled x N_total_nodes).
+            This logic was previously inside get_proximities(). Moving it here allows
+            caching and efficient re-use.
+            """
+            N_u = self._n_unlabeled_samples
+            T = self.n_estimators
+            global_leaves_u = self._to_global_leaves(self.leaf_matrix_u)
+            
+            flat_rows = np.repeat(np.arange(N_u), T)
+            flat_cols = global_leaves_u.flatten()
+            
+            # [STRICT FIX] Ensure we use density-weighted normalization (1/M)
+            if self.prox_method == 'original':
+                # Original Method: just 1/T
+                 w_vals = np.full(N_u * T, 1.0/T, dtype=np.float32)
+            else:
+                # RFGAP Method: Use cached density weights (1/M)
+                if self.cached_inverse_M is None:
+                    # Should not happen if fit() logic is correct
+                    raise ValueError("RFGAP weights not found. Model must be fitted with prox_method='rfgap'.")
+                
+                # Map global leaf IDs to their cached inverse weights
+                w_vals = self.cached_inverse_M[flat_cols]
+
+            # Determine shape
+            # We must ensure W_u has the same number of columns as W_mat 
+            # (which is usually _total_unique_nodes, or +N_train if diagonals involved)
+            # This ensures dimensions match when doing dot products or combining matrices.
+            total_cols = self.W_mat.shape[1]
+
+            self.W_u_mat = sparse.csr_matrix(
+                (w_vals, (flat_rows, flat_cols)),
+                shape=(N_u, total_cols), 
                 dtype=np.float32
             )
     
