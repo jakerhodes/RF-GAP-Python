@@ -203,6 +203,9 @@ def RFGAP(prediction_type=None, y=None, prox_method='rfgap',
                 # Pass unlabeled data through the trained forest
                 self.leaf_matrix_u = self.apply(X_unlabeled)
                 self._n_unlabeled_samples = X_unlabeled.shape[0]
+                # Unlabeled proximity matrix (P_uu) naturally has non-zero diagonals.
+                # We force P_ll to match this behavior for consistency.
+                self.non_zero_diagonal = True
             else:
                 self.leaf_matrix_u = None
                 self._n_unlabeled_samples = 0
