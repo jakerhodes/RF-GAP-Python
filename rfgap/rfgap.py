@@ -1,7 +1,7 @@
 # Imports
 import numpy as np
 from scipy import sparse
-from scipy.sparse import hstack, vstack
+from scipy.sparse import hstack, vstack, bmat
 import pandas as pd
 import gc
 
@@ -130,10 +130,17 @@ def RFGAP(prediction_type=None, y=None, prox_method='rfgap',
             self.W_mat = None   # The "Target" weights matrix (Right side of dot product)
             self._leaf_offsets = None 
             self._total_unique_nodes = None
-
-        def fit(self, X, y, sample_weight=None):
+            
+            # [NEW] Unlabeled Data Cache
+            self.leaf_matrix_u = None
+            self._n_unlabeled_samples = 0
+            self.cached_inverse_M = None  # Caches 1/M for use in P_uu normalization
+    
+        def fit(self, X, y, X_unlabeled=None, sample_weight=None):
             """
             Fits the Random Forest and pre-computes the sparse weight matrix W necesssary for proximity calculations.
+            If X_unlabeled is provided, it pre-computes leaf indices for it but does NOT use it for model training.
+    
             RUNTIME COMPLEXITY: O(N * T * log(N))
                 - Forest Construction: O(N * T * log(N) * #features sampled at each node)
                 - Matrix Construction: O(N * T)
@@ -141,7 +148,7 @@ def RFGAP(prediction_type=None, y=None, prox_method='rfgap',
             MEMORY COMPLEXITY: O(N * T)
                 - Stores leaf indices and sparse weights.
                 - Efficiently sparse: Only stores 1 entry per tree per sample.
-
+    
             Parameters
             ----------
             
@@ -152,12 +159,16 @@ def RFGAP(prediction_type=None, y=None, prox_method='rfgap',
             y : array-like of shape (n_samples,) or (n_samples, n_outputs)
                 The target values (class labels in classification, real numbers in regression).
             
+            X_unlabeled : {array-like, sparse matrix} of shape (n_unlabeled, n_features), default=None
+                [NEW] Unlabeled samples to be pre-processed. These are NOT used for training the trees,
+                but their leaf indices are computed and stored to allow P_uu and P_ul calculation later.
+            
             sample_weight : array-like of shape (n_samples,), default=None
                 Sample weights. If None, then samples are equally weighted. Splits that would 
                 create child nodes with net zero or negative weight are ignored while searching 
                 for a split in each node. In the case of classification, splits are also ignored 
                 if they would result in any single class carrying a negative weight in either child node.
-
+    
             Returns
             -------
             self : object
@@ -177,13 +188,24 @@ def RFGAP(prediction_type=None, y=None, prox_method='rfgap',
             # Calculate offsets to flatten (Tree, Leaf) -> Global Feature ID
             # This allows us to treat every node in the forest as a unique feature column.
             n_leaves_per_tree = [t.tree_.node_count for t in self.estimators_]
-            self._leaf_offsets = np.concatenate(([0], np.cumsum(n_leaves_per_tree)[:-1]))  # List of size T showing starting index of each tree's leaves, e.g. [0, 10, 25, 40, ...]
+            self._leaf_offsets = np.concatenate(([0], np.cumsum(n_leaves_per_tree)[:-1]))  # List of size T showing starting index of each tree's leaves
             self._total_unique_nodes = np.sum(n_leaves_per_tree)  # Total unique nodes across all trees (typically NlogN scale)
-
+    
             # Set offset for virtual diagonal nodes (after the last real leaf), needed for non-zero diagonal in RFGAP
             # This avoids the memory-killing setdiag() operation on huge sparse matrices.
             self._diag_offset = self._total_unique_nodes
             
+            # ---------------------------------------------------------
+            # [NEW] STEP 1.5: Handle Unlabeled Data (if present)
+            # ---------------------------------------------------------
+            if X_unlabeled is not None:
+                # Pass unlabeled data through the trained forest
+                self.leaf_matrix_u = self.apply(X_unlabeled)
+                self._n_unlabeled_samples = X_unlabeled.shape[0]
+            else:
+                self.leaf_matrix_u = None
+                self._n_unlabeled_samples = 0
+    
             # ---------------------------------------------------------
             # COMPLEXITY STEP 2: Statistics Calculation -> O(N * T)
             # ---------------------------------------------------------
@@ -193,20 +215,25 @@ def RFGAP(prediction_type=None, y=None, prox_method='rfgap',
                 
                 # Calculate S_i: Set of OOB trees for sample i
                 self.oob_indices = self.get_oob_indices(X) 
-
+    
             # ---------------------------------------------------------
             # COMPLEXITY STEP 3: Build Sparse Weights -> O(N * T)
             # ---------------------------------------------------------
             # We build the W matrix immediately after fit.
             self._build_W_matrix()
-
+    
             return self
-
-
+    
+    
         def get_proximities(self):
             """
             This method produces a proximity matrix for the random forest object.
             Computes the proximity matrix P = Q . W^T using sparse matrix multiplication.
+            
+            If X_unlabeled was passed to fit(), returns block matrix:
+                [ P_ll   P_ul.T ]
+                [ P_ul   P_uu   ]
+    
             RUNTIME COMPLEXITY: O(N * T * k_bar)
                 - Where k_bar is the average number of samples per leaf (i.e. average leaf size)
                 - Asymmetric: 1x Sparse Matmul.
@@ -225,91 +252,164 @@ def RFGAP(prediction_type=None, y=None, prox_method='rfgap',
             
             """
             check_is_fitted(self)
+    
+            # === CASE 1: Labeled Data Only ===
+            if self.leaf_matrix_u is None:
+                
+                # Build Query Matrix Q (Left side of dot product)
+                #    Represents the 'i' term in p(i,j). 
+                #    Complexity: O(N * T)
+                Q = self._build_Q_matrix(leaves=self.leaf_matrix, is_training=True)
+                W = self.W_mat
+    
+                # Symmetric Dot Product (Optimized to reproduce the sparse Query-Weight multiplication using sparse block matrices)
+                if self.force_symmetric and self.prox_method == 'rfgap':
+                    # 
+                    # Math: P_sym = 0.5 * (Q.W.T + W.Q.T)
+                    # Optimization: Instead of hstack([W,Q]).T which requires transposing a huge matrix,
+                    # we use vstack([W.T, Q.T]) which builds the correct CSC structure directly.
+                    
+                    # Left: (N x 2M) CSR
+                    left_side = hstack([Q, W], format='csr', dtype=np.float32)
+                    
+                    # Right: (2M x N) CSC - Built directly from components
+                    # Note: W.T is already cached/cheap if W is CSR.
+                    right_side_T = vstack([W.T, Q.T], format='csc', dtype=np.float32)
+                    
+                    # Free Q early
+                    del Q
+                    gc.collect()
+                    
+                    # Single Pass Multiplication
+                    # CSR @ CSC is the fastest path in Scipy (Gustavson algorithm)
+                    prox_matrix = left_side.dot(right_side_T)
+                    prox_matrix *= 0.5
+                    
+                    del left_side, right_side_T
+                    gc.collect()
+                    
+                else:  # Asymmetric path -- FASTER, recommended if symmetry is not absolutely required in RFGAP
+                    # ---------------------------------------------------------
+                    # COMPLEXITY STEP 4: Sparse Matrix Multiplication
+                    # ---------------------------------------------------------
+                    # Operation: P = Q . W^T
+                    #
+                    # Input Sparsity: Each row has exactly T non-zeros (N * T total).
+                    # Runtime: O(N * T * k_bar), where k_bar is the avg leaf size.
+                    prox_matrix = Q.dot(W.T)
+                    del Q
+                    gc.collect()
+                
+                return prox_matrix.todense() if self.matrix_type == 'dense' else prox_matrix
+    
+            # === CASE 2: Labeled + Unlabeled Data ===
+            # [NEW] This section handles the construction of the full block matrix including Unlabeled data.
+            else:
+                
+                # --- Sub-Case: Method = Original ---
+                # This is direct... just concatenate X and X_u (original does not distinguish in-bag/oob trees)
+                if self.prox_method == 'original':
+                    # Stack indices to create one giant set of samples
+                    combined_leaves = np.vstack([self.leaf_matrix, self.leaf_matrix_u])
+                    
+                    # Build Q and W for the combined set 
+                    # Note: For 'original', W is just 1/T for everyone. Q is 1.0 for everyone.
+                    Q_all = self._build_Q_matrix(leaves=combined_leaves, is_training=False)
+                    
+                    # W matrix for all samples (Original = 1/T)
+                    # We construct this manually here because self.W_mat is specific to Labeled data
+                    N_total = combined_leaves.shape[0]
+                    T = self.n_estimators
+                    global_leaves = self._to_global_leaves(combined_leaves)
+                    
+                    flat_rows = np.repeat(np.arange(N_total), T)
+                    flat_cols = global_leaves.flatten()
+                    weights = np.full(N_total * T, 1.0 / T, dtype=np.float32)
+                    
+                    W_all = sparse.csr_matrix(
+                        (weights, (flat_rows, flat_cols)),
+                        shape=(N_total, self._total_unique_nodes),
+                        dtype=np.float32
+                    )
+                    
+                    prox = Q_all.dot(W_all.T)
+                    return prox.todense() if self.matrix_type == 'dense' else prox
+    
+                # --- Sub-Case: Method = RFGAP ---
+                elif self.prox_method == 'rfgap':
+                    
+                    # 1. P_ll (Labeled-Labeled) -- Always symmetrized by default for consistency with unlabeled-unlabeled prox block
+                    # -------------------------
+                    # Standard RFGAP logic on training data. 
+                    Q_l = self._build_Q_matrix(leaves=self.leaf_matrix, is_training=True)
+                    W_l = self.W_mat
 
-            # Build Query Matrix Q (Left side of dot product)
-            #    Represents the 'i' term in p(i,j). 
-            #    Complexity: O(N * T)
-            Q = self._build_Q_matrix(is_training=True)
-            W = self.W_mat
-
-            # Symmetric Dot Product (Optimized to reproduce the sparse Query-Weight multiplication using sparse block matrices, see `else` block)
-            if self.force_symmetric and self.prox_method == 'rfgap':
-                # 
-                # Math: P_sym = 0.5 * (Q.W.T + W.Q.T)
-                # Optimization: Instead of hstack([W,Q]).T which requires transposing a huge matrix,
-                # we use vstack([W.T, Q.T]) which builds the correct CSC structure directly.
-                
-                # Left: (N x 2M) CSR
-                left_side = hstack([Q, W], format='csr', dtype=np.float32)
-                
-                # Right: (2M x N) CSC - Built directly from components
-                # Note: W.T is already cached/cheap if W is CSR.
-                right_side_T = vstack([W.T, Q.T], format='csc', dtype=np.float32)
-                
-                # Free Q early
-                del Q
-                gc.collect()
-                
-                # Single Pass Multiplication
-                # CSR @ CSC is the fastest path in Scipy (Gustavson algorithm)
-                prox_matrix = left_side.dot(right_side_T)
-                prox_matrix *= 0.5
-                
-                del left_side, right_side_T
-                gc.collect()
-                
-            else:  # Asymmetric path -- FASTER, recommended if symmetry is not absolutely required in RFGAP
-                # ---------------------------------------------------------
-                # COMPLEXITY STEP 4: Sparse Matrix Multiplication
-                # ---------------------------------------------------------
-                # Operation: P = Q . W^T
-                #
-                # Input Sparsity: Each row has exactly T non-zeros (N * T total).
-                # Runtime: O(N * T * k_bar), where k_bar is the avg leaf size.
-                # For deep trees, k_bar is small constants, making this effectively Linear O(N).
-                # This is significantly faster than the O(N^2) dense pairwise approach.
-                prox_matrix = Q.dot(W.T)
-                del Q
-                gc.collect()
-            
-            # NOTE: This tends to increase memory usage compared to unnormalized version (See zilionis example in demo_new)
-            # NOTE: Previous max normalization destroyed symmetry with the current logical flow.
-            # NOTE: Should we normalize differently? E.g. Cosine normalization is symmetric.
-            # NOTE: Normalization in prox_extend is messy since we don't have diagonals there, and we allow arbitrary training indices.
-            # NOTE: Is normalization even needed?
-            
-            # Max Normalization (Row-wise) - OLD BROKEN VERSION, destroys symmetry
-            # if self.normalize and self.non_zero_diagonal:
-            #     if not sparse.isspmatrix_csr(prox_matrix):
-            #         prox_matrix = prox_matrix.tocsr()
-                
-            #     # Fast Row Max (Zero Memory Overhead)
-            #     # Calculate max of each row using slice reduction on the data array
-            #     max_vals = np.maximum.reduceat(prox_matrix.data, prox_matrix.indptr[:-1])
-            #     max_vals[max_vals == 0] = 1.0
-                
-            #     # In-Place Scaling
-            #     inplace_csr_row_scale(prox_matrix, 1.0 / max_vals)
-                
-            #     # Robust Diagonal Setting (The Fix)
-            #     # Instead of assuming the diagonal is at the end, we find it exactly.
-                
-            #     # Create an array of row indices corresponding to every non-zero entry
-            #     row_indices = np.repeat(np.arange(prox_matrix.shape[0]), np.diff(prox_matrix.indptr))
-                
-            #     # Identify where (row_index == col_index)
-            #     # This finds the diagonal entries wherever they are in the arrays
-            #     diag_mask = (row_indices == prox_matrix.indices)
-                
-            #     # Overwrite only those specific entries
-            #     prox_matrix.data[diag_mask] = 1.0
-                
-            #     # Cleanup
-            #     del row_indices, diag_mask
-
-            return prox_matrix.todense() if self.matrix_type == 'dense' else prox_matrix
-
-
+                    left_side = hstack([Q_l, W_l], format='csr', dtype=np.float32)
+                    
+                    # Right: (2M x N) CSC - Built directly from components
+                    # Note: W.T is already cached/cheap if W is CSR.
+                    right_side_T = vstack([W_l.T, Q_l.T], format='csc', dtype=np.float32)
+                    
+                    # Free Q_l early
+                    del Q_l
+                    gc.collect()
+                    
+                    # Single Pass Multiplication
+                    # CSR @ CSC is the fastest path in Scipy (Gustavson algorithm)
+                    P_ll = left_side.dot(right_side_T)
+                    P_ll *= 0.5
+                    
+                    del left_side, right_side_T
+                    gc.collect()
+                    
+                    
+                    # 2. P_ul (Unlabeled-Labeled)
+                    # ---------------------------
+                    # Unlabeled points querying Labeled Weights (prox_extend logic)
+                    Q_u = self._build_Q_matrix(leaves=self.leaf_matrix_u, is_training=False)
+                    P_ul = Q_u.dot(self.W_mat.T)
+                    
+                    
+                    # 3. P_uu (Unlabeled-Unlabeled)
+                    # -----------------------------
+                    # We need W_u_scaled to return 1/M to get (1/T * 1/M) logic consistent with Labeled data.
+                    N_u = self._n_unlabeled_samples
+                    T = self.n_estimators
+                    global_leaves_u = self._to_global_leaves(self.leaf_matrix_u)
+                    
+                    flat_rows = np.repeat(np.arange(N_u), T)
+                    flat_cols = global_leaves_u.flatten()
+                    
+                    # [STRICT FIX] Ensure we use density-weighted normalization (1/M)
+                    if self.cached_inverse_M is None:
+                        raise ValueError("RFGAP weights not found. Model must be fitted with prox_method='rfgap'.")
+                    
+                    # Map global leaf IDs to their cached inverse weights
+                    w_vals = self.cached_inverse_M[flat_cols]
+                    
+                    # Retrieve the correct shape from Q_u to ensure dimensions match
+                    expected_cols = Q_u.shape[1] 
+                    
+                    W_u_scaled = sparse.csr_matrix(
+                        (w_vals, (flat_rows, flat_cols)),
+                        shape=(N_u, expected_cols), 
+                        dtype=np.float32
+                    )
+                    
+                    P_uu = Q_u.dot(W_u_scaled.T)
+                    del Q_u, W_u_scaled
+                    
+                    # 4. Assemble Block Matrix
+                    # ------------------------
+                    # [ P_ll   P_ul.T ]
+                    # [ P_ul   P_uu   ]
+                    
+                    prox_all = bmat([[P_ll, P_ul.T], 
+                                     [P_ul, P_uu]], format='csc') # CSC good for slicing later
+                    
+                    return prox_all.todense() if self.matrix_type == 'dense' else prox_all
+    
+    
         def prox_extend(self, X_new, training_indices=None):
             """
             Calculates proximities between New Data (rows) and Training Data (cols) with the optimized Query-Weight matrix method (sparse)
@@ -332,8 +432,11 @@ def RFGAP(prediction_type=None, y=None, prox_method='rfgap',
             """
             check_is_fitted(self)
             
+            # Pass X_new to get leaves on the fly
+            leaves_new = self.apply(X_new)
+            
             # Build Query Matrix Q for NEW data (X_new)
-            Q_new = self._build_Q_matrix(X_query=X_new, is_training=False)
+            Q_new = self._build_Q_matrix(leaves=leaves_new, is_training=False)
             
             # Select Target Weights (W)
             if training_indices is not None:
@@ -345,14 +448,14 @@ def RFGAP(prediction_type=None, y=None, prox_method='rfgap',
             prox_matrix = Q_new.dot(W_target.T)
             
             return prox_matrix.todense() if self.matrix_type == 'dense' else prox_matrix
-
-
+    
+    
         # MATRIX BUILDERS (Mapping to Definitions)
         def _to_global_leaves(self, leaf_mat):
             """Offset local leaf IDs to global feature IDs."""
             return leaf_mat + self._leaf_offsets
-
-
+    
+    
         def _build_W_matrix(self):
             """
             Builds the Weight Matrix 'W' (N_samples x N_total_nodes).
@@ -393,6 +496,10 @@ def RFGAP(prediction_type=None, y=None, prox_method='rfgap',
                     inverse_M_node = 1.0 / M_node_weights
                 inverse_M_node[~np.isfinite(inverse_M_node)] = 0
                 
+                # [NEW] Cache this for use in P_uu (Unlabeled-Unlabeled) proximity
+                # This ensures unlabeled data is normalized by the same density map as labeled data.
+                self.cached_inverse_M = inverse_M_node 
+                
                 # Combine: W_val = c_j(t) * (1 / M_node)
                 weights = c_j_t * inverse_M_node[flat_cols]
                 
@@ -418,7 +525,7 @@ def RFGAP(prediction_type=None, y=None, prox_method='rfgap',
                 weights = np.concatenate([weights, diag_vals])
                 
                 total_cols += N 
-
+    
             # Filter zeros and build Sparse Matrix W -> O(N * T)
             mask = weights > 0
             self.W_mat = sparse.csr_matrix(
@@ -426,28 +533,32 @@ def RFGAP(prediction_type=None, y=None, prox_method='rfgap',
                 shape=(N, total_cols),  # shape: N x N_total_leaves (huge but SPARSE)
                 dtype=np.float32
             )
-
-
-        def _build_Q_matrix(self, X_query=None, is_training=True):
+    
+    
+        def _build_Q_matrix(self, leaves=None, is_training=True):
             """
             Builds the Query Matrix 'Q' (N_query x N_total_nodes).
             This matrix handles the 'i' term and the Summation scope (S_i).
+            
+            [Updated] Now accepts 'leaves' directly to allow pre-computed leaf matrices.
             """
-            if is_training:
-                leaf_mat = self.leaf_matrix
-                # S_i logic: For RFGAP, we only sum over trees where i is OOB.
-                oob_mask = self.oob_indices if self.prox_method == 'rfgap' else None
-            else:
-                leaf_mat = self.apply(X_query)
-                # For new data, the sample was not in ANY bag, so it is OOB for all trees.
-                oob_mask = np.ones_like(leaf_mat) 
-
-            N, T = leaf_mat.shape
-            global_leaves = self._to_global_leaves(leaf_mat)
+            if leaves is None:
+                leaves = self.leaf_matrix
+    
+            N, T = leaves.shape
+            global_leaves = self._to_global_leaves(leaves)
             
             flat_rows = np.repeat(np.arange(N), T)
             flat_cols = global_leaves.flatten()
-
+    
+            # Determine OOB mask logic
+            if is_training:
+                # S_i logic: For RFGAP, we only sum over trees where i is OOB.
+                oob_mask = self.oob_indices if self.prox_method == 'rfgap' else None
+            else:
+                # For new data, the sample was not in ANY bag, so it is OOB for all trees.
+                oob_mask = None # Treated as all ones later
+    
             # ORIGINAL PROXIMITY
             # p(i,j) = Sum[ ... ]  (Sum over all t=1 to T)
             #
@@ -478,8 +589,9 @@ def RFGAP(prediction_type=None, y=None, prox_method='rfgap',
                     
                 else:
                     # For new data, S_i is the set of ALL trees (size T).
+                    # vals = 1/T for normalization
                     vals = np.full(N * T, 1.0 / T, dtype=np.float32)
-            
+        
             # Non-zero diagonal trick via Virtual Diagonal Injection
             # This avoids the memory-killing setdiag() operation on huge sparse matrices.
             total_cols = self._total_unique_nodes
@@ -498,10 +610,10 @@ def RFGAP(prediction_type=None, y=None, prox_method='rfgap',
                 
                 # If is_training=False (prox_extend), we DO NOT add values, 
                 # but we DO keep the total_cols expanded so dimensions match W.
-
+    
             return sparse.csr_matrix(
                 (vals, (flat_rows, flat_cols)), 
-                shape=(N, total_cols),  # shape: N_query x N_total_leaves (huge but SPARSE)
+                shape=(N, total_cols), 
                 dtype=np.float32
             )
 
