@@ -131,9 +131,9 @@ def RFGAP(prediction_type=None, y=None, prox_method='rfgap',
             self._leaf_offsets = None 
             self._total_unique_nodes = None
             
-            # [NEW] Unlabeled Data Cache
+            # Unlabeled Data Cache
             self.leaf_matrix_u = None
-            self.W_u_mat = None # Cache for Unlabeled Weights
+            # Removed self.W_u_mat -> We will merge it into self.W_mat immediately in fit()
             self._n_unlabeled_samples = 0
             self.cached_inverse_M = None  # Caches 1/M for use in P_uu normalization (in-bag leaf size)
     
@@ -175,6 +175,8 @@ def RFGAP(prediction_type=None, y=None, prox_method='rfgap',
             self : object
                 Fitted estimator.
             """
+            # TODO: Check y type; make sure works with the rest of code. Works well for proximities, but nonconformity scores may have issues.
+            # Refer to demo notebook on Iris dataset with string labels
             super().fit(X, y, sample_weight)
             self.y = y
             self._n_train_samples = X.shape[0]
@@ -197,15 +199,16 @@ def RFGAP(prediction_type=None, y=None, prox_method='rfgap',
             self._diag_offset = self._total_unique_nodes
             
             # ---------------------------------------------------------
-            # [NEW] STEP 1.5: Handle Unlabeled Data (if present)
+            # STEP 1.5: Handle Unlabeled Data (if present)
             # ---------------------------------------------------------
             if X_unlabeled is not None:
                 # Pass unlabeled data through the trained forest
                 self.leaf_matrix_u = self.apply(X_unlabeled)
                 self._n_unlabeled_samples = X_unlabeled.shape[0]
-                # Unlabeled proximity matrix (P_uu) naturally has non-zero diagonals.
+                # Unlabeled proximity matrix (P_uu) naturally has non-zero diagonals and symmetry.
                 # We force P_ll to match this behavior for consistency.
                 self.non_zero_diagonal = True
+                self.force_symmetric = True
             else:
                 self.leaf_matrix_u = None
                 self._n_unlabeled_samples = 0
@@ -216,22 +219,29 @@ def RFGAP(prediction_type=None, y=None, prox_method='rfgap',
             if self.prox_method == 'rfgap':
                 # Calculate c_j(t): Multiplicity of sample j in tree t
                 self.c_j_t = self.get_in_bag_counts(X)
-                
                 # Calculate S_i: Set of OOB trees for sample i
                 self.oob_indices = self.get_oob_indices(X) 
     
             # ---------------------------------------------------------
             # COMPLEXITY STEP 3: Build Sparse Weights -> O(N * T)
             # ---------------------------------------------------------
-            # We build the W matrix immediately after fit.
-            # This populates self.cached_inverse_M which is needed for W_u_mat
+            # 1. Build Labeled Weights (Stored temporarily in self.W_mat)
             self._build_W_matrix()
-
+    
             # ---------------------------------------------------------
-            # [NEW] STEP 4: Build Unlabeled Weights -> O(Nu * T)
+            # STEP 4: Build & Merge Unlabeled Weights -> O(Nu * T)
             # ---------------------------------------------------------
             if self.leaf_matrix_u is not None:
-                self._build_Wu_matrix()
+                # 2. Build Unlabeled Weights
+                W_u = self._build_Wu_matrix()
+                
+                # 3. MERGE IMMEDIATELY: Stack Labeled (Top) and Unlabeled (Bottom)
+                # This ensures self.W_mat always matches the dimensions of (Labeled + Unlabeled)
+                self.W_mat = vstack([self.W_mat, W_u], format='csr')
+                
+                # Free temp memory
+                del W_u
+                gc.collect()
     
             return self
     
@@ -264,140 +274,64 @@ def RFGAP(prediction_type=None, y=None, prox_method='rfgap',
             """
             check_is_fitted(self)
     
-            # === CASE 1: Labeled Data Only ===
-            if self.leaf_matrix_u is None:
-                
-                # Build Query Matrix Q (Left side of dot product)
-                #    Represents the 'i' term in p(i,j). 
-                #    Complexity: O(N * T)
-                Q = self._build_Q_matrix(leaves=self.leaf_matrix, is_training=True)
-                W = self.W_mat
+            # 1. Retrieve Labeled Components
+            Q_l = self._build_Q_matrix(leaves=self.leaf_matrix, is_training=True)
     
-                # Symmetric Dot Product (Optimized to reproduce the sparse Query-Weight multiplication using sparse block matrices)
-                if self.force_symmetric and self.prox_method == 'rfgap':
-                    # 
-                    # Math: P_sym = 0.5 * (Q.W.T + W.Q.T)
-                    # Optimization: Instead of hstack([W,Q]).T which requires transposing a huge matrix,
-                    # we use vstack([W.T, Q.T]) which builds the correct CSC structure directly.
-                    
-                    # Left: (N x 2M) CSR
-                    left_side = hstack([Q, W], format='csr', dtype=np.float32)
-                    
-                    # Right: (2M x N) CSC - Built directly from components
-                    # Note: W.T is already cached/cheap if W is CSR.
-                    right_side_T = vstack([W.T, Q.T], format='csc', dtype=np.float32)
-                    
-                    # Free Q early
-                    del Q
-                    gc.collect()
-                    
-                    # Single Pass Multiplication
-                    # CSR @ CSC is the fastest path in Scipy (Gustavson algorithm)
-                    prox_matrix = left_side.dot(right_side_T)
-                    prox_matrix *= 0.5
-                    
-                    del left_side, right_side_T
-                    gc.collect()
-                    
-                else:  # Asymmetric path -- FASTER, recommended if symmetry is not absolutely required in RFGAP
-                    # ---------------------------------------------------------
-                    # COMPLEXITY STEP 4: Sparse Matrix Multiplication
-                    # ---------------------------------------------------------
-                    # Operation: P = Q . W^T
-                    #
-                    # Input Sparsity: Each row has exactly T non-zeros (N * T total).
-                    # Runtime: O(N * T * k_bar), where k_bar is the avg leaf size.
-                    prox_matrix = Q.dot(W.T)
-                    del Q
-                    gc.collect()
+            # 2. Retrieve Unlabeled Components (if any) and Stack Q
+            if self.leaf_matrix_u is not None:
+                # Build Q for unlabeled (is_training=False ensures correct column width/padding)
+                Q_u = self._build_Q_matrix(leaves=self.leaf_matrix_u, is_training=False)
                 
-                return prox_matrix.todense() if self.matrix_type == 'dense' else prox_matrix
-    
-            # === CASE 2: Labeled + Unlabeled Data ===
-            # [NEW] This section handles the construction of the full block matrix including Unlabeled data.
+                # STACKING Q: Labeled on top, Unlabeled on bottom
+                Q_total = vstack([Q_l, Q_u], format='csr')
+                del Q_l, Q_u
+                gc.collect()
             else:
+                Q_total = Q_l
+    
+            # 3. Safety Check: Ensure W_mat was correctly merged in fit()
+            if Q_total.shape[0] != self.W_mat.shape[0]:
+                raise RuntimeError(
+                    f"Dimension Mismatch: Q has {Q_total.shape[0]} rows (Labeled+Unlabeled) but W has {self.W_mat.shape[0]}. "
+                    "This usually implies fit() was not re-run after updating the code. Please re-run fit()."
+                )
+    
+            # 4. Monolithic Dot Product
+            # -------------------------
+            prox_matrix = None
+    
+            if self.force_symmetric and self.prox_method == 'rfgap':
+                # P = 0.5 * (Q W^T + W Q^T)
                 
-                # --- Sub-Case: Method = Original ---
-                # This is direct... just concatenate X and X_u (original does not distinguish in-bag/oob trees)
-                if self.prox_method == 'original':
-                    
-                    # 1. Stack Leaves for Q (Query)
-                    combined_leaves = np.vstack([self.leaf_matrix, self.leaf_matrix_u])
-                    Q_all = self._build_Q_matrix(leaves=combined_leaves, is_training=False)
-                    
-                    # 2. Stack Pre-computed Weights for W (Target)
-                    # This is much faster than rebuilding W from scratch using indices
-                    if self.W_u_mat is None:
-                            raise ValueError("Unlabeled weights not found. Ensure fit() was called with X_unlabeled.")
-                    
-                    # Create the giant W matrix by stacking labeled and unlabeled weights
-                    W_all = vstack([self.W_mat, self.W_u_mat], format='csr')
-                    
-                    # 3. Single Giant Dot Product
-                    # We do this as one large operation because 'original' method treats all samples uniformly
-                    prox = Q_all.dot(W_all.T)
-                    
-                    return prox.todense() if self.matrix_type == 'dense' else prox
+                # Left side: [Q, W] -> (N_total, 2*F)
+                left_side = hstack([Q_total, self.W_mat], format='csr', dtype=np.float32)
+                
+                # Right side: [W.T, Q.T] -> (2*F, N_total) -> CSC for fast multiplication
+                right_side_T = vstack([self.W_mat.T, Q_total.T], format='csc', dtype=np.float32)
+                
+                # Single Pass Multiplication
+                prox_matrix = left_side.dot(right_side_T)
+                prox_matrix *= 0.5
+                
+                del left_side, right_side_T
+                gc.collect()
+                
+            else:
+                # Asymmetric: P = Q W^T
+                prox_matrix = Q_total.dot(self.W_mat.T)
+            
+            # Cleanup
+            del Q_total
 
-                # --- Sub-Case: Method = RFGAP ---
-                elif self.prox_method == 'rfgap':
-                    
-                    # 1. P_ll (Labeled-Labeled) -- Always symmetrized by default for consistency with unlabeled-unlabeled prox block
-                    # -------------------------
-                    # Standard RFGAP logic on training data. 
-                    Q_l = self._build_Q_matrix(leaves=self.leaf_matrix, is_training=True)
-                    W_l = self.W_mat
-
-                    left_side = hstack([Q_l, W_l], format='csr', dtype=np.float32)
-                    
-                    # Right: (2M x N) CSC - Built directly from components
-                    # Note: W.T is already cached/cheap if W is CSR.
-                    right_side_T = vstack([W_l.T, Q_l.T], format='csc', dtype=np.float32)
-                    
-                    # Free Q_l early
-                    del Q_l
-                    gc.collect()
-                    
-                    # Single Pass Multiplication
-                    # CSR @ CSC is the fastest path in Scipy (Gustavson algorithm)
-                    P_ll = left_side.dot(right_side_T)
-                    P_ll *= 0.5
-                    
-                    del left_side, right_side_T
-                    gc.collect()
-                    
-                    
-                    # 2. P_ul (Unlabeled-Labeled)
-                    # ---------------------------
-                    # Unlabeled points querying Labeled Weights (prox_extend logic)
-                    Q_u = self._build_Q_matrix(leaves=self.leaf_matrix_u, is_training=False)
-                    P_ul = Q_u.dot(self.W_mat.T)
-                    
-                    
-                    # 3. P_uu (Unlabeled-Unlabeled)
-                    # -----------------------------
-                    # [MODIFIED] Use the pre-computed W_u_mat instead of rebuilding on the fly.
-                    # This dramatically speeds up repeated calls.
-                    
-                    if self.W_u_mat is None:
-                        # Fallback/Safety check if somehow fit() didn't run the builder
-                         raise ValueError("RFGAP Unlabeled weights not found. Ensure fit() was called with X_unlabeled.")
-
-                    P_uu = Q_u.dot(self.W_u_mat.T)
-                    del Q_u
-                    
-                    # 4. Assemble Block Matrix
-                    # ------------------------
-                    # [ P_ll   P_ul.T ]
-                    # [ P_ul   P_uu   ]
-                    
-                    prox_all = bmat([[P_ll, P_ul.T], 
-                                     [P_ul, P_uu]], format='csc') # CSC good for slicing later
-                    
-                    return prox_all.todense() if self.matrix_type == 'dense' else prox_all
+            # Output Prox Matrix
+            # ------------------------
+            # [ P_ll   P_ul.T ]
+            # [ P_ul   P_uu   ]
+            
+            return prox_matrix.todense() if self.matrix_type == 'dense' else prox_matrix
     
-    
-        def prox_extend(self, X_new, training_indices=None):
+        #TODO: Check memory usage of prox_extend in semi-supervised mode (X_unlabeled present)
+        def prox_extend(self, X_new):
             """
             Calculates proximities between New Data (rows) and the existing data (cols).
             
@@ -411,18 +345,12 @@ def RFGAP(prediction_type=None, y=None, prox_method='rfgap',
             ----------
             X_new : (n_samples, n_features) array_like
                 New observations.
-            training_indices : array-like, optional
-                Indices of specific target observations to compute proximities for.
-                If X_unlabeled was used, indices > n_train_samples refer to the unlabeled set.
-                Default is None (computes against ALL labeled + unlabeled data).
 
             Returns
             -------
             array-like or csr_matrix
                 Proximities between X_new and the fitted data.
             """
-            check_is_fitted(self)
-            
             # 1. Pass X_new through the forest to get leaf indices
             leaves_new = self.apply(X_new)
             
@@ -430,29 +358,17 @@ def RFGAP(prediction_type=None, y=None, prox_method='rfgap',
             # Q_new shape: (N_new, Total_Unique_Nodes)
             Q_new = self._build_Q_matrix(leaves=leaves_new, is_training=False)
             
-            # 3. Construct Target Weight Matrix (W_full)
-            # We want proximities to BOTH Labeled and Unlabeled data.
-            if self.leaf_matrix_u is not None:
-                if self.W_u_mat is None:
-                    raise ValueError("Unlabeled weights not found. Ensure fit() was called with X_unlabeled.")
-                
-                # Stack: Labeled on top, Unlabeled on bottom
-                # W_full shape: (N_train + N_unlabeled, Total_Unique_Nodes)
-                W_full = vstack([self.W_mat, self.W_u_mat], format='csr')
-            else:
-                # Labeled only
-                W_full = self.W_mat
-                
-            # 4. Filter Targets (if user requested specific indices)
-            if training_indices is not None:
-                W_target = W_full[training_indices]
-            else:
-                W_target = W_full
-                
-            # 5. Compute Dot Product
-            # P = Q . W^T
-            # Result shape: (N_new, N_targets)
-            prox_matrix = Q_new.dot(W_target.T)
+            # 3. Compute Dot Product efficiently
+            # Target: P = Q . W^T
+            # Optimization: P = (W . Q^T)^T
+            # We transpose the SMALL matrix Q instead of the HUGE matrix W.
+            
+            # Q_new is CSR. Transposing it makes it CSC, which is efficient for 
+            # the dot product: W (CSR) dot Q.T (CSC).
+            prox_matrix = (self.W_mat.dot(Q_new.T)).T
+            
+            # Cleanup
+            del Q_new
             
             return prox_matrix.todense() if self.matrix_type == 'dense' else prox_matrix
     
@@ -503,7 +419,7 @@ def RFGAP(prediction_type=None, y=None, prox_method='rfgap',
                     inverse_M_node = 1.0 / M_node_weights
                 inverse_M_node[~np.isfinite(inverse_M_node)] = 0
                 
-                # [NEW] Cache this for use in P_uu (Unlabeled-Unlabeled) proximity
+                # Cache this for use in P_uu (Unlabeled-Unlabeled) proximity
                 # This ensures unlabeled data is normalized by the same density map as labeled data.
                 self.cached_inverse_M = inverse_M_node 
                 
@@ -554,7 +470,7 @@ def RFGAP(prediction_type=None, y=None, prox_method='rfgap',
             flat_rows = np.repeat(np.arange(N_u), T)
             flat_cols = global_leaves_u.flatten()
             
-            # [STRICT FIX] Ensure we use density-weighted normalization (1/M)
+            # Ensure we use density-weighted normalization (1/M)
             if self.prox_method == 'original':
                 # Original Method: just 1/T
                  w_vals = np.full(N_u * T, 1.0/T, dtype=np.float32)
@@ -573,11 +489,11 @@ def RFGAP(prediction_type=None, y=None, prox_method='rfgap',
             # This ensures dimensions match when doing dot products or combining matrices.
             total_cols = self.W_mat.shape[1]
 
-            self.W_u_mat = sparse.csr_matrix(
-                (w_vals, (flat_rows, flat_cols)),
-                shape=(N_u, total_cols), 
-                dtype=np.float32
-            )
+            return sparse.csr_matrix(
+                    (w_vals, (flat_rows, flat_cols)),
+                    shape=(N_u, total_cols), 
+                    dtype=np.float32
+                )
     
     
         def _build_Q_matrix(self, leaves=None, is_training=True):
