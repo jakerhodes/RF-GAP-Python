@@ -237,7 +237,7 @@ def RFGAP(prediction_type=None, y=None, prox_method='rfgap',
                 
                 # 3. MERGE IMMEDIATELY: Stack Labeled (Top) and Unlabeled (Bottom)
                 # This ensures self.W_mat always matches the dimensions of (Labeled + Unlabeled)
-                self.W_mat = vstack([self.W_mat, W_u], format='csr')
+                self.W_mat = vstack([self.W_mat, W_u], format='csr', dtype=np.float32)
                 
                 # Free temp memory
                 del W_u
@@ -283,7 +283,7 @@ def RFGAP(prediction_type=None, y=None, prox_method='rfgap',
                 Q_u = self._build_Q_matrix(leaves=self.leaf_matrix_u, is_training=False)
                 
                 # STACKING Q: Labeled on top, Unlabeled on bottom
-                Q_total = vstack([Q_l, Q_u], format='csr')
+                Q_total = vstack([Q_l, Q_u], format='csr', dtype=np.float32)
                 del Q_l, Q_u
                 gc.collect()
             else:
