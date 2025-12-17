@@ -1,7 +1,7 @@
 # Imports
 import numpy as np
 from scipy import sparse
-from scipy.sparse import hstack, vstack, bmat
+from scipy.sparse import hstack, vstack
 import pandas as pd
 import gc
 
