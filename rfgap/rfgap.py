@@ -91,15 +91,15 @@ def RFGAP(prediction_type=None, y=None, prox_method='rfgap',
 
     # Logic to select the correct base class
     if model_type == 'rf':
-        if prediction_type == 'classification': rf = RandomForestClassifier
-        elif prediction_type == 'regression': rf = RandomForestRegressor
+        if prediction_type == 'classification': base_model = RandomForestClassifier
+        elif prediction_type == 'regression': base_model = RandomForestRegressor
     elif model_type == 'et':
-        if prediction_type == 'classification': rf = ExtraTreesClassifier
-        elif prediction_type == 'regression': rf = ExtraTreesRegressor
+        if prediction_type == 'classification': base_model = ExtraTreesClassifier
+        elif prediction_type == 'regression': base_model = ExtraTreesRegressor
     else:
         raise ValueError("model_type must be either 'rf' (RandomForest) or 'et' (ExtraTrees)")
 
-    class RFGAP(rf):
+    class RFGAP(base_model):
         def __init__(self, prox_method=prox_method, matrix_type=matrix_type, non_zero_diagonal=non_zero_diagonal, force_symmetric=force_symmetric,
                      **kwargs):
             
