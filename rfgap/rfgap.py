@@ -162,7 +162,8 @@ def RFGAP(prediction_type=None, y=None, prox_method='rfgap',
             
             y : array-like of shape (n_samples,) or (n_samples, n_outputs)
                 The target values (class labels in classification, real numbers in regression).
-                If y contains NaNs, those samples are treated as unlabeled and not used for training.
+                If y has missing values (-1/NaNs), those samples are treated as unlabeled and not used for training,
+                but are included in proximity calculations after training the RF on the labeled data.
             
             sample_weight : array-like of shape (n_samples,), default=None
                 Sample weights. If None, then samples are equally weighted. Splits that would 
@@ -182,38 +183,45 @@ def RFGAP(prediction_type=None, y=None, prox_method='rfgap',
             # 1. Clear previous state
             self._inv_stack_order = None
             self._n_total_samples = X.shape[0]
-    
-            # 2. Standardize y immediately (handles Lists, Pandas Series, etc.)
+            
+            # 2. Standardize y immediately
             y = np.asarray(y)
             
-            # 3. Detect Unlabeled Data via NaNs
-            # pd.isna is robust to mixed types (None, np.nan)
-            mask_unlabeled = pd.isna(y)
+            # 3. Detect unlabeled samples depending on prediction_type
+            if self.prediction_type == "classification":
+                if np.issubdtype(y.dtype, np.floating):
+                    # Treat BOTH -1 and NaN as unlabeled (robust)
+                    mask_unlabeled = np.isnan(y) | (y == -1)
+                else:
+                    mask_unlabeled = (y == -1)
+            else:
+                # regression: NaN is unlabeled
+                if not np.issubdtype(y.dtype, np.floating):
+                    y = y.astype(np.float32)
+                mask_unlabeled = np.isnan(y)
             
             if not np.any(mask_unlabeled):
-                # Case A: Fully Supervised
+                # Case A: Fully supervised
                 X_train = X
                 y_train = y
                 X_unlabeled = None
-                
+            
             else:
-                # Case B: Semi-Supervised (Split Data)
+                # Case B: Semi-supervised
                 idx_labeled = np.flatnonzero(~mask_unlabeled)
                 idx_unlabeled = np.flatnonzero(mask_unlabeled)
-    
-                # Store Permutation (to restore original order later)
-                # Stacked Order: [All Labeled, All Unlabeled]
+            
+                # Store permutation to restore original order later
                 stack_order = np.concatenate([idx_labeled, idx_unlabeled])
                 self._inv_stack_order = np.empty(self._n_total_samples, dtype=np.int64)
                 self._inv_stack_order[stack_order] = np.arange(self._n_total_samples, dtype=np.int64)
-    
-                # Slice Data
-                # Note: Assumes X is numpy-like or sparse. (If DF, usage of .iloc is implied by convention)
+            
+                # Slice
                 X_train = X[idx_labeled]
                 y_train = y[idx_labeled]
                 X_unlabeled = X[idx_unlabeled]
-    
-                # Slice Weights if present
+            
+                # Slice weights if present
                 if sample_weight is not None:
                     sample_weight = np.asarray(sample_weight)[idx_labeled]
     
@@ -250,6 +258,7 @@ def RFGAP(prediction_type=None, y=None, prox_method='rfgap',
                 self._n_unlabeled_samples = X_unlabeled.shape[0]
                 # Unlabeled proximity matrix (P_uu) naturally has non-zero diagonals and symmetry.
                 # We force P_ll to match this behavior for consistency.
+                print("Semi-supervised mode. Forcing `non_zero_diagonal`=True and `force_symmetric`=True for consistency.")
                 self.non_zero_diagonal = True
                 self.force_symmetric = True
             else:
