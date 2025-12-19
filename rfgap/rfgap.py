@@ -24,8 +24,8 @@ from sklearn.utils.validation import check_is_fitted
 import warnings
 
 
-def RFGAP(prediction_type=None, y=None, prox_method='rfgap', 
-          matrix_type='sparse', non_zero_diagonal=False, force_symmetric=False, 
+def RFGAP(prediction_type=None, y=None, prox_method='rfgap', matrix_type='sparse',
+          non_zero_diagonal=False, force_symmetric=False, max_normalize=False,
           model_type='rf', **kwargs):
     """
     Factory function to create an optimized Random Forest or Extra Trees Proximity object.
@@ -63,6 +63,11 @@ def RFGAP(prediction_type=None, y=None, prox_method='rfgap',
     
     force_symmetric : bool
         Enforce symmetry of proximities. (default is False)
+    
+    max_normalize : bool
+        Only used for RF-GAP proximities. Whether to max-normalize the proximities 
+        after construction (default is False). This might be useful when comparing
+        or integrating proximities across multiple models or datasets.
 
     model_type : str
         'rf' for RandomForest (default) or 'et' for ExtraTrees.
@@ -100,7 +105,8 @@ def RFGAP(prediction_type=None, y=None, prox_method='rfgap',
         raise ValueError("model_type must be either 'rf' (RandomForest) or 'et' (ExtraTrees)")
 
     class RFGAP(base_model):
-        def __init__(self, prox_method=prox_method, matrix_type=matrix_type, non_zero_diagonal=non_zero_diagonal, force_symmetric=force_symmetric,
+        def __init__(self, prox_method=prox_method, matrix_type=matrix_type,
+                     non_zero_diagonal=non_zero_diagonal, force_symmetric=force_symmetric, max_normalize=max_normalize,
                      **kwargs):
             
             # Enforce bootstrapping for ExtraTrees if not specified.
@@ -125,6 +131,7 @@ def RFGAP(prediction_type=None, y=None, prox_method='rfgap',
             self.prediction_type = prediction_type
             self.non_zero_diagonal = non_zero_diagonal
             self.force_symmetric = force_symmetric
+            self.max_normalize = max_normalize
             
             # Internal Cache
             self.W_mat = None   # The "Target" weights matrix (Right side of dot product)
@@ -139,6 +146,9 @@ def RFGAP(prediction_type=None, y=None, prox_method='rfgap',
             # Partial-label (NaN in y) bookkeeping (preserve original X order)
             self._inv_stack_order = None
             self._n_total_samples = 0
+
+            # Global max normalization cache
+            self.global_max = None
 
         #TODO: do something more elegant than X_train slicing and index reordering. This might cause some memory overhead, but it's fine for now.
         def fit(self, X, y, sample_weight=None):
@@ -383,6 +393,11 @@ def RFGAP(prediction_type=None, y=None, prox_method='rfgap',
             else:
                 # Asymmetric: P = Q W^T
                 prox_matrix = Q_total.dot(self.W_mat.T)
+
+            # Normalize proximities to [0,1] by global max if requested
+            if self.max_normalize and self.prox_method == 'rfgap':
+                self.global_max = prox_matrix.max()
+                prox_matrix.data /= self.global_max
             
             # Cleanup
             del Q_total
@@ -416,16 +431,15 @@ def RFGAP(prediction_type=None, y=None, prox_method='rfgap',
             Q_new = self._build_Q_matrix(leaves=leaves_new, is_training=False)
             
             # 3. Compute Dot Product efficiently
-            # Target: P = Q . W^T
-            # Optimization: P = (W . Q^T)^T
-            # We transpose the SMALL matrix Q instead of the HUGE matrix W.
-            
-            # Q_new is CSR. Transposing it makes it CSC, which is efficient for 
-            # the dot product: W (CSR) dot Q.T (CSC).
-            prox_matrix = (self.W_mat.dot(Q_new.T)).T
+            # P = Q . W^T
+            prox_matrix = Q_new.dot(self.W_mat.T)
             
             # Cleanup
             del Q_new
+
+            # Max-Normalize if requested using training global max to ensure consistent scaling
+            if self.max_normalize and self.prox_method == 'rfgap':
+                prox_matrix.data /= self.global_max
             
             return prox_matrix.todense() if self.matrix_type == 'dense' else prox_matrix
     
@@ -1273,4 +1287,5 @@ def RFGAP(prediction_type=None, y=None, prox_method='rfgap',
     
             return outlier_scores
     
-    return RFGAP(prox_method = prox_method, matrix_type = matrix_type, non_zero_diagonal = non_zero_diagonal, force_symmetric = force_symmetric, **kwargs)
+    return RFGAP(prox_method = prox_method, matrix_type = matrix_type,
+                 non_zero_diagonal = non_zero_diagonal, force_symmetric = force_symmetric, max_normalize = max_normalize, **kwargs)
