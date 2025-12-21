@@ -404,28 +404,24 @@ def RFGAP(prediction_type=None, y=None, prox_method='rfgap', matrix_type='sparse
             
             return prox_matrix.todense() if self.matrix_type == 'dense' else prox_matrix
     
-        #TODO: Check memory usage of prox_extend in semi-supervised mode (X_unlabeled present)        
-        def prox_extend(self, X_new, return_self_prox=False):
+        #TODO: Check memory usage of prox_extend in semi-supervised mode (X_unlabeled present)
+        def prox_extend(self, X_new):
             """
             Calculates proximities between New Data (rows) and the existing data (cols) passed during fit().
             
-            
+
             RUNTIME: O(N_test * T * log(N_train) + N_test * T * k_bar)
             MEMORY: O(N_test * T) (Query Q overhead) + Output Matrix
-            
+
             Parameters
             ----------
             X_new : (n_samples, n_features) array_like
                 New observations.
-            return_self_prox : bool
-                Whether to also return the square self-proximity matrix of X_new (P_uu).
-            
+
             Returns
             -------
             array-like or csr_matrix
                 Proximities between X_new and the fitted data.
-            array-like or csr_matrix (optional)
-                Proximities between X_new and itself (if return_self_prox=True).
             """
             # 1. Pass X_new through the forest to get leaf indices
             leaves_new = self.apply(X_new)
@@ -436,30 +432,16 @@ def RFGAP(prediction_type=None, y=None, prox_method='rfgap', matrix_type='sparse
             
             # 3. Compute Dot Product efficiently
             # P = Q . W^T
-            prox_cross = Q_new.dot(self.W_mat.T)
-            
-            if return_self_prox:
-                W_new = self._build_Wu_matrix(leaves=leaves_new)
-                prox_self = Q_new.dot(W_new.T)
-                del W_new
+            prox_matrix = Q_new.dot(self.W_mat.T)
             
             # Cleanup
             del Q_new
-            gc.collect()
-    
-            # 4. Global Normalization
+
+            # Max-Normalize if requested using training global max to ensure consistent scaling
             if self.max_normalize and self.prox_method == 'rfgap':
-                prox_cross.data /= self.global_max
-                if prox_self is not None:
-                    prox_self.data /= self.global_max
-    
-            res_cross = prox_cross.todense() if self.matrix_type == 'dense' else prox_cross
+                prox_matrix.data /= self.global_max
             
-            if return_self_prox:
-                res_self = prox_self.todense() if self.matrix_type == 'dense' else prox_self
-                return res_cross, res_self
-            
-            return res_cross
+            return prox_matrix.todense() if self.matrix_type == 'dense' else prox_matrix
     
     
         # MATRIX BUILDERS (Mapping to Definitions)
@@ -546,17 +528,15 @@ def RFGAP(prediction_type=None, y=None, prox_method='rfgap', matrix_type='sparse
                 dtype=np.float32
             )
 
-        def _build_Wu_matrix(self, leaves=None):
+        def _build_Wu_matrix(self):
             """
             [NEW] Builds the Weight Matrix 'W_u' (N_unlabeled x N_total_nodes).
             This logic was previously inside get_proximities(). Moving it here allows
             caching and efficient re-use.
             """
-            if leaves is None:
-                leaves = self.leaf_matrix_u
-            
-            N_u, T = leaves.shape
-            global_leaves_u = self._to_global_leaves(leaves)
+            N_u = self._n_unlabeled_samples
+            T = self.n_estimators
+            global_leaves_u = self._to_global_leaves(self.leaf_matrix_u)
             
             flat_rows = np.repeat(np.arange(N_u), T)
             flat_cols = global_leaves_u.flatten()
