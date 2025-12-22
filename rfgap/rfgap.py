@@ -65,7 +65,7 @@ def RFGAP(prediction_type=None, y=None, prox_method='rfgap', matrix_type='sparse
         Enforce symmetry of proximities. (default is False)
     
     max_normalize : bool
-        Only used for RF-GAP proximities. Whether to max-normalize the proximities 
+        Only used for RF-GAP proximities. Whether to row-wise max-normalize the proximities 
         after construction (default is False). This might be useful when comparing
         or integrating proximities across multiple models or datasets.
 
@@ -146,9 +146,6 @@ def RFGAP(prediction_type=None, y=None, prox_method='rfgap', matrix_type='sparse
             # Partial-label (NaN in y) bookkeeping (preserve original X order)
             self._inv_stack_order = None
             self._n_total_samples = 0
-
-            # Global max normalization cache
-            self.global_max = None
 
         #TODO: do something more elegant than X_train slicing and index reordering. This might cause some memory overhead, but it's fine for now.
         def fit(self, X, y, sample_weight=None):
@@ -316,7 +313,7 @@ def RFGAP(prediction_type=None, y=None, prox_method='rfgap', matrix_type='sparse
     
             return self
     
-    
+        #TODO: check memory/time of normalization step
         def get_proximities(self):
             """
             This method produces a proximity matrix for the random forest object.
@@ -369,13 +366,34 @@ def RFGAP(prediction_type=None, y=None, prox_method='rfgap', matrix_type='sparse
             # We match the reordering done to W_mat in fit()
             if self._inv_stack_order is not None:
                 Q_total = Q_total[self._inv_stack_order, :]
-
+    
+            # =========================================================
+            # OPTIMIZATION: Fast Row-Max Normalization (Hadamard Trick)
+            # =========================================================
+            # We perform normalization BEFORE symmetrization to keep the Block Trick efficient.
+            # Calculate the diagonal (self-similarity) using fast element-wise mult.
+            #    (For proximities, the diagonal is generally the Row Max).
+            if self.max_normalize and self.prox_method == 'rfgap' and self.non_zero_diagonal:
+                # diagonal = row max = sum(Q ⊙ W) row-wise (fast + sparse)
+                # Hadamard product O(NNZ) is much faster than Dot Product O(N^2 * density)
+                diagonal = Q_total.multiply(self.W_mat).sum(axis=1).A.ravel()
+                
+                # Safety for Division
+                diagonal[diagonal == 0] = 1.0
+                
+                # In-Place Row Scaling
+                # Q <- D^{-1} Q. 
+                # This ensures that (Q . W^T) will have 1s on the diagonal.
+                self._csr_row_scale_inplace(Q_total, 1.0 / diagonal)
+    
+    
             # 4. Monolithic Dot Product
             # -------------------------
             prox_matrix = None
     
             if self.force_symmetric and self.prox_method == 'rfgap':
                 # P = 0.5 * (Q W^T + W Q^T)
+                # Since Q is pre-normalized, this calculates: 0.5 * (P_norm + P_norm.T)
                 
                 # Left side: [Q, W] -> (N_total, 2*F)
                 left_side = hstack([Q_total, self.W_mat], format='csr', dtype=np.float32)
@@ -393,18 +411,14 @@ def RFGAP(prediction_type=None, y=None, prox_method='rfgap', matrix_type='sparse
             else:
                 # Asymmetric: P = Q W^T
                 prox_matrix = Q_total.dot(self.W_mat.T)
-
-            # Normalize proximities to [0,1] by global max if requested
-            if self.max_normalize and self.prox_method == 'rfgap':
-                self.global_max = prox_matrix.max()
-                prox_matrix.data /= self.global_max
             
             # Cleanup
             del Q_total
             
             return prox_matrix.todense() if self.matrix_type == 'dense' else prox_matrix
     
-        #TODO: Check memory usage of prox_extend in semi-supervised mode (X_unlabeled present)        
+        #TODO: Check memory usage of prox_extend in semi-supervised mode (X_unlabeled present)
+        #TODO: Add max-normalization option to prox_extend, consistent with get_proximities
         def prox_extend(self, X_new, return_self_prox=False):
             """
             Calculates proximities between New Data (rows) and the existing data (cols) passed during fit().
@@ -438,6 +452,7 @@ def RFGAP(prediction_type=None, y=None, prox_method='rfgap', matrix_type='sparse
             # P = Q . W^T
             prox_cross = Q_new.dot(self.W_mat.T)
             
+            prox_self = None
             if return_self_prox:
                 W_new = self._build_Wu_matrix(leaves=leaves_new)
                 prox_self = Q_new.dot(W_new.T)
@@ -447,12 +462,6 @@ def RFGAP(prediction_type=None, y=None, prox_method='rfgap', matrix_type='sparse
             del Q_new
             gc.collect()
     
-            # 4. Global Normalization
-            if self.max_normalize and self.prox_method == 'rfgap':
-                prox_cross.data /= self.global_max
-                if prox_self is not None:
-                    prox_self.data /= self.global_max
-    
             res_cross = prox_cross.todense() if self.matrix_type == 'dense' else prox_cross
             
             if return_self_prox:
@@ -460,6 +469,27 @@ def RFGAP(prediction_type=None, y=None, prox_method='rfgap', matrix_type='sparse
                 return res_cross, res_self
             
             return res_cross
+        
+        
+        # Normalization Helpers
+        @staticmethod
+        def _csr_row_scale_inplace(A, scale):
+            """
+            In-place row scaling of a CSR matrix.
+            A[i, :] *= scale[i]
+            """
+            # Ensure A is CSR (no copy if already CSR)
+            if not sparse.isspmatrix_csr(A):
+                raise ValueError("Matrix must be CSR for in-place scaling.")
+                
+            scale = np.asarray(scale, dtype=A.data.dtype)
+            
+            # Repeat scale factor for every non-zero element in the row
+            # indptr diff gives the count of non-zeros per row
+            nnz_per_row = np.diff(A.indptr)
+            
+            # In-place multiplication of the data array
+            A.data *= np.repeat(scale, nnz_per_row)
     
     
         # MATRIX BUILDERS (Mapping to Definitions)
