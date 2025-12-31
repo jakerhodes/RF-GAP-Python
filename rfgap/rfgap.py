@@ -414,6 +414,15 @@ def RFGAP(prediction_type=None, y=None, prox_method='rfgap', matrix_type='sparse
             
             # Cleanup
             del Q_total
+
+            # =========================================================
+            # 5. Post-Processing: Clip to [0, 1]
+            # =========================================================
+            # This applies to BOTH the Symmetric and Asymmetric cases.
+            # Since we normalized by the Diagonal (which we assume is the Max),
+            # any off-diagonal value > 1.0 is an outlier and should be clipped.
+            if self.max_normalize:
+                prox_matrix.data = np.minimum(prox_matrix.data, 1.0)
             
             return prox_matrix.todense() if self.matrix_type == 'dense' else prox_matrix
     
