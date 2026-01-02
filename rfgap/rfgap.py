@@ -522,9 +522,9 @@ def RFGAP(prediction_type=None, y=None, prox_method='rfgap', matrix_type='sparse
             # ORIGINAL PROXIMITY
             # p(i,j) = (1/T) * Sum[ I(j in v_i(t)) ]
             #
-            # Mapping: W handles the (1/T) term.
+            # Mapping: W handles the 1s (uniform weights).
             if self.prox_method == 'original':
-                weights = np.full(N * T, 1.0 / T, dtype=np.float32)
+                weights = np.ones(N * T, dtype=np.float32)
                 
             # RF-GAP PROXIMITY
             # Term inside Sum: c_j(t) / M_i(t)
@@ -600,10 +600,9 @@ def RFGAP(prediction_type=None, y=None, prox_method='rfgap', matrix_type='sparse
             flat_rows = np.repeat(np.arange(N_u), T)
             flat_cols = global_leaves_u.flatten()
             
-            # Ensure we use density-weighted normalization (1/M)
             if self.prox_method == 'original':
-                # Original Method: just 1/T
-                w_vals = np.full(N_u * T, 1.0/T, dtype=np.float32)
+                # Original Method: just 1s
+                w_vals = np.ones(N_u * T, dtype=np.float32)
             else:
                 # RFGAP Method: Use cached density weights (1/M)
                 if self.cached_inverse_M is None:
@@ -653,9 +652,10 @@ def RFGAP(prediction_type=None, y=None, prox_method='rfgap', matrix_type='sparse
             # ORIGINAL PROXIMITY
             # p(i,j) = Sum[ ... ]  (Sum over all t=1 to T)
             #
-            # W already contains (1/T). Q simply indicates existence (1.0).
+            # W contains 1s. Q --> 1/T.
             if self.prox_method == 'original':
-                vals = np.ones(N * T, dtype=np.float32)
+                # vals = np.ones(N * T, dtype=np.float32)
+                vals = np.full(N * T, 1.0 / T, dtype=np.float32)
                 
             # RF-GAP PROXIMITY
             # p(i,j) = (1 / |S_i|) * Sum_{t in S_i} [ ... ]
