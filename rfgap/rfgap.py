@@ -654,7 +654,6 @@ def RFGAP(prediction_type=None, y=None, prox_method='rfgap', matrix_type='sparse
             #
             # W contains 1s. Q --> 1/T.
             if self.prox_method == 'original':
-                # vals = np.ones(N * T, dtype=np.float32)
                 vals = np.full(N * T, 1.0 / T, dtype=np.float32)
                 
             # RF-GAP PROXIMITY
