@@ -318,7 +318,7 @@ def RFGAP(prediction_type=None, y=None, prox_method='rfgap', matrix_type='sparse
             """
             This method produces a proximity matrix for the random forest object.
             Computes the proximity matrix P = Q . W^T using sparse matrix multiplication.
-    
+
             RUNTIME COMPLEXITY: O(N * T * k_bar)
                 - Where k_bar is the average number of samples per leaf (i.e. average leaf size)
                 - Asymmetric: 1x Sparse Matmul.
@@ -337,36 +337,42 @@ def RFGAP(prediction_type=None, y=None, prox_method='rfgap', matrix_type='sparse
             
             """
             check_is_fitted(self)
-    
-            # 1. Retrieve Labeled Components
-            Q_l = self._build_Q_matrix(leaves=self.leaf_matrix, is_training=True)
-    
-            # 2. Retrieve Unlabeled Components (if any) and Stack Q
-            if self.leaf_matrix_u is not None:
-                # Build Q for unlabeled (is_training=False ensures correct column width/padding)
-                Q_u = self._build_Q_matrix(leaves=self.leaf_matrix_u, is_training=False)
-                
-                # STACKING Q: Labeled on top, Unlabeled on bottom
-                Q_total = vstack([Q_l, Q_u], format='csr', dtype=np.float32)
-                del Q_l, Q_u
-                gc.collect()
+
+            # 1. Retrieve Components (OPTIMIZED: Alias Q to W for 'original' method)
+            if self.prox_method == 'original':
+                # In the original method, Q = W (both represent simple leaf occupancy).
+                # Since self.W_mat was already permuted during fit(), we skip permutation here.
+                Q_total = self.W_mat
             else:
-                Q_total = Q_l
-    
-            # 3. Safety Check: Ensure W_mat was correctly merged in fit()
-            if Q_total.shape[0] != self.W_mat.shape[0]:
-                raise RuntimeError(
-                    f"Dimension Mismatch: Q has {Q_total.shape[0]} rows (Labeled+Unlabeled) but W has {self.W_mat.shape[0]}. "
-                    "This usually implies fit() was not re-run after updating the code. Please re-run fit()."
-                )
-            
-            # =========================================================
-            # Permute Q to Original Order HERE
-            # =========================================================
-            # We match the reordering done to W_mat in fit()
-            if self._inv_stack_order is not None:
-                Q_total = Q_total[self._inv_stack_order, :]
-    
+                # 1. Retrieve Labeled Components
+                Q_l = self._build_Q_matrix(leaves=self.leaf_matrix, is_training=True)
+
+                # 2. Retrieve Unlabeled Components (if any) and Stack Q
+                if self.leaf_matrix_u is not None:
+                    # Build Q for unlabeled (is_training=False ensures correct column width/padding)
+                    Q_u = self._build_Q_matrix(leaves=self.leaf_matrix_u, is_training=False)
+                    
+                    # STACKING Q: Labeled on top, Unlabeled on bottom
+                    Q_total = vstack([Q_l, Q_u], format='csr', dtype=np.float32)
+                    del Q_l, Q_u
+                    gc.collect()
+                else:
+                    Q_total = Q_l
+
+                # 3. Safety Check: Ensure W_mat was correctly merged in fit()
+                if Q_total.shape[0] != self.W_mat.shape[0]:
+                    raise RuntimeError(
+                        f"Dimension Mismatch: Q has {Q_total.shape[0]} rows (Labeled+Unlabeled) but W has {self.W_mat.shape[0]}. "
+                        "This usually implies fit() was not re-run after updating the code. Please re-run fit()."
+                    )
+                
+                # =========================================================
+                # Permute Q to Original Order HERE
+                # =========================================================
+                # We match the reordering done to W_mat in fit()
+                if self._inv_stack_order is not None:
+                    Q_total = Q_total[self._inv_stack_order, :]
+
             # =========================================================
             # OPTIMIZATION: Fast Row-Max Normalization (Hadamard Trick)
             # =========================================================
@@ -385,12 +391,12 @@ def RFGAP(prediction_type=None, y=None, prox_method='rfgap', matrix_type='sparse
                 # Q <- D^{-1} Q. 
                 # This ensures that (Q . W^T) will have 1s on the diagonal.
                 self._csr_row_scale_inplace(Q_total, 1.0 / diagonal)
-    
-    
+
+
             # 4. Monolithic Dot Product
             # -------------------------
             prox_matrix = None
-    
+
             if self.force_symmetric and self.prox_method == 'rfgap':
                 # P = 0.5 * (Q W^T + W Q^T)
                 # Since Q is pre-normalized, this calculates: 0.5 * (P_norm + P_norm.T)
@@ -409,7 +415,8 @@ def RFGAP(prediction_type=None, y=None, prox_method='rfgap', matrix_type='sparse
                 gc.collect()
                 
             else:
-                # Asymmetric: P = Q W^T
+                # Asymmetric: P = Q W^T 
+                # (For 'original', this is simply W W^T)
                 prox_matrix = Q_total.dot(self.W_mat.T)
             
             # Cleanup
@@ -425,7 +432,7 @@ def RFGAP(prediction_type=None, y=None, prox_method='rfgap', matrix_type='sparse
                 prox_matrix.data = np.minimum(prox_matrix.data, 1.0)
             
             return prox_matrix.todense() if self.matrix_type == 'dense' else prox_matrix
-    
+        
         #TODO: Check memory usage of prox_extend in semi-supervised mode (X_unlabeled present)
         #TODO: Add max-normalization option to prox_extend, consistent with get_proximities
         def prox_extend(self, X_new, return_self_prox=False):
@@ -522,9 +529,10 @@ def RFGAP(prediction_type=None, y=None, prox_method='rfgap', matrix_type='sparse
             # ORIGINAL PROXIMITY
             # p(i,j) = (1/T) * Sum[ I(j in v_i(t)) ]
             #
-            # Mapping: W handles the 1s (uniform weights).
+            # Mapping: W handles the sqrt(1/T) (uniform weights).
             if self.prox_method == 'original':
-                weights = np.ones(N * T, dtype=np.float32)
+                scale_factor = np.float32(1.0 / np.sqrt(self.n_estimators))
+                weights = np.full(N * T, scale_factor, dtype=np.float32)
                 
             # RF-GAP PROXIMITY
             # Term inside Sum: c_j(t) / M_i(t)
@@ -601,8 +609,9 @@ def RFGAP(prediction_type=None, y=None, prox_method='rfgap', matrix_type='sparse
             flat_cols = global_leaves_u.flatten()
             
             if self.prox_method == 'original':
-                # Original Method: just 1s
-                w_vals = np.ones(N_u * T, dtype=np.float32)
+                # Original Method: just 1/sqrt(T)
+                scale_factor = np.float32(1.0 / np.sqrt(self.n_estimators))
+                w_vals = np.full(N_u * T, scale_factor, dtype=np.float32)
             else:
                 # RFGAP Method: Use cached density weights (1/M)
                 if self.cached_inverse_M is None:
@@ -652,9 +661,10 @@ def RFGAP(prediction_type=None, y=None, prox_method='rfgap', matrix_type='sparse
             # ORIGINAL PROXIMITY
             # p(i,j) = Sum[ ... ]  (Sum over all t=1 to T)
             #
-            # W contains 1s. Q --> 1/T.
+            # W contains 1/sqrt(T). Q --> 1/sqrt(T).
             if self.prox_method == 'original':
-                vals = np.full(N * T, 1.0 / T, dtype=np.float32)
+                scale_factor = np.float32(1.0 / np.sqrt(self.n_estimators))
+                vals = np.full(N * T, scale_factor, dtype=np.float32)
                 
             # RF-GAP PROXIMITY
             # p(i,j) = (1 / |S_i|) * Sum_{t in S_i} [ ... ]
