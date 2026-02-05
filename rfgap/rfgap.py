@@ -333,7 +333,7 @@ def RFGAP(prediction_type=None, y=None, prox_method='rfgap', matrix_type='sparse
             check_is_fitted(self)
 
             # 1. Retrieve Components (OPTIMIZED: Alias Q to W for 'original' method)
-            if self.prox_method in ['original']:
+            if self.prox_method in ['original', 'oob']:
                 # In the original method, Q = W.
                 # Since self.W_mat was already permuted during fit(), we skip permutation here.
                 Q_total = self.W_mat
@@ -372,7 +372,7 @@ def RFGAP(prediction_type=None, y=None, prox_method='rfgap', matrix_type='sparse
             # -------------------------
             prox_matrix = None
 
-            if self.force_symmetric and self.prox_method in ['oob', 'rfgap']:
+            if self.force_symmetric and self.prox_method in ['rfgap']:
                 # P = 0.5 * (Q W^T + W Q^T)
                 
                 # Left side: [Q, W] -> (N_total, 2*F)
@@ -395,6 +395,10 @@ def RFGAP(prediction_type=None, y=None, prox_method='rfgap', matrix_type='sparse
             
             # Cleanup
             del Q_total
+
+            # Diagonal clipping for OOB (mimics diagonal correction to make diagonal=1)
+            if self.prox_method == 'oob':
+                prox_matrix.data = np.minimum(prox_matrix.data, 1.0)
 
             # 3. Global Max Normalization (Simple & Efficient, useful only for RFGAP since others have fixed scale [0,1])
             # ------------------------------------------------
@@ -485,10 +489,10 @@ def RFGAP(prediction_type=None, y=None, prox_method='rfgap', matrix_type='sparse
             #
             # Mapping: W handles the sqrt(1/T) (uniform weights).
             if self.prox_method == 'original':
-                scale_factor = np.float32(1.0 / np.sqrt(self.n_estimators))
+                scale_factor = np.float32(1.0 / np.sqrt(T))
                 weights = np.full(N * T, scale_factor, dtype=np.float32)
             
-            # OOB proximity (approximated to make it separable). We set weights to oob mask + 
+            # OOB proximity (approximated to make it separable).
             elif self.prox_method == 'oob':
                 oob_mask = self.oob_indices
                 mask = oob_mask.flatten() == 1
@@ -499,8 +503,8 @@ def RFGAP(prediction_type=None, y=None, prox_method='rfgap', matrix_type='sparse
                 M = oob_mask.sum(axis=1).astype(np.float32)
                 M[M == 0] = 1.0  # safety
             
-                # weights for row=j: 1 / M_j
-                weights = (1.0 / M[flat_rows]).astype(np.float32)
+                # weights for row=j: srqt(T) / M_j
+                weights = (np.sqrt(T) / M[flat_rows]).astype(np.float32)
                 
             # RF-GAP PROXIMITY
             # Term inside Sum: c_j(t) / M_i(t)
@@ -563,7 +567,7 @@ def RFGAP(prediction_type=None, y=None, prox_method='rfgap', matrix_type='sparse
 
         def _build_Wu_matrix(self, leaves=None):
             """
-            [NEW] Builds the Weight Matrix 'W_u' (N_unlabeled x N_total_nodes).
+            Builds the Weight Matrix 'W_u' (N_unlabeled x N_total_nodes).
             This logic was previously inside get_proximities(). Moving it here allows
             caching and efficient re-use.
             """
@@ -581,7 +585,8 @@ def RFGAP(prediction_type=None, y=None, prox_method='rfgap', matrix_type='sparse
                 scale_factor = np.float32(1.0 / np.sqrt(T))
                 w_vals = np.full(N_u * T, scale_factor, dtype=np.float32)
             elif self.prox_method == 'oob':
-                w_vals = np.full(N_u * T, 1.0 / np.float32(T), dtype=np.float32)  # = 1/sqrt(T)
+                scale_factor = np.float32(np.sqrt(T) / T)
+                w_vals = np.full(N_u * T, scale_factor, dtype=np.float32)
             else:
                 # RFGAP Method: Use cached density weights (1/M)
                 if self.cached_inverse_M is None:
@@ -620,10 +625,10 @@ def RFGAP(prediction_type=None, y=None, prox_method='rfgap', matrix_type='sparse
             flat_rows = np.repeat(np.arange(N), T)
             flat_cols = global_leaves.flatten()
     
-            # Determine OOB mask logic
+            # Determine OOB mask logic (only for RFGAP since this is the only asymmetric method for now)
             if is_training:
                 # S_i logic: For RFGAP, we only sum over trees where i is OOB.
-                oob_mask = self.oob_indices if self.prox_method in ['oob', 'rfgap'] else None
+                oob_mask = self.oob_indices if self.prox_method in ['rfgap'] else None
             else:
                 # For new data, the sample was not in ANY bag, so it is OOB for all trees.
                 oob_mask = None # Treated as all ones later
@@ -638,7 +643,8 @@ def RFGAP(prediction_type=None, y=None, prox_method='rfgap', matrix_type='sparse
 
             # approximated OOB proximity. We treat each query as OOB for all trees.
             elif self.prox_method == 'oob':
-                vals = np.full(N * T, 1.0, dtype=np.float32)
+                scale_factor = np.float32(np.sqrt(T) / T)
+                vals = np.full(N * T, scale_factor, dtype=np.float32)
                 
             # RF-GAP PROXIMITY
             # p(i,j) = (1 / |S_i|) * Sum_{t in S_i} [ ... ]
