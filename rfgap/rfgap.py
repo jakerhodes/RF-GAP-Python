@@ -117,14 +117,6 @@ def RFGAP(prediction_type=None, y=None, prox_method='rfgap', matrix_type='sparse
             
             super(RFGAP, self).__init__(**kwargs)
             
-            # BLOCK OOB METHOD
-            # The OOB method mathematically requires an N x N denominator matrix 
-            # (intersection of OOB status), which breaks sparsity and is O(N^2).
-            if prox_method == 'oob':
-                raise NotImplementedError(
-                    "The 'oob' method is O(N^2) dense and incompatible with this new"
-                    "sparse-matrix optimization. Use 'rfgap' (highly recommended) or 'original' (traditional RF proximity)."
-                )
             
             self.prox_method = prox_method
             self.matrix_type = matrix_type
@@ -265,7 +257,7 @@ def RFGAP(prediction_type=None, y=None, prox_method='rfgap', matrix_type='sparse
                 self._n_unlabeled_samples = X_unlabeled.shape[0]
                 # Unlabeled proximity matrix (P_uu) naturally has non-zero diagonals and symmetry.
                 # We force P_ll to match this behavior for consistency.
-                print("Semi-supervised mode. Forcing `non_zero_diagonal`=True and `force_symmetric`=True for consistency.")
+                print("Unlabeled instances passed as input. Semi-supervised mode. Forcing `non_zero_diagonal`=True and `force_symmetric`=True for consistency.")
                 self.non_zero_diagonal = True
                 self.force_symmetric = True
             else:
@@ -275,11 +267,13 @@ def RFGAP(prediction_type=None, y=None, prox_method='rfgap', matrix_type='sparse
             # ---------------------------------------------------------
             # COMPLEXITY STEP 2: Statistics Calculation -> O(N * T)
             # ---------------------------------------------------------
-            if self.prox_method == 'rfgap':
-                # Calculate c_j(t): Multiplicity of sample j in tree t
-                self.c_j_t = self.get_in_bag_counts(X_train)
+            if self.prox_method in ['oob', 'rfgap']:
                 # Calculate S_i: Set of OOB trees for sample i
                 self.oob_indices = self.get_oob_indices(X_train) 
+
+                if self.prox_method == 'rfgap':
+                    # Calculate c_j(t): Multiplicity of sample j in tree t
+                    self.c_j_t = self.get_in_bag_counts(X_train)
 
     
             # ---------------------------------------------------------
@@ -322,7 +316,7 @@ def RFGAP(prediction_type=None, y=None, prox_method='rfgap', matrix_type='sparse
             RUNTIME COMPLEXITY: O(N * T * k_bar)
                 - Where k_bar is the average number of samples per leaf (i.e. average leaf size)
                 - Asymmetric: 1x Sparse Matmul.
-                - Symmetric (RFGAP only):  2x Sparse Matmul (via Block method).
+                - Symmetric (RFGAP/OOB only):  2x Sparse Matmul (via Block method).
                         
             MEMORY COMPLEXITY: the output P of the dot product is O(NNZ_Prox) approx O(N^2 * Density), where Density = % of non-zeros in proximity matrix = % points sharing at least 1 leaf.
                 - Block Symmetrization keeps peak memory close to the asymmetric output size
@@ -339,8 +333,8 @@ def RFGAP(prediction_type=None, y=None, prox_method='rfgap', matrix_type='sparse
             check_is_fitted(self)
 
             # 1. Retrieve Components (OPTIMIZED: Alias Q to W for 'original' method)
-            if self.prox_method == 'original':
-                # In the original method, Q = W (both represent simple leaf occupancy).
+            if self.prox_method in ['original']:
+                # In the original method, Q = W.
                 # Since self.W_mat was already permuted during fit(), we skip permutation here.
                 Q_total = self.W_mat
             else:
@@ -373,33 +367,13 @@ def RFGAP(prediction_type=None, y=None, prox_method='rfgap', matrix_type='sparse
                 if self._inv_stack_order is not None:
                     Q_total = Q_total[self._inv_stack_order, :]
 
-            # =========================================================
-            # OPTIMIZATION: Fast Row-Max Normalization (Hadamard Trick)
-            # =========================================================
-            # We perform normalization BEFORE symmetrization to keep the Block Trick efficient.
-            # Calculate the diagonal (self-similarity) using fast element-wise mult.
-            #    (For proximities, the diagonal is generally the Row Max).
-            if self.max_normalize and self.prox_method == 'rfgap' and self.non_zero_diagonal:
-                # diagonal = row max = sum(Q ⊙ W) row-wise (fast + sparse)
-                # Hadamard product O(NNZ) is much faster than Dot Product O(N^2 * density)
-                diagonal = Q_total.multiply(self.W_mat).sum(axis=1).A.ravel()
-                
-                # Safety for Division
-                diagonal[diagonal == 0] = 1.0
-                
-                # In-Place Row Scaling
-                # Q <- D^{-1} Q. 
-                # This ensures that (Q . W^T) will have 1s on the diagonal.
-                self._csr_row_scale_inplace(Q_total, 1.0 / diagonal)
 
-
-            # 4. Monolithic Dot Product
+            # 2. Monolithic Dot Product
             # -------------------------
             prox_matrix = None
 
-            if self.force_symmetric and self.prox_method == 'rfgap':
+            if self.force_symmetric and self.prox_method in ['oob', 'rfgap']:
                 # P = 0.5 * (Q W^T + W Q^T)
-                # Since Q is pre-normalized, this calculates: 0.5 * (P_norm + P_norm.T)
                 
                 # Left side: [Q, W] -> (N_total, 2*F)
                 left_side = hstack([Q_total, self.W_mat], format='csr', dtype=np.float32)
@@ -422,16 +396,16 @@ def RFGAP(prediction_type=None, y=None, prox_method='rfgap', matrix_type='sparse
             # Cleanup
             del Q_total
 
-            # =========================================================
-            # 5. Post-Processing: Clip to [0, 1]
-            # =========================================================
-            # This applies to BOTH the Symmetric and Asymmetric cases.
-            # Since we normalized by the Diagonal (which we assume is the Max),
-            # any off-diagonal value > 1.0 is an outlier and should be clipped.
-            if self.max_normalize:
-                prox_matrix.data = np.minimum(prox_matrix.data, 1.0)
+            # 3. Global Max Normalization (Simple & Efficient, useful only for RFGAP since others have fixed scale [0,1])
+            # ------------------------------------------------
+            if self.max_normalize and self.prox_method == 'rfgap':
+                # Find global max (O(NNZ) - fast)
+                max_val = prox_matrix.max()
+                # In-place scaling
+                if max_val > 0:
+                    prox_matrix.data /= max_val
             
-            return prox_matrix.todense() if self.matrix_type == 'dense' else prox_matrix
+            return prox_matrix.toarray() if self.matrix_type == 'dense' else prox_matrix
         
         #TODO: Check memory usage of prox_extend in semi-supervised mode (X_unlabeled present)
         #TODO: Add max-normalization option to prox_extend, consistent with get_proximities
@@ -478,34 +452,14 @@ def RFGAP(prediction_type=None, y=None, prox_method='rfgap', matrix_type='sparse
             del Q_new
             gc.collect()
     
-            res_cross = prox_cross.todense() if self.matrix_type == 'dense' else prox_cross
+            res_cross = prox_cross.toarray() if self.matrix_type == 'dense' else prox_cross
             
             if return_self_prox:
-                res_self = prox_self.todense() if self.matrix_type == 'dense' else prox_self
+                res_self = prox_self.toarray() if self.matrix_type == 'dense' else prox_self
                 return res_cross, res_self
             
             return res_cross
         
-        
-        # Normalization Helpers
-        @staticmethod
-        def _csr_row_scale_inplace(A, scale):
-            """
-            In-place row scaling of a CSR matrix.
-            A[i, :] *= scale[i]
-            """
-            # Ensure A is CSR (no copy if already CSR)
-            if not sparse.isspmatrix_csr(A):
-                raise ValueError("Matrix must be CSR for in-place scaling.")
-                
-            scale = np.asarray(scale, dtype=A.data.dtype)
-            
-            # Repeat scale factor for every non-zero element in the row
-            # indptr diff gives the count of non-zeros per row
-            nnz_per_row = np.diff(A.indptr)
-            
-            # In-place multiplication of the data array
-            A.data *= np.repeat(scale, nnz_per_row)
     
     
         # MATRIX BUILDERS (Mapping to Definitions)
@@ -533,6 +487,20 @@ def RFGAP(prediction_type=None, y=None, prox_method='rfgap', matrix_type='sparse
             if self.prox_method == 'original':
                 scale_factor = np.float32(1.0 / np.sqrt(self.n_estimators))
                 weights = np.full(N * T, scale_factor, dtype=np.float32)
+            
+            # OOB proximity (approximated to make it separable). We set weights to oob mask + 
+            elif self.prox_method == 'oob':
+                oob_mask = self.oob_indices
+                mask = oob_mask.flatten() == 1
+                flat_rows = flat_rows[mask]
+                flat_cols = flat_cols[mask]
+            
+                # M_j = number of OOB trees for sample j (row-sum of OOB mask)
+                M = oob_mask.sum(axis=1).astype(np.float32)
+                M[M == 0] = 1.0  # safety
+            
+                # weights for row=j: 1 / M_j
+                weights = (1.0 / M[flat_rows]).astype(np.float32)
                 
             # RF-GAP PROXIMITY
             # Term inside Sum: c_j(t) / M_i(t)
@@ -610,8 +578,10 @@ def RFGAP(prediction_type=None, y=None, prox_method='rfgap', matrix_type='sparse
             
             if self.prox_method == 'original':
                 # Original Method: just 1/sqrt(T)
-                scale_factor = np.float32(1.0 / np.sqrt(self.n_estimators))
+                scale_factor = np.float32(1.0 / np.sqrt(T))
                 w_vals = np.full(N_u * T, scale_factor, dtype=np.float32)
+            elif self.prox_method == 'oob':
+                w_vals = np.full(N_u * T, 1.0 / np.float32(T), dtype=np.float32)  # = 1/sqrt(T)
             else:
                 # RFGAP Method: Use cached density weights (1/M)
                 if self.cached_inverse_M is None:
@@ -653,7 +623,7 @@ def RFGAP(prediction_type=None, y=None, prox_method='rfgap', matrix_type='sparse
             # Determine OOB mask logic
             if is_training:
                 # S_i logic: For RFGAP, we only sum over trees where i is OOB.
-                oob_mask = self.oob_indices if self.prox_method == 'rfgap' else None
+                oob_mask = self.oob_indices if self.prox_method in ['oob', 'rfgap'] else None
             else:
                 # For new data, the sample was not in ANY bag, so it is OOB for all trees.
                 oob_mask = None # Treated as all ones later
@@ -665,6 +635,10 @@ def RFGAP(prediction_type=None, y=None, prox_method='rfgap', matrix_type='sparse
             if self.prox_method == 'original':
                 scale_factor = np.float32(1.0 / np.sqrt(self.n_estimators))
                 vals = np.full(N * T, scale_factor, dtype=np.float32)
+
+            # approximated OOB proximity. We treat each query as OOB for all trees.
+            elif self.prox_method == 'oob':
+                vals = np.full(N * T, 1.0, dtype=np.float32)
                 
             # RF-GAP PROXIMITY
             # p(i,j) = (1 / |S_i|) * Sum_{t in S_i} [ ... ]
