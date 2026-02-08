@@ -257,9 +257,7 @@ def RFGAP(prediction_type=None, y=None, prox_method='rfgap', matrix_type='sparse
                 self._n_unlabeled_samples = X_unlabeled.shape[0]
                 # Unlabeled proximity matrix (P_uu) naturally has non-zero diagonals and symmetry.
                 # We force P_ll to match this behavior for consistency.
-                print("Unlabeled instances passed as input. Semi-supervised mode. Forcing `non_zero_diagonal`=True and `force_symmetric`=True for consistency.")
-                self.non_zero_diagonal = True
-                self.force_symmetric = True
+                print("Unlabeled instances passed as input. Semi-supervised mode.")
             else:
                 self.leaf_matrix_u = None
                 self._n_unlabeled_samples = 0
