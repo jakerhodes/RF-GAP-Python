@@ -402,16 +402,16 @@ def RFGAP(prediction_type=None, y=None, prox_method='rfgap', matrix_type='sparse
             # ------------------------------------------------
             if self.max_normalize and self.prox_method == 'rfgap':
                 # Find global max (O(NNZ) - fast)
-                max_val = prox_matrix.max()
+                self.max_val = prox_matrix.max()
                 # In-place scaling
-                if max_val > 0:
-                    prox_matrix.data /= max_val
+                if self.max_val > 0:
+                    prox_matrix.data /= self.max_val
             
             return prox_matrix.toarray() if self.matrix_type == 'dense' else prox_matrix
         
         #TODO: Check memory usage of prox_extend in semi-supervised mode (X_unlabeled present)
         #TODO: Add max-normalization option to prox_extend, consistent with get_proximities
-        def prox_extend(self, X_new, return_self_prox=False):
+        def prox_extend(self, X_new):
             """
             Calculates proximities between New Data (rows) and the existing data (cols) passed during fit().
             
@@ -423,15 +423,11 @@ def RFGAP(prediction_type=None, y=None, prox_method='rfgap', matrix_type='sparse
             ----------
             X_new : (n_samples, n_features) array_like
                 New observations.
-            return_self_prox : bool
-                Whether to also return the square self-proximity matrix of X_new (P_uu).
             
             Returns
             -------
             array-like or csr_matrix
                 Proximities between X_new and the fitted data.
-            array-like or csr_matrix (optional)
-                Proximities between X_new and itself (if return_self_prox=True).
             """
             # 1. Pass X_new through the forest to get leaf indices
             leaves_new = self.apply(X_new)
@@ -442,25 +438,17 @@ def RFGAP(prediction_type=None, y=None, prox_method='rfgap', matrix_type='sparse
             
             # 3. Compute Dot Product efficiently
             # P = Q . W^T
-            prox_cross = Q_new.dot(self.W_mat.T)
-            
-            prox_self = None
-            if return_self_prox:
-                W_new = self._build_Wu_matrix(leaves=leaves_new)
-                prox_self = Q_new.dot(W_new.T)
-                del W_new
-            
+            prox_new = Q_new.dot(self.W_mat.T)
+
             # Cleanup
             del Q_new
             gc.collect()
-    
-            res_cross = prox_cross.toarray() if self.matrix_type == 'dense' else prox_cross
-            
-            if return_self_prox:
-                res_self = prox_self.toarray() if self.matrix_type == 'dense' else prox_self
-                return res_cross, res_self
-            
-            return res_cross
+
+            if self.max_normalize and self.prox_method == 'rfgap':
+                if self.max_val > 0:
+                    prox_new.data /= self.max_val
+                
+            return prox_new.toarray() if self.matrix_type == 'dense' else prox_new
         
     
     
