@@ -135,7 +135,9 @@ def RFGAP(prediction_type=None, y=None, prox_method='rfgap', matrix_type='sparse
             # Unlabeled Data Cache
             self.leaf_matrix_u = None
             self._n_unlabeled_samples = 0
-            self.cached_inverse_M = None  # Caches 1/M for use in P_uu normalization (in-bag leaf size)
+            # Full labeled leaf occupancy cache: 1 / |L_leaf| for each global node id
+            # Used for U->* target normalization (robust occupancy kernel)
+            self.cached_inverse_leaf_size = None
             self._u_diag_offset = None    # start col index of unlabeled cancel block
             self._n_features_total = None # total #cols for all Q/W matrices
 
@@ -528,21 +530,32 @@ def RFGAP(prediction_type=None, y=None, prox_method='rfgap', matrix_type='sparse
                 # Get c_j(t) [Multiplicity of j in tree t]
                 c_j_t = self.c_j_t.flatten()
                 
-                # Calculate M_i(t) [Total weight of node]
-                #    The node mass is the sum of c_j(t) for all samples falling in that node.
-                #    bincount is O(N * T)
+                # ---------------------------------------------------------
+                # (A) Full labeled leaf occupancy: |L_leaf|
+                # ---------------------------------------------------------
+                # Each labeled sample contributes exactly 1 to its (tree,leaf) node.
+                # This is the "full leaf size" (NOT bootstrap mass) and is the
+                # robust normalization we use when unlabeled points are targets.
+                leaf_sizes = np.bincount(flat_cols, minlength=self._total_unique_nodes).astype(np.float32)
+                
+                with np.errstate(divide='ignore', invalid='ignore'):
+                    inverse_leaf_size = 1.0 / leaf_sizes
+                inverse_leaf_size[~np.isfinite(inverse_leaf_size)] = 0.0
+                
+                # Cache for unlabeled target normalization (U-* blocks)
+                self.cached_inverse_leaf_size = inverse_leaf_size
+                
+                # ---------------------------------------------------------
+                # (B) In-bag leaf mass: M_leaf = sum_{k in leaf} c_k(t)
+                # ---------------------------------------------------------
+                # This is the original RF-GAP denominator for labeled targets.
                 M_node_weights = np.bincount(flat_cols, weights=c_j_t, minlength=self._total_unique_nodes)
                 
-                # Calculate 1 / M_i(t) safely
                 with np.errstate(divide='ignore', invalid='ignore'):
                     inverse_M_node = 1.0 / M_node_weights
-                inverse_M_node[~np.isfinite(inverse_M_node)] = 0
+                inverse_M_node[~np.isfinite(inverse_M_node)] = 0.0
                 
-                # Cache this for use in P_uu (Unlabeled-Unlabeled) proximity
-                # This ensures unlabeled data is normalized by the same density map as labeled data.
-                self.cached_inverse_M = inverse_M_node 
-                
-                # Combine: W_val = c_j(t) * (1 / M_node)
+                # Combine: W_val = c_j(t) * (1 / M_leaf)  [original RFGAP L->L target weighting]
                 weights = c_j_t * inverse_M_node[flat_cols]
                 
                 # Non-zero diagonal trick via Virtual Diagonal Injection
@@ -598,28 +611,31 @@ def RFGAP(prediction_type=None, y=None, prox_method='rfgap', matrix_type='sparse
                 scale_factor = np.float32(np.sqrt(T) / T)
                 w_vals = np.full(N_u * T, scale_factor, dtype=np.float32)
             else:
-                # RFGAP Method: Use cached density weights (1/M)
-                if self.cached_inverse_M is None:
-                    # Should not happen if fit() logic is correct
-                    raise ValueError("RFGAP weights not found. Model must be fitted with prox_method='rfgap'.")
-                
-                # Map global leaf IDs to their cached inverse weights
-                w_vals = self.cached_inverse_M[flat_cols]
-                
+                # RFGAP Method (robust occupancy normalization for unlabeled targets)
+                # For unlabeled points, bootstrap multiplicities are undefined (c_u(t)=0),
+                # so we normalize by full labeled leaf size: 1 / |L_leaf|.
+                if self.cached_inverse_leaf_size is None:
+                    raise ValueError(
+                        "Leaf-size weights not found. Model must be fitted with prox_method='rfgap' "
+                        "so cached_inverse_leaf_size can be computed."
+                    )
+            
+                # Map global leaf IDs to 1/|L_leaf|
+                w_vals = self.cached_inverse_leaf_size[flat_cols]
+            
                 # =========================================================
-                # NEW: Virtual diagonal cancellation for unlabeled samples
+                # Virtual diagonal cancellation for unlabeled samples
                 # =========================================================
                 if (self.leaf_matrix_u is not None) and (not self.non_zero_diagonal):
                     # Row-local diag feature: one unique column per unlabeled sample
                     diag_rows = np.arange(N_u, dtype=np.int64)
                     diag_cols = diag_rows + self._u_diag_offset
-                
-                    # Compute the *current* unlabeled diagonal contribution:
-                    # P_ii(u) = sum_t (1/T) * (1/M_leaf(i,t))  = (row_sum(w_vals)) / T
+            
+                    # Current unlabeled diagonal contribution under occupancy normalization:
+                    # P_ii(u) = sum_t (1/T) * (1/|L_leaf(i,t)|) = row_sum(w_vals) / T
                     row_sums = np.bincount(flat_rows, weights=w_vals, minlength=N_u).astype(np.float32)
                     diag_vals = -(row_sums / np.float32(T))
-                
-                    # Append the cancellation nnz
+            
                     flat_rows = np.concatenate([flat_rows, diag_rows])
                     flat_cols = np.concatenate([flat_cols, diag_cols])
                     w_vals    = np.concatenate([w_vals, diag_vals])
