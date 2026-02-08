@@ -313,8 +313,8 @@ def RFGAP(prediction_type=None, y=None, prox_method='rfgap', matrix_type='sparse
 
             RUNTIME COMPLEXITY: O(N * T * k_bar)
                 - Where k_bar is the average number of samples per leaf (i.e. average leaf size)
-                - Asymmetric: 1x Sparse Matmul.
-                - Symmetric (RFGAP/OOB only):  2x Sparse Matmul (via Block method).
+                - Asymmetric: 1x Sparse Matmul. Already symmetric if 'original' or 'oob' method since Q=W.
+                - Symmetric (RFGAP only):  2x Sparse Matmul (via Block method).
                         
             MEMORY COMPLEXITY: the output P of the dot product is O(NNZ_Prox) approx O(N^2 * Density), where Density = % of non-zeros in proximity matrix = % points sharing at least 1 leaf.
                 - Block Symmetrization keeps peak memory close to the asymmetric output size
