@@ -364,6 +364,25 @@ def RFGAP(prediction_type=None, y=None, prox_method='rfgap', matrix_type='sparse
                 # We match the reordering done to W_mat in fit()
                 if self._inv_stack_order is not None:
                     Q_total = Q_total[self._inv_stack_order, :]
+            
+            # =========================================================
+            # Fast Row-Max Normalization (Hadamard Trick)
+            # =========================================================
+            # We perform normalization BEFORE symmetrization to keep the Block Trick efficient.
+            # Calculate the diagonal (self-similarity) using fast element-wise mult.
+            #    (For proximities, the diagonal is generally the Row Max).
+            if self.max_normalize and self.prox_method == 'rfgap' and self.non_zero_diagonal:
+                # diagonal = row max = sum(Q ⊙ W) row-wise (fast + sparse)
+                # Hadamard product O(NNZ) is much faster than Dot Product O(N^2 * density)
+                diagonal = Q_total.multiply(self.W_mat).sum(axis=1).A.ravel()
+                
+                # Safety for Division
+                diagonal[diagonal == 0] = 1.0
+                
+                # In-Place Row Scaling
+                # Q <- D^{-1} Q. 
+                # This ensures that (Q . W^T) will have 1s on the diagonal.
+                self._csr_row_scale_inplace(Q_total, 1.0 / diagonal)
 
 
             # 2. Monolithic Dot Product
@@ -394,19 +413,10 @@ def RFGAP(prediction_type=None, y=None, prox_method='rfgap', matrix_type='sparse
             # Cleanup
             del Q_total
 
-            # Diagonal clipping for OOB (mimics diagonal correction to make diagonal=1)
-            if self.prox_method == 'oob':
+            # Diagonal clipping for OOB and RFGAP (mimics diagonal correction to make diagonal=1 for OOB, and make diagonal the max for RFGAP when non_zero_diagonal is True)
+            if self.prox_method == 'oob' or (self.prox_method == 'rfgap' and self.non_zero_diagonal):
                 prox_matrix.data = np.minimum(prox_matrix.data, 1.0)
 
-            # 3. Global Max Normalization (Simple & Efficient, useful only for RFGAP since others have fixed scale [0,1])
-            # ------------------------------------------------
-            if self.max_normalize and self.prox_method == 'rfgap':
-                # Find global max (O(NNZ) - fast)
-                self.max_val = prox_matrix.max()
-                # In-place scaling
-                if self.max_val > 0:
-                    prox_matrix.data /= self.max_val
-            
             return prox_matrix.toarray() if self.matrix_type == 'dense' else prox_matrix
         
         #TODO: Check memory usage of prox_extend in semi-supervised mode (X_unlabeled present)
@@ -443,14 +453,28 @@ def RFGAP(prediction_type=None, y=None, prox_method='rfgap', matrix_type='sparse
             # Cleanup
             del Q_new
             gc.collect()
-
-            if self.max_normalize and self.prox_method == 'rfgap':
-                if self.max_val > 0:
-                    prox_new.data /= self.max_val
                 
             return prox_new.toarray() if self.matrix_type == 'dense' else prox_new
         
-    
+        # Normalization Helpers
+        @staticmethod
+        def _csr_row_scale_inplace(A, scale):
+            """
+            In-place row scaling of a CSR matrix.
+            A[i, :] *= scale[i]
+            """
+            # Ensure A is CSR (no copy if already CSR)
+            if not sparse.isspmatrix_csr(A):
+                raise ValueError("Matrix must be CSR for in-place scaling.")
+                
+            scale = np.asarray(scale, dtype=A.data.dtype)
+            
+            # Repeat scale factor for every non-zero element in the row
+            # indptr diff gives the count of non-zeros per row
+            nnz_per_row = np.diff(A.indptr)
+            
+            # In-place multiplication of the data array
+            A.data *= np.repeat(scale, nnz_per_row)
     
         # MATRIX BUILDERS (Mapping to Definitions)
         def _to_global_leaves(self, leaf_mat):
@@ -497,26 +521,46 @@ def RFGAP(prediction_type=None, y=None, prox_method='rfgap', matrix_type='sparse
             #
             # Mapping:
             #   c_j(t) -> self.c_j_t (Numerator)
-            #   M_i(t) -> Total weight of the node (Denominator)
+            #   M_i(t) -> Total leaf mass used for normalization (Denominator)
             elif self.prox_method == 'rfgap':
-                
+            
                 # Get c_j(t) [Multiplicity of j in tree t]
-                c_j_t = self.c_j_t.flatten()
-                
-                # Calculate M_i(t) [Total weight of node]
-                #    The node mass is the sum of c_j(t) for all samples falling in that node.
-                #    bincount is O(N * T)
-                M_node_weights = np.bincount(flat_cols, weights=c_j_t, minlength=self._total_unique_nodes)
-                
+                c_j_t = self.c_j_t.flatten().astype(np.float32)
+            
+                # ---------------------------------------------------------
+                # NEW: total leaf mass = (in-bag labeled mass) + (unlabeled unit mass)
+                #   M_leaf(t) = sum_{j in L∩leaf} c_j(t) + |U∩leaf|
+                # This makes L->U and U->U behave like a proper conditional distribution
+                # over (L+U) targets within each leaf.
+                # ---------------------------------------------------------
+            
+                # In-bag labeled leaf mass: sum of c_j(t) inside each leaf
+                M_leaf_labeled = np.bincount(
+                    flat_cols, weights=c_j_t, minlength=self._total_unique_nodes
+                ).astype(np.float32)
+            
+                # Unlabeled unit mass: count of unlabeled samples in each leaf
+                if self.leaf_matrix_u is not None and self._n_unlabeled_samples > 0:
+                    global_leaves_u = self._to_global_leaves(self.leaf_matrix_u)
+                    flat_cols_u = global_leaves_u.flatten()
+                    M_leaf_unlabeled = np.bincount(
+                        flat_cols_u, minlength=self._total_unique_nodes
+                    ).astype(np.float32)
+                else:
+                    M_leaf_unlabeled = 0.0  # broadcast scalar -> no extra cost
+            
+                # Total leaf mass
+                M_node_weights = M_leaf_labeled + M_leaf_unlabeled
+            
                 # Calculate 1 / M_i(t) safely
                 with np.errstate(divide='ignore', invalid='ignore'):
                     inverse_M_node = 1.0 / M_node_weights
-                inverse_M_node[~np.isfinite(inverse_M_node)] = 0
-                
-                # Cache this for use in P_uu (Unlabeled-Unlabeled) proximity
-                # This ensures unlabeled data is normalized by the same density map as labeled data.
-                self.cached_inverse_M = inverse_M_node 
-                
+                inverse_M_node[~np.isfinite(inverse_M_node)] = 0.0
+            
+                # Cache this for use in P_uu normalization (and any unlabeled targets)
+                # NOTE: cached_inverse_M is now 1 / (inbag labeled mass + unlabeled count)
+                self.cached_inverse_M = inverse_M_node
+            
                 # Combine: W_val = c_j(t) * (1 / M_node)
                 weights = c_j_t * inverse_M_node[flat_cols]
                 
