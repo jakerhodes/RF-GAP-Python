@@ -130,20 +130,21 @@ def RFGAP(prediction_type=None, y=None, prox_method='rfgap', matrix_type='sparse
             self._leaf_offsets = None 
             self._total_unique_nodes = None
             
-            # Unlabeled Data Cache
-            self.leaf_matrix_u = None
-            self._n_unlabeled_samples = 0
-            self.cached_inverse_M = None  # Caches 1/M for use in P_uu normalization (in-bag leaf size)
+            self.idx_labeled_ = None
+            self.idx_unlabeled_ = None
+            
+            self.leaf_matrix_all = None     # (N_total, T) in ORIGINAL X order
+            self.oob_mask_all = None        # (N_total, T) int8/bool in ORIGINAL order
+            self.c_all = None               # (N_total, T) float32 in ORIGINAL order
 
             # Partial-label (NaN in y) bookkeeping (preserve original X order)
             self._inv_stack_order = None
             self._n_total_samples = 0
 
-        #TODO: do something more elegant than X_train slicing and index reordering. This might cause some memory overhead, but it's fine for now.
         def fit(self, X, y, sample_weight=None):
             """
             Fits the Random Forest and pre-computes the sparse weight matrix W necesssary for proximity calculations.
-    
+        
             RUNTIME COMPLEXITY: O(N * T * log(N))
                 - Forest Construction: O(N * T * log(N) * #features sampled at each node)
                 - Matrix Construction: O(N * T)
@@ -151,7 +152,7 @@ def RFGAP(prediction_type=None, y=None, prox_method='rfgap', matrix_type='sparse
             MEMORY COMPLEXITY: O(N * T)
                 - Stores leaf indices and sparse weights.
                 - Efficiently sparse: Only stores 1 entry per tree per sample.
-    
+        
             Parameters
             ----------
             
@@ -169,7 +170,7 @@ def RFGAP(prediction_type=None, y=None, prox_method='rfgap', matrix_type='sparse
                 create child nodes with net zero or negative weight are ignored while searching 
                 for a split in each node. In the case of classification, splits are also ignored 
                 if they would result in any single class carrying a negative weight in either child node.
-    
+        
             Returns
             -------
             self : object
@@ -198,32 +199,27 @@ def RFGAP(prediction_type=None, y=None, prox_method='rfgap', matrix_type='sparse
                 if not np.issubdtype(y.dtype, np.floating):
                     y = y.astype(np.float32)
                 mask_unlabeled = np.isnan(y)
-            
+        
+            # NOTE: we now keep EVERYTHING in the original X order.
+            # We only slice for fitting the forest.
+            self.idx_labeled_ = np.flatnonzero(~mask_unlabeled)
+            self.idx_unlabeled_ = np.flatnonzero(mask_unlabeled)
+        
             if not np.any(mask_unlabeled):
                 # Case A: Fully supervised
                 X_train = X
                 y_train = y
                 X_unlabeled = None
-            
             else:
                 # Case B: Semi-supervised
-                idx_labeled = np.flatnonzero(~mask_unlabeled)
-                idx_unlabeled = np.flatnonzero(mask_unlabeled)
-            
-                # Store permutation to restore original order later
-                stack_order = np.concatenate([idx_labeled, idx_unlabeled])
-                self._inv_stack_order = np.empty(self._n_total_samples, dtype=np.int64)
-                self._inv_stack_order[stack_order] = np.arange(self._n_total_samples, dtype=np.int64)
-            
-                # Slice
-                X_train = X[idx_labeled]
-                y_train = y[idx_labeled]
-                X_unlabeled = X[idx_unlabeled]
+                X_train = X[self.idx_labeled_]
+                y_train = y[self.idx_labeled_]
+                X_unlabeled = X[self.idx_unlabeled_]
             
                 # Slice weights if present
                 if sample_weight is not None:
-                    sample_weight = np.asarray(sample_weight)[idx_labeled]
-    
+                    sample_weight = np.asarray(sample_weight)[self.idx_labeled_]
+        
             # 4. Pass valid training data to parent Random Forest
             super().fit(X_train, y_train, sample_weight)
             
@@ -236,14 +232,16 @@ def RFGAP(prediction_type=None, y=None, prox_method='rfgap', matrix_type='sparse
             # ---------------------------------------------------------
             # We pass N samples through T trees to get leaf indices.
             # Shape: (N_samples, N_trees)
-            self.leaf_matrix = self.apply(X_train) # LOCAL IDS. Tree 1: Node 0,1,2... Tree 2: Node 0,1,2...
+            #
+            # NOTE: we compute leaves for ALL points (labeled+unlabeled) in ORIGINAL order.
+            self.leaf_matrix_all = self.apply(X)  # LOCAL IDS in original order
             
             # Calculate offsets to flatten (Tree, Leaf) -> Global Feature ID
             # This allows us to treat every node in the forest as a unique feature column.
             n_leaves_per_tree = [t.tree_.node_count for t in self.estimators_]
             self._leaf_offsets = np.concatenate(([0], np.cumsum(n_leaves_per_tree)[:-1]))  # List of size T showing starting index of each tree's leaves
             self._total_unique_nodes = np.sum(n_leaves_per_tree)  # Total unique nodes across all trees (typically NlogN scale)
-    
+        
             # Set offset for virtual diagonal nodes (after the last real leaf), needed for non-zero diagonal in RFGAP
             # This avoids the memory-killing setdiag() operation on huge sparse matrices.
             self._diag_offset = self._total_unique_nodes
@@ -252,57 +250,50 @@ def RFGAP(prediction_type=None, y=None, prox_method='rfgap', matrix_type='sparse
             # STEP 1.5: Handle Unlabeled Data (if present)
             # ---------------------------------------------------------
             if X_unlabeled is not None:
-                # Pass unlabeled data through the trained forest
-                self.leaf_matrix_u = self.apply(X_unlabeled)
-                self._n_unlabeled_samples = X_unlabeled.shape[0]
-                # Unlabeled proximity matrix (P_uu) naturally has non-zero diagonals and symmetry.
-                # We force P_ll to match this behavior for consistency.
+                # Unlabeled instances passed as input. Semi-supervised mode.
                 print("Unlabeled instances passed as input. Semi-supervised mode.")
-            else:
-                self.leaf_matrix_u = None
-                self._n_unlabeled_samples = 0
-    
+        
             # ---------------------------------------------------------
             # COMPLEXITY STEP 2: Statistics Calculation -> O(N * T)
             # ---------------------------------------------------------
             if self.prox_method in ['oob', 'rfgap']:
                 # Calculate S_i: Set of OOB trees for sample i
+                # NOTE: computed on TRAINING (labeled) samples only
                 self.oob_indices = self.get_oob_indices(X_train) 
-
+        
                 if self.prox_method == 'rfgap':
                     # Calculate c_j(t): Multiplicity of sample j in tree t
+                    # NOTE: computed on TRAINING (labeled) samples only
                     self.c_j_t = self.get_in_bag_counts(X_train)
-
-    
+        
+            # ---------------------------------------------------------
+            # COMPLEXITY STEP 2.5: Expand stats to ALL points (original order)
+            # ---------------------------------------------------------
+            # For unlabeled points:
+            #   - Query scope: treat as OOB for ALL trees (mask = 1)
+            #   - Target multiplicity: unit in-bag mass for ALL trees (c = 1)
+            if self.prox_method == 'rfgap':
+                T = self.leaf_matrix_all.shape[1]
+                self.oob_mask_all = np.ones((self._n_total_samples, T), dtype=np.int8)
+                self.c_all = np.ones((self._n_total_samples, T), dtype=np.float32)
+        
+                # Fill labeled rows using training statistics
+                self.oob_mask_all[self.idx_labeled_, :] = self.oob_indices.astype(np.int8)
+                self.c_all[self.idx_labeled_, :] = self.c_j_t.astype(np.float32)
+        
+            elif self.prox_method == 'oob':
+                T = self.leaf_matrix_all.shape[1]
+                self.oob_mask_all = np.ones((self._n_total_samples, T), dtype=np.int8)
+                self.oob_mask_all[self.idx_labeled_, :] = self.oob_indices.astype(np.int8)
+        
             # ---------------------------------------------------------
             # COMPLEXITY STEP 3: Build Sparse Weights -> O(N * T)
             # ---------------------------------------------------------
             # 1. Build Labeled Weights (Stored temporarily in self.W_mat)
+            #
+            # NOTE: W is now built for ALL points directly in original order.
             self._build_W_matrix()
-    
-            # ---------------------------------------------------------
-            # STEP 4: Build & Merge Unlabeled Weights -> O(Nu * T)
-            # ---------------------------------------------------------
-            if self.leaf_matrix_u is not None:
-                # 2. Build Unlabeled Weights
-                W_u = self._build_Wu_matrix()
-                
-                # 3. MERGE IMMEDIATELY: Stack Labeled (Top) and Unlabeled (Bottom)
-                # This ensures self.W_mat always matches the dimensions of (Labeled + Unlabeled)
-                self.W_mat = vstack([self.W_mat, W_u], format='csr', dtype=np.float32)
-                
-                # Free temp memory
-                del W_u
-                gc.collect()
-            
-            # =========================================================
-            # Permute W to Original Order HERE
-            # =========================================================
-            # Instead of permuting the massive N*N output later, we permute the 
-            # sparse component W now. This is O(N*Trees), not O(N^2).
-            if self._inv_stack_order is not None:
-                self.W_mat = self.W_mat[self._inv_stack_order, :]
-    
+        
             return self
     
         #TODO: check memory/time of normalization step
@@ -310,7 +301,7 @@ def RFGAP(prediction_type=None, y=None, prox_method='rfgap', matrix_type='sparse
             """
             This method produces a proximity matrix for the random forest object.
             Computes the proximity matrix P = Q . W^T using sparse matrix multiplication.
-
+        
             RUNTIME COMPLEXITY: O(N * T * k_bar)
                 - Where k_bar is the average number of samples per leaf (i.e. average leaf size)
                 - Asymmetric: 1x Sparse Matmul. Already symmetric if 'original' or 'oob' method since Q=W.
@@ -329,41 +320,15 @@ def RFGAP(prediction_type=None, y=None, prox_method='rfgap', matrix_type='sparse
             
             """
             check_is_fitted(self)
-
+        
             # 1. Retrieve Components (OPTIMIZED: Alias Q to W for 'original' method)
             if self.prox_method in ['original', 'oob']:
                 # In the original method, Q = W.
                 # Since self.W_mat was already permuted during fit(), we skip permutation here.
                 Q_total = self.W_mat
             else:
-                # 1. Retrieve Labeled Components
-                Q_l = self._build_Q_matrix(leaves=self.leaf_matrix, is_training=True)
-
-                # 2. Retrieve Unlabeled Components (if any) and Stack Q
-                if self.leaf_matrix_u is not None:
-                    # Build Q for unlabeled (is_training=False ensures correct column width/padding)
-                    Q_u = self._build_Q_matrix(leaves=self.leaf_matrix_u, is_training=False)
-                    
-                    # STACKING Q: Labeled on top, Unlabeled on bottom
-                    Q_total = vstack([Q_l, Q_u], format='csr', dtype=np.float32)
-                    del Q_l, Q_u
-                    gc.collect()
-                else:
-                    Q_total = Q_l
-
-                # 3. Safety Check: Ensure W_mat was correctly merged in fit()
-                if Q_total.shape[0] != self.W_mat.shape[0]:
-                    raise RuntimeError(
-                        f"Dimension Mismatch: Q has {Q_total.shape[0]} rows (Labeled+Unlabeled) but W has {self.W_mat.shape[0]}. "
-                        "This usually implies fit() was not re-run after updating the code. Please re-run fit()."
-                    )
-                
-                # =========================================================
-                # Permute Q to Original Order HERE
-                # =========================================================
-                # We match the reordering done to W_mat in fit()
-                if self._inv_stack_order is not None:
-                    Q_total = Q_total[self._inv_stack_order, :]
+                # NOTE: Q is built for ALL points directly in original order (no stacking).
+                Q_total = self._build_Q_matrix(leaves=self.leaf_matrix_all, is_training=True)
             
             # =========================================================
             # Fast Row-Max Normalization (Hadamard Trick)
@@ -383,12 +348,11 @@ def RFGAP(prediction_type=None, y=None, prox_method='rfgap', matrix_type='sparse
                 # Q <- D^{-1} Q. 
                 # This ensures that (Q . W^T) will have 1s on the diagonal.
                 self._csr_row_scale_inplace(Q_total, 1.0 / diagonal)
-
-
+        
             # 2. Monolithic Dot Product
             # -------------------------
             prox_matrix = None
-
+        
             if self.force_symmetric and self.prox_method in ['rfgap']:
                 # P = 0.5 * (Q W^T + W Q^T)
                 
@@ -410,13 +374,10 @@ def RFGAP(prediction_type=None, y=None, prox_method='rfgap', matrix_type='sparse
                 # (For 'original', this is simply W W^T)
                 prox_matrix = Q_total.dot(self.W_mat.T)
             
-            # Cleanup
-            del Q_total
-
-            # Diagonal clipping for OOB and RFGAP (mimics diagonal correction to make diagonal=1 for OOB, and make diagonal the max for RFGAP when non_zero_diagonal is True)
-            if self.prox_method == 'oob' or (self.prox_method == 'rfgap' and self.non_zero_diagonal):
+            # Diagonal clipping for OOB  (mimics diagonal correction to make diagonal=1 for OOB)
+            if self.prox_method == 'oob':
                 prox_matrix.data = np.minimum(prox_matrix.data, 1.0)
-
+            
             return prox_matrix.toarray() if self.matrix_type == 'dense' else prox_matrix
         
         #TODO: Check memory usage of prox_extend in semi-supervised mode (X_unlabeled present)
@@ -487,8 +448,10 @@ def RFGAP(prediction_type=None, y=None, prox_method='rfgap', matrix_type='sparse
             Builds the Weight Matrix 'W' (N_samples x N_total_nodes).
             This matrix handles the 'j' term (target) in the definitions.
             """
-            N, T = self.leaf_matrix.shape
-            global_leaves = self._to_global_leaves(self.leaf_matrix)
+            # NOTE: we now build W for ALL points (labeled+unlabeled) in original order.
+            leaves = self.leaf_matrix_all
+            N, T = leaves.shape
+            global_leaves = self._to_global_leaves(leaves)
             
             # Flatten indices for sparse construction -> O(N * T)
             flat_rows = np.repeat(np.arange(N), T)
@@ -504,7 +467,8 @@ def RFGAP(prediction_type=None, y=None, prox_method='rfgap', matrix_type='sparse
             
             # OOB proximity (approximated to make it separable).
             elif self.prox_method == 'oob':
-                oob_mask = self.oob_indices
+                # NOTE: oob_mask_all is defined for ALL points (unlabeled = all ones)
+                oob_mask = self.oob_mask_all
                 mask = oob_mask.flatten() == 1
                 flat_rows = flat_rows[mask]
                 flat_cols = flat_cols[mask]
@@ -520,73 +484,65 @@ def RFGAP(prediction_type=None, y=None, prox_method='rfgap', matrix_type='sparse
             # Term inside Sum: c_j(t) / M_i(t)
             #
             # Mapping:
-            #   c_j(t) -> self.c_j_t (Numerator)
+            #   c_j(t) -> self.c_all (Numerator)  (unlabeled = 1)
             #   M_i(t) -> Total leaf mass used for normalization (Denominator)
             elif self.prox_method == 'rfgap':
             
-                # Get c_j(t) [Multiplicity of j in tree t]
-                c_j_t = self.c_j_t.flatten().astype(np.float32)
+                # Get c_j(t) [Multiplicity of j in tree t] (unlabeled targets have unit mass)
+                c_j_t = self.c_all.flatten().astype(np.float32)
             
                 # ---------------------------------------------------------
-                # NEW: total leaf mass = (in-bag labeled mass) + (unlabeled unit mass)
-                #   M_leaf(t) = sum_{j in L∩leaf} c_j(t) + |U∩leaf|
-                # This makes L->U and U->U behave like a proper conditional distribution
-                # over (L+U) targets within each leaf.
+                # Labeled-only leaf mass
+                #   M_leaf(t) = sum_{j in leaf ∩ LABELED} c_j(t)
+                #
+                # Unlabeled targets DO NOT contribute to normalization
                 # ---------------------------------------------------------
+                c_mass = c_j_t.copy()
+                c_mass[~np.isin(flat_rows, self.idx_labeled_)] = 0.0
             
-                # In-bag labeled leaf mass: sum of c_j(t) inside each leaf
-                M_leaf_labeled = np.bincount(
-                    flat_cols, weights=c_j_t, minlength=self._total_unique_nodes
+                M_node_weights = np.bincount(
+                    flat_cols, weights=c_mass, minlength=self._total_unique_nodes
                 ).astype(np.float32)
             
-                # Unlabeled unit mass: count of unlabeled samples in each leaf
-                if self.leaf_matrix_u is not None and self._n_unlabeled_samples > 0:
-                    global_leaves_u = self._to_global_leaves(self.leaf_matrix_u)
-                    flat_cols_u = global_leaves_u.flatten()
-                    M_leaf_unlabeled = np.bincount(
-                        flat_cols_u, minlength=self._total_unique_nodes
-                    ).astype(np.float32)
-                else:
-                    M_leaf_unlabeled = 0.0  # broadcast scalar -> no extra cost
-            
-                # Total leaf mass
-                M_node_weights = M_leaf_labeled + M_leaf_unlabeled
-            
-                # Calculate 1 / M_i(t) safely
+                # Safe inverse
                 with np.errstate(divide='ignore', invalid='ignore'):
                     inverse_M_node = 1.0 / M_node_weights
                 inverse_M_node[~np.isfinite(inverse_M_node)] = 0.0
             
-                # Cache this for use in P_uu normalization (and any unlabeled targets)
-                # NOTE: cached_inverse_M is now 1 / (inbag labeled mass + unlabeled count)
-                self.cached_inverse_M = inverse_M_node
-            
-                # Combine: W_val = c_j(t) * (1 / M_node)
+                # Combine: W_val = c_j(t) / M_leaf(t)
                 weights = c_j_t * inverse_M_node[flat_cols]
                 
             # Non-zero diagonal trick via Virtual Diagonal Injection
             # This avoids the memory-killing setdiag() operation on huge sparse matrices.
+            # This injects RF-GAP self-similarity in labeled points (which is zero by default), and multiply by 2 the unlabeled diagonal
             total_cols = self._total_unique_nodes
+            # ---------------------------------------------------------
+            # Diagonal injection (uniform definition for ALL points)
+            #
+            # d_i = (1/|\bar{S_i}|) * sum_t c_i(t) / M_{leaf(i,t)}
+            #
+            # - For labeled points: c_i(t)>0 only for in-bag trees
+            #   → recovers RF-AE self-similarity
+            # - For unlabeled points: c_i(t)=1 for all trees
+            #   → recovers RF-GAP unlabeled diagonal, produce 2x the similarity for unlabeled points
+            # ---------------------------------------------------------
             if self.non_zero_diagonal and self.prox_method == 'rfgap':
-                # 1. Calculate what the diagonal values SHOULD be
-                row_sums = np.bincount(flat_rows, weights=weights, minlength=N)
-                n_trees = self.n_estimators
-                denominators = n_trees - self.oob_indices.sum(axis=1)
-                
-                with np.errstate(divide='ignore', invalid='ignore'):
-                    diag_vals = row_sums / denominators
-                diag_vals[~np.isfinite(diag_vals)] = 0.0
-                
-                # 2. Append them as new "features" at the end of the matrix
+                # 1) Row-sums of the existing W contributions (sum over t of c_i(t)/M_leaf)
+                row_sums = np.bincount(flat_rows, weights=weights, minlength=N).astype(np.float32)
+                # 2) Correct normalization count:
+                #    denom_i = #{ t : c_i(t) > 0 }
+                #    - labeled: in-bag count
+                #    - unlabeled (c=1 for all t): T
+                denom = (self.c_all > 0).sum(axis=1).astype(np.float32)
+                denom[denom == 0] = 1.0  # safety
+                diag_vals = row_sums / denom
                 diag_rows = np.arange(N)
                 diag_cols = np.arange(N) + self._diag_offset
-                
                 flat_rows = np.concatenate([flat_rows, diag_rows])
                 flat_cols = np.concatenate([flat_cols, diag_cols])
-                weights = np.concatenate([weights, diag_vals])
-                
-                total_cols += N 
-    
+                weights   = np.concatenate([weights, diag_vals])
+                total_cols += N
+        
             # Filter zeros and build Sparse Matrix W -> O(N * T)
             mask = weights > 0
             self.W_mat = sparse.csr_matrix(
@@ -595,48 +551,6 @@ def RFGAP(prediction_type=None, y=None, prox_method='rfgap', matrix_type='sparse
                 dtype=np.float32
             )
 
-        def _build_Wu_matrix(self, leaves=None):
-            """
-            Builds the Weight Matrix 'W_u' (N_unlabeled x N_total_nodes).
-            This logic was previously inside get_proximities(). Moving it here allows
-            caching and efficient re-use.
-            """
-            if leaves is None:
-                leaves = self.leaf_matrix_u
-            
-            N_u, T = leaves.shape
-            global_leaves_u = self._to_global_leaves(leaves)
-            
-            flat_rows = np.repeat(np.arange(N_u), T)
-            flat_cols = global_leaves_u.flatten()
-            
-            if self.prox_method == 'original':
-                # Original Method: just 1/sqrt(T)
-                scale_factor = np.float32(1.0 / np.sqrt(T))
-                w_vals = np.full(N_u * T, scale_factor, dtype=np.float32)
-            elif self.prox_method == 'oob':
-                scale_factor = np.float32(np.sqrt(T) / T)
-                w_vals = np.full(N_u * T, scale_factor, dtype=np.float32)
-            else:
-                # RFGAP Method: Use cached density weights (1/M)
-                if self.cached_inverse_M is None:
-                    # Should not happen if fit() logic is correct
-                    raise ValueError("RFGAP weights not found. Model must be fitted with prox_method='rfgap'.")
-                
-                # Map global leaf IDs to their cached inverse weights
-                w_vals = self.cached_inverse_M[flat_cols]
-
-            # Determine shape
-            # We must ensure W_u has the same number of columns as W_mat 
-            # (which is usually _total_unique_nodes, or +N_train if diagonals involved)
-            # This ensures dimensions match when doing dot products or combining matrices.
-            total_cols = self.W_mat.shape[1]
-
-            return sparse.csr_matrix(
-                    (w_vals, (flat_rows, flat_cols)),
-                    shape=(N_u, total_cols), 
-                    dtype=np.float32
-                )
     
     
         def _build_Q_matrix(self, leaves=None, is_training=True):
@@ -647,22 +561,20 @@ def RFGAP(prediction_type=None, y=None, prox_method='rfgap', matrix_type='sparse
             Now accepts 'leaves' directly to allow pre-computed leaf matrices.
             """
             if leaves is None:
-                leaves = self.leaf_matrix
-    
+                # NOTE: default is ALL points in original order
+                leaves = self.leaf_matrix_all
+        
             N, T = leaves.shape
             global_leaves = self._to_global_leaves(leaves)
             
             flat_rows = np.repeat(np.arange(N), T)
             flat_cols = global_leaves.flatten()
-    
+        
             # Determine OOB mask logic (only for RFGAP since this is the only asymmetric method for now)
-            if is_training:
-                # S_i logic: For RFGAP, we only sum over trees where i is OOB.
-                oob_mask = self.oob_indices if self.prox_method in ['rfgap'] else None
-            else:
-                # For new data, the sample was not in ANY bag, so it is OOB for all trees.
-                oob_mask = None # Treated as all ones later
-    
+            # S_i logic: For RFGAP, we only sum over trees where i is OOB.
+            # NOTE: oob_mask_all is defined for ALL points (unlabeled rows = all ones)
+            oob_mask = self.oob_mask_all if self.prox_method in ['rfgap'] and is_training  else None
+        
             # ORIGINAL PROXIMITY
             # p(i,j) = Sum[ ... ]  (Sum over all t=1 to T)
             #
@@ -670,7 +582,7 @@ def RFGAP(prediction_type=None, y=None, prox_method='rfgap', matrix_type='sparse
             if self.prox_method == 'original':
                 scale_factor = np.float32(1.0 / np.sqrt(self.n_estimators))
                 vals = np.full(N * T, scale_factor, dtype=np.float32)
-
+        
             # approximated OOB proximity. We treat each query as OOB for all trees.
             elif self.prox_method == 'oob':
                 scale_factor = np.float32(np.sqrt(T) / T)
@@ -691,7 +603,7 @@ def RFGAP(prediction_type=None, y=None, prox_method='rfgap', matrix_type='sparse
                     flat_cols = flat_cols[mask]
                     
                     # Calculate |S_i|: Count of OOB trees per sample
-                    S_i_counts = oob_mask.sum(axis=1)
+                    S_i_counts = oob_mask.sum(axis=1).astype(np.float32)
                     S_i_counts[S_i_counts == 0] = 1 # Avoid div/0
                     
                     # Q_val = 1 / |S_i|
@@ -706,21 +618,18 @@ def RFGAP(prediction_type=None, y=None, prox_method='rfgap', matrix_type='sparse
             # This avoids the memory-killing setdiag() operation on huge sparse matrices.
             total_cols = self._total_unique_nodes
             if self.non_zero_diagonal and self.prox_method == 'rfgap':
-                # FIX: Use the Training Size, not the current Query Size (N)
-                total_cols += self._n_train_samples
-                
-                # Only add Identity (1.0) if we are training (samples match themselves)
+                # IMPORTANT: must match W which uses TOTAL number of points (original order)
+                total_cols += self._n_total_samples
+            
                 if is_training:
+                    # Diagonal identity for ALL points
                     diag_rows = np.arange(N)
                     diag_cols = np.arange(N) + self._diag_offset
                     
                     flat_rows = np.concatenate([flat_rows, diag_rows])
                     flat_cols = np.concatenate([flat_cols, diag_cols])
-                    vals = np.concatenate([vals, np.ones(N)])
-                
-                # If is_training=False (prox_extend), we DO NOT add values, 
-                # but we DO keep the total_cols expanded so dimensions match W.
-    
+                    vals      = np.concatenate([vals, np.ones(N, dtype=np.float32)])
+        
             return sparse.csr_matrix(
                 (vals, (flat_rows, flat_cols)), 
                 shape=(N, total_cols), 
