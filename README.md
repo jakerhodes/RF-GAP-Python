@@ -8,7 +8,7 @@ To install, please use ```pip install git+https://github.com/jakerhodes/RF-GAP-P
 
 # Usage
 
-The rfgap class is conditionally built upon the Sklearn RandomForestClassifier or RandomForestRegressor with the additional functionality of proximity generation via the method get_proximities. The factory function RFGAP requires the user to either provide a vector of labels, y or to determine the prediction_type ("classification" or "regression"). If y is provided, the type of forest to be built will be determined automatically. In addition to any arguments used in RandomForestClassifier or RandomForestRegressor, an rfgap class takes the arguments prox_method (default: "rfgap") which, determines the proximity type to be constructed: "rfgap" or "original". The option to generate sparse or dense proximities is determined by the argument matrix_type. See an example below:
+The rfgap class is conditionally built upon the Sklearn RandomForestClassifier or RandomForestRegressor with the additional functionality of proximity generation via the method get_proximities. The factory function RFGAP requires the user to either provide a vector of labels, y or to determine the prediction_type ("classification" or "regression"). If y is provided, the type of forest to be built will be determined automatically. In addition to any arguments used in RandomForestClassifier or RandomForestRegressor, an rfgap class takes the arguments prox_method (default: "rfgap") which, determines the proximity type to be constructed: "rfgap", "oob" or "original". The option to generate sparse or dense proximities is determined by the argument matrix_type. See an example below:
 
 
 ```python
