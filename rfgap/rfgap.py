@@ -3,7 +3,6 @@ import numpy as np
 from scipy import sparse
 from scipy.sparse import hstack, vstack
 import pandas as pd
-import gc
 
 # sklearn imports
 from sklearn.ensemble import RandomForestClassifier, RandomForestRegressor, ExtraTreesClassifier, ExtraTreesRegressor
@@ -367,7 +366,6 @@ def RFGAP(prediction_type=None, y=None, prox_method='rfgap', matrix_type='sparse
                 prox_matrix *= 0.5
                 
                 del left_side, right_side_T
-                gc.collect()
                 
             else:
                 # Asymmetric: P = Q W^T 
@@ -413,7 +411,6 @@ def RFGAP(prediction_type=None, y=None, prox_method='rfgap', matrix_type='sparse
 
             # Cleanup
             del Q_new
-            gc.collect()
                 
             return prox_new.toarray() if self.matrix_type == 'dense' else prox_new
         
