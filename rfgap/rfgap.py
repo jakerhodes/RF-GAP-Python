@@ -24,7 +24,7 @@ import warnings
 
 
 def RFGAP(prediction_type=None, y=None, prox_method='rfgap', matrix_type='sparse',
-          non_zero_diagonal=False, force_symmetric=False, max_normalize=False,
+          non_zero_diagonal=False, symm_mode='none', max_normalize=False,
           model_type='rf', **kwargs):
     """
     Factory function to create an optimized Random Forest or Extra Trees Proximity object.
@@ -60,8 +60,8 @@ def RFGAP(prediction_type=None, y=None, prox_method='rfgap', matrix_type='sparse
         Only used for RF-GAP proximities. Should the diagonal entries be computed as non-zero? 
         (default is False, as in original RF-GAP definition)
     
-    force_symmetric : bool
-        Enforce symmetry of proximities. (default is False)
+    symm_mode : str or None
+        The mode of symmetry to be enforced. Options are `arithmetic`, `geometric`, or None (default is None)
     
     max_normalize : bool
         Only used for RF-GAP proximities. Whether to row-wise max-normalize the proximities 
@@ -105,7 +105,7 @@ def RFGAP(prediction_type=None, y=None, prox_method='rfgap', matrix_type='sparse
 
     class RFGAP(base_model):
         def __init__(self, prox_method=prox_method, matrix_type=matrix_type,
-                     non_zero_diagonal=non_zero_diagonal, force_symmetric=force_symmetric, max_normalize=max_normalize,
+                     non_zero_diagonal=non_zero_diagonal, symm_mode=symm_mode, max_normalize=max_normalize,
                      **kwargs):
             
             # Enforce bootstrapping for ExtraTrees if not specified.
@@ -121,7 +121,7 @@ def RFGAP(prediction_type=None, y=None, prox_method='rfgap', matrix_type='sparse
             self.matrix_type = matrix_type
             self.prediction_type = prediction_type
             self.non_zero_diagonal = non_zero_diagonal
-            self.force_symmetric = force_symmetric
+            self.symm_mode = symm_mode
             self.max_normalize = max_normalize
             
             # Internal Cache
@@ -324,7 +324,7 @@ def RFGAP(prediction_type=None, y=None, prox_method='rfgap', matrix_type='sparse
             if self.prox_method in ['original', 'oob']:
                 # In the original method, Q = W.
                 # Since self.W_mat was already permuted during fit(), we skip permutation here.
-                Q_total = self.W_mat
+                Q_total = self.W_mat.copy()
             else:
                 # NOTE: Q is built for ALL points directly in original order (no stacking).
                 Q_total = self._build_Q_matrix(leaves=self.leaf_matrix_all, is_training=True)
@@ -352,20 +352,8 @@ def RFGAP(prediction_type=None, y=None, prox_method='rfgap', matrix_type='sparse
             # -------------------------
             prox_matrix = None
         
-            if self.force_symmetric and self.prox_method in ['rfgap']:
-                # P = 0.5 * (Q W^T + W Q^T)
-                
-                # Left side: [Q, W] -> (N_total, 2*F)
-                left_side = hstack([Q_total, self.W_mat], format='csr', dtype=np.float32)
-                
-                # Right side: [W.T, Q.T] -> (2*F, N_total) -> CSC for fast multiplication
-                right_side_T = vstack([self.W_mat.T, Q_total.T], format='csc', dtype=np.float32)
-                
-                # Single Pass Multiplication
-                prox_matrix = left_side.dot(right_side_T)
-                prox_matrix *= 0.5
-                
-                del left_side, right_side_T
+            if self.symm_mode is not None and self.prox_method in ['rfgap']:
+                prox_matrix = self._block_symmetrize(Q_total, self.W_mat, mode=self.symm_mode)
                 
             else:
                 # Asymmetric: P = Q W^T 
@@ -414,7 +402,7 @@ def RFGAP(prediction_type=None, y=None, prox_method='rfgap', matrix_type='sparse
                 
             return prox_new.toarray() if self.matrix_type == 'dense' else prox_new
         
-        # Normalization Helpers
+        # Helpers
         @staticmethod
         def _csr_row_scale_inplace(A, scale):
             """
@@ -433,6 +421,50 @@ def RFGAP(prediction_type=None, y=None, prox_method='rfgap', matrix_type='sparse
             
             # In-place multiplication of the data array
             A.data *= np.repeat(scale, nnz_per_row)
+        
+        @staticmethod
+        def _block_symmetrize(Q, W, mode='arithmetic'):
+            """
+            Computes symmetric proximity P using optimized sparse strategies.
+            
+            Modes:
+              'arithmetic'    : P = 0.5 * (Q W^T + W Q^T)
+                           [Standard RF-GAP] Uses block matrix trick for 1x memory overhead.
+                           
+              'geometric' : P =  sqrt( (Q W^T) ⊙ (Q W^T)^T )
+                           [Intersection] Keeps only strong bidirectional links.
+                           Best for Manifold Learning (PHATE/UMAP) to remove "hairballs".
+                           
+            """
+            
+            # BRANCH 1: The "Cross" (arithmetic mean) Method (Uses Block Matrix Optimization)
+            if mode == 'arithmetic':
+                # Efficiency: We stack [Q, W] to compute QW^T + WQ^T in one pass
+                left_block = sparse.hstack([Q, W], format='csr', dtype=np.float32)
+                right_block_T = sparse.vstack([W.T, Q.T], format='csc', dtype=np.float32)
+                P = 0.5 * left_block.dot(right_block_T)
+                
+                # Cleanup
+                del left_block, right_block_T
+        
+            # BRANCH 2: The "Topology" Method (Require Explicit Asymmetric Graph)
+            elif mode == 'geometric':
+                # Compute Standard Asymmetric Proximity: P_asym = Q . W^T
+                # We need the actual directed graph first to compare forward/backward links
+                P_asym = Q.dot(W.T)
+        
+                # Intersection: P_ij exists only if i->j AND j->i
+                # This is extremely sparse and removes "accidental" RF links
+                P = P_asym.multiply(P_asym.T)
+                np.sqrt(P.data, out=P.data)
+                
+                # Cleanup
+                del P_asym
+        
+            else:
+                raise ValueError(f"Unknown symmetrization mode: {mode}")
+
+            return P
     
         # MATRIX BUILDERS (Mapping to Definitions)
         def _to_global_leaves(self, leaf_mat):
@@ -1272,4 +1304,4 @@ def RFGAP(prediction_type=None, y=None, prox_method='rfgap', matrix_type='sparse
             return outlier_scores
     
     return RFGAP(prox_method = prox_method, matrix_type = matrix_type,
-                 non_zero_diagonal = non_zero_diagonal, force_symmetric = force_symmetric, max_normalize = max_normalize, **kwargs)
+                 non_zero_diagonal = non_zero_diagonal, symm_mode = symm_mode, max_normalize = max_normalize, **kwargs)
