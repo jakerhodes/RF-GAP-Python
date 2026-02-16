@@ -647,17 +647,31 @@ def RFGAP(prediction_type=None, y=None, prox_method='rfgap', matrix_type='sparse
             # This avoids the memory-killing setdiag() operation on huge sparse matrices.
             total_cols = self._total_unique_nodes
             if self.non_zero_diagonal and self.prox_method == 'rfgap':
-                # IMPORTANT: must match W which uses TOTAL number of points (original order)
-                total_cols += self._n_total_samples
-            
-                if is_training:
-                    # Diagonal identity for ALL points
-                    diag_rows = np.arange(N)
-                    diag_cols = np.arange(N) + self._diag_offset
-                    
-                    flat_rows = np.concatenate([flat_rows, diag_rows])
-                    flat_cols = np.concatenate([flat_cols, diag_cols])
-                    vals      = np.concatenate([vals, np.ones(N, dtype=np.float32)])
+                if self.non_zero_diagonal and self.prox_method == 'rfgap':
+                    # IMPORTANT: must match W which uses TOTAL number of points (original order)
+                    total_cols += self._n_total_samples
+                
+                    if is_training:
+                        diag_rows = np.arange(N)
+                        diag_cols = np.arange(N) + self._diag_offset
+                
+                        # Default: keep labeled diagonal injection as 1.0
+                        diag_vals = np.ones(N, dtype=np.float32)
+                
+                        # For unlabeled rows, scale the injection to match labeled diagonal scale:
+                        # alpha = 1/(avg in-bag fraction) - 1 = T/avg_inbag_count - 1
+                        if self.idx_unlabeled_ is not None and self.idx_labeled_ is not None:
+                            # Estimate avg # in-bag trees on LABELED points only
+                            # (c_all > 0) marks in-bag trees for labeled points in your expansion step
+                            inbag_counts = (self.c_all[self.idx_labeled_, :] > 0).sum(axis=1).astype(np.float32)
+                            avg_inbag = float(inbag_counts.mean())  # scalar
+                            if avg_inbag > 0:
+                                alpha = (T / avg_inbag) - 1.0
+                                diag_vals[self.idx_unlabeled_] = np.float32(alpha)
+                
+                        flat_rows = np.concatenate([flat_rows, diag_rows])
+                        flat_cols = np.concatenate([flat_cols, diag_cols])
+                        vals      = np.concatenate([vals, diag_vals])
         
             return sparse.csr_matrix(
                 (vals, (flat_rows, flat_cols)), 
