@@ -49,8 +49,8 @@ def RFGAP(prediction_type=None, y=None, prox_method='rfgap', matrix_type='sparse
         should be used
     
     prox_method : str
-        The type of proximity to be constructed.  Options are `original`, `oob`, 
-        or `rfgap` (default is `rfgap`)
+        The type of proximity to be constructed. Options are `original`, `oob`,
+        `rfgap`, or `scornet` (default is `rfgap`)
     
     matrix_type : str
         Whether the matrix returned proximities whould be sparse or dense 
@@ -133,6 +133,15 @@ def RFGAP(prediction_type=None, y=None, prox_method='rfgap', matrix_type='sparse
             self.leaf_matrix_all = None     # (N_total, T) in ORIGINAL X order
             self.oob_mask_all = None        # (N_total, T) int8/bool in ORIGINAL order
             self.c_all = None               # (N_total, T) float32 in ORIGINAL order
+
+            self._flat_rows_all = None          # flattened row ids for all sample-tree incidences
+            self._flat_cols_all = None          # flattened global leaf ids for all sample-tree incidences
+            
+            self._leaf_mass_labeled_unit = None
+            self._leaf_mass_labeled_mult = None
+            
+            self._inv_sqrt_leaf_mass_labeled_unit = None
+            self._inv_leaf_mass_labeled_mult = None
 
             # Partial-label (NaN in y) bookkeeping (preserve original X order)
             self._n_total_samples = 0
@@ -247,6 +256,15 @@ def RFGAP(prediction_type=None, y=None, prox_method='rfgap', matrix_type='sparse
             if X_unlabeled is not None:
                 # Unlabeled instances passed as input. Semi-supervised mode.
                 print("Unlabeled instances passed as input. Semi-supervised mode.")
+            
+            # ---------------------------------------------------------
+            # STEP 1.75: Cache global flattened leaf structure
+            # ---------------------------------------------------------
+            T = self.leaf_matrix_all.shape[1]
+            global_leaves_all = self._to_global_leaves(self.leaf_matrix_all)
+            
+            self._flat_rows_all = np.repeat(np.arange(self._n_total_samples), T)
+            self._flat_cols_all = global_leaves_all.flatten()
         
             # ---------------------------------------------------------
             # COMPLEXITY STEP 2: Statistics Calculation -> O(N * T)
@@ -279,6 +297,48 @@ def RFGAP(prediction_type=None, y=None, prox_method='rfgap', matrix_type='sparse
                 T = self.leaf_matrix_all.shape[1]
                 self.oob_mask_all = np.ones((self._n_total_samples, T), dtype=np.int8)
                 self.oob_mask_all[self.idx_labeled_, :] = self.oob_indices.astype(np.int8)
+            
+            # ---------------------------------------------------------
+            # STEP 2.75: Precompute leaf statistics used by proximity methods
+            # ---------------------------------------------------------
+            
+            # mask selecting labeled sample-tree incidences only
+            labeled_incidence_mask = np.isin(self._flat_rows_all, self.idx_labeled_)
+            
+            # ---------------------------------------------------------
+            # Labeled unit leaf mass
+            #   counts labeled sample-tree incidences in each global leaf
+            #   used by Scornet
+            # ---------------------------------------------------------
+            self._leaf_mass_labeled_unit = np.bincount(
+                self._flat_cols_all[labeled_incidence_mask],
+                minlength=self._total_unique_nodes
+            ).astype(np.float32)
+            
+            with np.errstate(divide='ignore', invalid='ignore'):
+                self._inv_sqrt_leaf_mass_labeled_unit = 1.0 / np.sqrt(self._leaf_mass_labeled_unit)
+            self._inv_sqrt_leaf_mass_labeled_unit[~np.isfinite(self._inv_sqrt_leaf_mass_labeled_unit)] = 0.0
+            
+            # ---------------------------------------------------------
+            # Labeled multiplicity leaf mass
+            #   sums labeled in-bag multiplicities in each global leaf
+            #   used by RF-GAP
+            # ---------------------------------------------------------
+            if self.prox_method == 'rfgap':
+                c_flat = self.c_all.flatten().astype(np.float32)
+            
+                c_mass = c_flat.copy()
+                c_mass[~labeled_incidence_mask] = 0.0
+            
+                self._leaf_mass_labeled_mult = np.bincount(
+                    self._flat_cols_all,
+                    weights=c_mass,
+                    minlength=self._total_unique_nodes
+                ).astype(np.float32)
+            
+                with np.errstate(divide='ignore', invalid='ignore'):
+                    self._inv_leaf_mass_labeled_mult = 1.0 / self._leaf_mass_labeled_mult
+                self._inv_leaf_mass_labeled_mult[~np.isfinite(self._inv_leaf_mass_labeled_mult)] = 0.0
         
             # ---------------------------------------------------------
             # COMPLEXITY STEP 3: Build Sparse Weights -> O(N * T)
@@ -315,13 +375,10 @@ def RFGAP(prediction_type=None, y=None, prox_method='rfgap', matrix_type='sparse
             """
             check_is_fitted(self)
         
-            # 1. Retrieve Components (OPTIMIZED: Alias Q to W for 'original' method)
-            if self.prox_method in ['original', 'oob']:
-                # In the original method, Q = W.
-                # Since self.W_mat was already permuted during fit(), we skip permutation here.
+            # 1. Retrieve Components (OPTIMIZED: Alias Q to W for symmetric methods)
+            if self.prox_method in ['original', 'oob', 'scornet']:
                 Q_total = self.W_mat.copy()
             else:
-                # NOTE: Q is built for ALL points directly in original order (no stacking).
                 Q_total = self._build_Q_matrix(leaves=self.leaf_matrix_all, is_training=True)
             
             # =========================================================
@@ -330,7 +387,7 @@ def RFGAP(prediction_type=None, y=None, prox_method='rfgap', matrix_type='sparse
             # We perform normalization BEFORE symmetrization to keep the Block Trick efficient.
             # Calculate the diagonal (self-similarity) using fast element-wise mult.
             #    (For proximities, the diagonal is generally the Row Max).
-            if self.max_normalize and self.prox_method == 'rfgap' and self.non_zero_diagonal:
+            if self.max_normalize and ((self.prox_method == 'rfgap' and self.non_zero_diagonal) or self.prox_method == 'scornet'):
                 # diagonal = row max = sum(Q ⊙ W) row-wise (fast + sparse)
                 # Hadamard product O(NNZ) is much faster than Dot Product O(N^2 * density)
                 diagonal = Q_total.multiply(self.W_mat).sum(axis=1).A.ravel()
@@ -347,9 +404,8 @@ def RFGAP(prediction_type=None, y=None, prox_method='rfgap', matrix_type='sparse
             # -------------------------
             prox_matrix = None
         
-            if self.symm_mode is not None and self.prox_method in ['rfgap']:
+            if (self.symm_mode is not None and (self.prox_method == 'rfgap' or (self.prox_method == 'scornet' and self.max_normalize))):
                 prox_matrix = self._block_symmetrize(Q_total, self.W_mat, mode=self.symm_mode)
-                
             else:
                 # Asymmetric: P = Q W^T 
                 # (For 'original', this is simply W W^T)
@@ -488,6 +544,12 @@ def RFGAP(prediction_type=None, y=None, prox_method='rfgap', matrix_type='sparse
                 scale_factor = np.float32(1.0 / np.sqrt(T))
                 weights = np.full(N * T, scale_factor, dtype=np.float32)
             
+            elif self.prox_method == 'scornet':
+                # Scornet-style symmetric kernel:
+                # (1/T) * sum_t I(leaf_i(t)=leaf_j(t)) / M_leaf(t),
+                # using the cached inverse square-root labeled unit leaf mass.
+                weights = (1.0 / np.sqrt(T)) * self._inv_sqrt_leaf_mass_labeled_unit[flat_cols]
+            
             # OOB proximity (approximated to make it separable).
             elif self.prox_method == 'oob':
                 # NOTE: oob_mask_all is defined for ALL points (unlabeled = all ones)
@@ -507,33 +569,11 @@ def RFGAP(prediction_type=None, y=None, prox_method='rfgap', matrix_type='sparse
             # Term inside Sum: c_j(t) / M_i(t)
             #
             # Mapping:
-            #   c_j(t) -> self.c_all (Numerator)  (unlabeled = 1)
-            #   M_i(t) -> Total leaf mass used for normalization (Denominator)
+            #   c_j(t) -> self.c_all (numerator; unlabeled = 1)
+            #   M_i(t) -> cached labeled multiplicity leaf mass (denominator)
             elif self.prox_method == 'rfgap':
-            
-                # Get c_j(t) [Multiplicity of j in tree t] (unlabeled targets have unit mass)
                 c_j_t = self.c_all.flatten().astype(np.float32)
-            
-                # ---------------------------------------------------------
-                # Labeled-only leaf mass
-                #   M_leaf(t) = sum_{j in leaf ∩ LABELED} c_j(t)
-                #
-                # Unlabeled targets DO NOT contribute to normalization
-                # ---------------------------------------------------------
-                c_mass = c_j_t.copy()
-                c_mass[~np.isin(flat_rows, self.idx_labeled_)] = 0.0
-            
-                M_node_weights = np.bincount(
-                    flat_cols, weights=c_mass, minlength=self._total_unique_nodes
-                ).astype(np.float32)
-            
-                # Safe inverse
-                with np.errstate(divide='ignore', invalid='ignore'):
-                    inverse_M_node = 1.0 / M_node_weights
-                inverse_M_node[~np.isfinite(inverse_M_node)] = 0.0
-            
-                # Combine: W_val = c_j(t) / M_leaf(t)
-                weights = c_j_t * inverse_M_node[flat_cols]
+                weights = c_j_t * self._inv_leaf_mass_labeled_mult[flat_cols]
                 
             # Non-zero diagonal trick via virtual diagonal injection.
             # This avoids the memory-killing setdiag() operation on huge sparse matrices.
@@ -609,11 +649,6 @@ def RFGAP(prediction_type=None, y=None, prox_method='rfgap', matrix_type='sparse
             flat_rows = np.repeat(np.arange(N), T)
             flat_cols = global_leaves.flatten()
         
-            # Determine OOB mask logic (only for RFGAP since this is the only asymmetric method for now)
-            # S_i logic: For RFGAP, we only sum over trees where i is OOB.
-            # NOTE: oob_mask_all is defined for ALL points (unlabeled rows = all ones)
-            oob_mask = self.oob_mask_all if self.prox_method in ['rfgap'] and is_training  else None
-        
             # ORIGINAL PROXIMITY
             # p(i,j) = Sum[ ... ]  (Sum over all t=1 to T)
             #
@@ -621,6 +656,10 @@ def RFGAP(prediction_type=None, y=None, prox_method='rfgap', matrix_type='sparse
             if self.prox_method == 'original':
                 scale_factor = np.float32(1.0 / np.sqrt(self.n_estimators))
                 vals = np.full(N * T, scale_factor, dtype=np.float32)
+            
+            elif self.prox_method == 'scornet':
+                # Same symmetric weighting as W
+                vals = (1.0 / np.sqrt(T)) * self._inv_sqrt_leaf_mass_labeled_unit[flat_cols]
         
             # approximated OOB proximity. We treat each query as OOB for all trees.
             elif self.prox_method == 'oob':
@@ -637,12 +676,12 @@ def RFGAP(prediction_type=None, y=None, prox_method='rfgap', matrix_type='sparse
                 
                 if is_training:
                     # Apply S_i Scope: Keep only OOB trees
-                    mask = oob_mask.flatten() == 1
+                    mask = self.oob_mask_all.flatten() == 1
                     flat_rows = flat_rows[mask]
                     flat_cols = flat_cols[mask]
                     
                     # Calculate |S_i|: Count of OOB trees per sample
-                    S_i_counts = oob_mask.sum(axis=1).astype(np.float32)
+                    S_i_counts = self.oob_mask_all.sum(axis=1).astype(np.float32)
                     S_i_counts[S_i_counts == 0] = 1 # Avoid div/0
                     
                     # Q_val = 1 / |S_i|
