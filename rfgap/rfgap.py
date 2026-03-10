@@ -135,7 +135,6 @@ def RFGAP(prediction_type=None, y=None, prox_method='rfgap', matrix_type='sparse
             self.c_all = None               # (N_total, T) float32 in ORIGINAL order
 
             # Partial-label (NaN in y) bookkeeping (preserve original X order)
-            self._inv_stack_order = None
             self._n_total_samples = 0
 
         def fit(self, X, y, sample_weight=None):
@@ -178,7 +177,6 @@ def RFGAP(prediction_type=None, y=None, prox_method='rfgap', matrix_type='sparse
             # ---------------------------------------------------------
             
             # 1. Clear previous state
-            self._inv_stack_order = None
             self._n_total_samples = X.shape[0]
             
             # 2. Standardize y immediately
