@@ -70,8 +70,6 @@ def RFGAP(prediction_type=None, y=None, prox_method='rfgap', matrix_type='sparse
 
     model_type : str
         'rf' for RandomForest (default) or 'et' for ExtraTrees.
-        Note: If 'et' is selected, bootstrap will be set to True by default unless explicitly 
-        set to False in kwargs (though True is required for RFGAP proximity calculations).
 
     **kwargs
         Keyward arguements specific to the RandomForest/ExtraTrees Classifer or Regressor classes
