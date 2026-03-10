@@ -108,11 +108,11 @@ def RFGAP(prediction_type=None, y=None, prox_method='rfgap', matrix_type='sparse
                      non_zero_diagonal=non_zero_diagonal, symm_mode=symm_mode, max_normalize=max_normalize,
                      **kwargs):
             
-            # Enforce bootstrapping for ExtraTrees if not specified.
-            # Scikit-learn ExtraTrees defaults to bootstrap=False, but RFGAP relies on OOB/bagging mechanics.
-            if model_type == 'et':
-                if 'bootstrap' not in kwargs:
-                    kwargs['bootstrap'] = True
+            # OOB- and RF-GAP-based proximities require bootstrap sampling.
+            # We enforce the standard full-bootstrap setting used by this implementation.
+            if prox_method in ['oob', 'rfgap']:
+                kwargs['bootstrap'] = True
+                kwargs['max_samples'] = None
             
             super(RFGAP, self).__init__(**kwargs)
             
@@ -268,14 +268,13 @@ def RFGAP(prediction_type=None, y=None, prox_method='rfgap', matrix_type='sparse
             # ---------------------------------------------------------
             # COMPLEXITY STEP 2.5: Expand stats to ALL points (original order)
             # ---------------------------------------------------------
-            # For unlabeled points:
-            #   - Query scope: treat as OOB for ALL trees (mask = 1)
-            #   - Target multiplicity: unit in-bag mass for ALL trees (c = 1)
             if self.prox_method == 'rfgap':
                 T = self.leaf_matrix_all.shape[1]
                 self.oob_mask_all = np.ones((self._n_total_samples, T), dtype=np.int8)
-                self.c_all = np.ones((self._n_total_samples, T), dtype=np.float32)
-        
+                # Initialize with the phantom-target convention:
+                # unlabeled rows have c_j(t) = 1 for all trees.
+                # Labeled rows are overwritten below with their true in-bag multiplicities.
+                self.c_all = np.ones((self._n_total_samples, T), dtype=np.float32)        
                 # Fill labeled rows using training statistics
                 self.oob_mask_all[self.idx_labeled_, :] = self.oob_indices.astype(np.int8)
                 self.c_all[self.idx_labeled_, :] = self.c_j_t.astype(np.float32)
@@ -540,20 +539,36 @@ def RFGAP(prediction_type=None, y=None, prox_method='rfgap', matrix_type='sparse
                 # Combine: W_val = c_j(t) / M_leaf(t)
                 weights = c_j_t * inverse_M_node[flat_cols]
                 
-            # Non-zero diagonal trick via Virtual Diagonal Injection
+            # Non-zero diagonal trick via virtual diagonal injection.
             # This avoids the memory-killing setdiag() operation on huge sparse matrices.
-            # This injects RF-GAP self-similarity in labeled points (which is zero by default), and multiply by 2 the unlabeled diagonal
+            #
+            # We append one virtual column per sample. The value injected in row i is
+            #     d_i = (1 / n_i) * sum_t c_i(t) / M_{leaf(i,t)},
+            # where n_i is the number of trees such that c_i(t) > 0.
+            #
+            # - For labeled rows, c_i(t) > 0 only on in-bag trees, while the ordinary RF-GAP
+            #   diagonal is zero because query trees are OOB and target multiplicities live on
+            #   in-bag trees. Hence the virtual term supplies the full nonzero diagonal.
+            # - For unlabeled rows, c_i(t) = 1 for all trees, so the ordinary leaf-overlap
+            #   terms already contribute a base diagonal. The virtual term adds one additional
+            #   copy, which is later globally rescaled in Q.
             total_cols = self._total_unique_nodes
             # ---------------------------------------------------------
-            # Diagonal injection (uniform definition for ALL points)
+            # Virtual diagonal values for W
             #
-            # d_i = (1/|\bar{S_i}|) * sum_t c_i(t) / M_{leaf(i,t)}
+            # Here d_i is the injected virtual-diagonal contribution only; it is not the full
+            # final proximity diagonal by itself.
             #
-            # - For labeled points: c_i(t)>0 only for in-bag trees
-            #   → recovers RF-AE self-similarity
-            # - For unlabeled points: c_i(t)=1 for all trees
-            #   → recovers RF-GAP unlabeled diagonal, produce 2x the similarity for unlabeled points
-            # ---------------------------------------------------------
+            # We compute
+            #     d_i = row_sums_i / denom_i,
+            # where
+            #     row_sums_i = sum_t c_i(t) / M_{leaf(i,t)}
+            # and
+            #     denom_i    = #{ t : c_i(t) > 0 }.
+            #
+            # Thus:
+            # - for labeled rows, denom_i is the number of in-bag trees;
+            # - for unlabeled rows, denom_i = T since c_i(t)=1 for all trees.
             if self.non_zero_diagonal and self.prox_method == 'rfgap':
                 # 1) Row-sums of the existing W contributions (sum over t of c_i(t)/M_leaf)
                 row_sums = np.bincount(flat_rows, weights=weights, minlength=N).astype(np.float32)
@@ -656,13 +671,23 @@ def RFGAP(prediction_type=None, y=None, prox_method='rfgap', matrix_type='sparse
                     # Default: keep labeled diagonal injection as 1.0
                     diag_vals = np.ones(N, dtype=np.float32)
             
-                    # For unlabeled rows, scale the injection to match labeled diagonal scale:
-                    # alpha = 1/(avg in-bag fraction) - 1 = T/avg_inbag_count - 1
-                    if self.idx_unlabeled_ is not None and self.idx_labeled_ is not None:
-                        # Estimate avg # in-bag trees on LABELED points only
-                        # (c_all > 0) marks in-bag trees for labeled points in your expansion step
+                    # For unlabeled rows, the ordinary leaf-overlap terms already contribute
+                    #     (1 / T) * sum_t 1 / M_i(t)
+                    # to the diagonal, since unlabeled queries use all trees and unlabeled
+                    # targets have c_i(t) = 1 for all trees.
+                    # The virtual diagonal column then adds
+                    #     alpha * (1 / T) * sum_t 1 / M_i(t),
+                    # so the total unlabeled diagonal becomes
+                    #     (1 + alpha) * (1 / T) * sum_t 1 / M_i(t).
+                    # We choose alpha by a global tree-coverage calibration so that this matches
+                    #     (1 / average number of in-bag trees) * sum_t 1 / M_i(t),
+                    # using the empirical average in-bag tree count over labeled samples.
+                    if self.idx_unlabeled_ is not None and len(self.idx_unlabeled_) > 0 \
+                       and self.idx_labeled_ is not None and len(self.idx_labeled_) > 0:
+                    
                         inbag_counts = (self.c_all[self.idx_labeled_, :] > 0).sum(axis=1).astype(np.float32)
-                        avg_inbag = float(inbag_counts.mean())  # scalar
+                        avg_inbag = float(inbag_counts.mean()) if inbag_counts.size > 0 else 0.0
+                    
                         if avg_inbag > 0:
                             alpha = (T / avg_inbag) - 1.0
                             diag_vals[self.idx_unlabeled_] = np.float32(alpha)
