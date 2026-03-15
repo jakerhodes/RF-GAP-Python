@@ -50,7 +50,7 @@ def RFGAP(prediction_type=None, y=None, prox_method='rfgap', matrix_type='sparse
     
     prox_method : str
         The type of proximity to be constructed. Options are `original`, `oob`,
-        `rfgap`, or `scornet` (default is `rfgap`)
+        `rfgap`, or `kerf` (default is `rfgap`)
     
     matrix_type : str
         Whether the matrix returned proximities whould be sparse or dense 
@@ -308,7 +308,7 @@ def RFGAP(prediction_type=None, y=None, prox_method='rfgap', matrix_type='sparse
             # ---------------------------------------------------------
             # Labeled unit leaf mass
             #   counts labeled sample-tree incidences in each global leaf
-            #   used by Scornet
+            #   used by KeRF
             # ---------------------------------------------------------
             self._leaf_mass_labeled_unit = np.bincount(
                 self._flat_cols_all[labeled_incidence_mask],
@@ -376,7 +376,7 @@ def RFGAP(prediction_type=None, y=None, prox_method='rfgap', matrix_type='sparse
             check_is_fitted(self)
         
             # 1. Retrieve Components (OPTIMIZED: Alias Q to W for symmetric methods)
-            if self.prox_method in ['original', 'oob', 'scornet']:
+            if self.prox_method in ['original', 'oob', 'kerf']:
                 Q_total = self.W_mat.copy()
             else:
                 Q_total = self._build_Q_matrix(leaves=self.leaf_matrix_all, is_training=True)
@@ -387,7 +387,7 @@ def RFGAP(prediction_type=None, y=None, prox_method='rfgap', matrix_type='sparse
             # We perform normalization BEFORE symmetrization to keep the Block Trick efficient.
             # Calculate the diagonal (self-similarity) using fast element-wise mult.
             #    (For proximities, the diagonal is generally the Row Max).
-            if self.max_normalize and ((self.prox_method == 'rfgap' and self.non_zero_diagonal) or self.prox_method == 'scornet'):
+            if self.max_normalize and ((self.prox_method == 'rfgap' and self.non_zero_diagonal) or self.prox_method == 'kerf'):
                 # diagonal = row max = sum(Q ⊙ W) row-wise (fast + sparse)
                 # Hadamard product O(NNZ) is much faster than Dot Product O(N^2 * density)
                 diagonal = Q_total.multiply(self.W_mat).sum(axis=1).A.ravel()
@@ -404,7 +404,7 @@ def RFGAP(prediction_type=None, y=None, prox_method='rfgap', matrix_type='sparse
             # -------------------------
             prox_matrix = None
         
-            if (self.symm_mode is not None and (self.prox_method == 'rfgap' or (self.prox_method == 'scornet' and self.max_normalize))):
+            if (self.symm_mode is not None and (self.prox_method == 'rfgap' or (self.prox_method == 'kerf' and self.max_normalize))):
                 prox_matrix = self._block_symmetrize(Q_total, self.W_mat, mode=self.symm_mode)
             else:
                 # Asymmetric: P = Q W^T 
@@ -544,8 +544,8 @@ def RFGAP(prediction_type=None, y=None, prox_method='rfgap', matrix_type='sparse
                 scale_factor = np.float32(1.0 / np.sqrt(T))
                 weights = np.full(N * T, scale_factor, dtype=np.float32)
             
-            elif self.prox_method == 'scornet':
-                # Scornet-style symmetric kernel:
+            elif self.prox_method == 'kerf':
+                # KeRF-style symmetric kernel:
                 # (1/T) * sum_t I(leaf_i(t)=leaf_j(t)) / M_leaf(t),
                 # using the cached inverse square-root labeled unit leaf mass.
                 weights = (1.0 / np.sqrt(T)) * self._inv_sqrt_leaf_mass_labeled_unit[flat_cols]
@@ -637,7 +637,7 @@ def RFGAP(prediction_type=None, y=None, prox_method='rfgap', matrix_type='sparse
                 scale_factor = np.float32(1.0 / np.sqrt(self.n_estimators))
                 vals = np.full(N * T, scale_factor, dtype=np.float32)
             
-            elif self.prox_method == 'scornet':
+            elif self.prox_method == 'kerf':
                 # Same symmetric weighting as W
                 vals = (1.0 / np.sqrt(T)) * self._inv_sqrt_leaf_mass_labeled_unit[flat_cols]
         
