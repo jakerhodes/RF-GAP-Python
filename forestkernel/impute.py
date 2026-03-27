@@ -1,7 +1,7 @@
 from sklearn.impute import KNNImputer
 import pandas as pd
 import numpy as np
-from rfgap import RFGAP
+from forestkernel import ForestKernel
 from .missingmetrics import missing_metrics
 import warnings
 
@@ -236,7 +236,7 @@ def proximity_impute_iteration(x, missing, proximities, return_nonmissing = Fals
 #-----------------------------------------------------------------------------------#
 
 # TODO: Incorporate with RFGAP class
-def rfgap_impute(x, y, n_iters=10, initialization='median', global_initialization=False, 
+def gap_impute(x, y, n_iters=10, initialization='median', global_initialization=False, 
                  numeric_metric='r2', categorical_metric='f1', internal_check=True, 
                  return_scores=False, return_multi_impute=False,  x_test = None, random_state=None, **kwargs):
     """
@@ -301,7 +301,7 @@ def rfgap_impute(x, y, n_iters=10, initialization='median', global_initializatio
         missing_test = get_missing(x_test)
     
     # Initialize Random Forest model for RF-GAP imputation
-    rf = RFGAP(y = y, matrix_type = 'dense', oob_score = True, random_state=random_state, **kwargs)
+    rf = ForestKernel(y = y, matrix_type = 'dense', oob_score = True, random_state=random_state, **kwargs)
     
     # Dictionary to store metrics during iterations
     scores = {
