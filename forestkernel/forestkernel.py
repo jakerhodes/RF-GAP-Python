@@ -34,7 +34,7 @@ def ForestKernel(
     matrix_type="sparse",
     force_nonzero_diag=False,
     force_symmetric=None,
-    max_normalize=False,
+    normalize_diagonal=False,
     model_type="rf",
     allow_semi_supervised=False,
     **kwargs,
@@ -72,8 +72,8 @@ def ForestKernel(
     force_symmetric : bool or None
         Whether to force symmetry via block symmetrization.
 
-    max_normalize : bool
-        Whether to max-normalize rows before the final dot product when relevant.
+    normalize_diagonal : bool
+        Whether to normalize rows by the diagonal elements before the final dot product when relevant.
 
     model_type : str
         One of {'rf', 'et', 'gbt', 'rotf'}.
@@ -108,7 +108,7 @@ def ForestKernel(
             matrix_type=matrix_type,
             force_nonzero_diag=force_nonzero_diag,
             force_symmetric=force_symmetric,
-            max_normalize=max_normalize,
+            normalize_diagonal=normalize_diagonal,
             allow_semi_supervised=allow_semi_supervised,
             **kwargs,
         ):
@@ -119,7 +119,7 @@ def ForestKernel(
             self.prediction_type = prediction_type
             self.force_nonzero_diag = force_nonzero_diag
             self.force_symmetric = force_symmetric
-            self.max_normalize = max_normalize
+            self.normalize_diagonal = normalize_diagonal
             self.model_type = model_type
             self.allow_semi_supervised = allow_semi_supervised
 
@@ -321,8 +321,8 @@ def ForestKernel(
                 force_nonzero_diag=self.force_nonzero_diag,
             )
 
-            # Fast row-max normalization (Hadamard trick)
-            if self.max_normalize and (
+            # Fast diagonal normalization (Hadamard trick)
+            if self.normalize_diagonal and (
                 (self.prox_method == "gap" and self.force_nonzero_diag)
                 or self.prox_method == "kerf"
             ):
@@ -333,7 +333,7 @@ def ForestKernel(
             # Final sparse multiplication
             if self.force_symmetric and (
                 self.prox_method == "gap"
-                or (self.prox_method == "kerf" and self.max_normalize)
+                or (self.prox_method == "kerf" and self.normalize_diagonal)
             ):
                 prox_matrix = block_symmetrize(Q_total, self.cache.W_mat)
             else:
@@ -375,7 +375,7 @@ def ForestKernel(
         matrix_type=matrix_type,
         force_nonzero_diag=force_nonzero_diag,
         force_symmetric=force_symmetric,
-        max_normalize=max_normalize,
+        normalize_diagonal=normalize_diagonal,
         allow_semi_supervised=allow_semi_supervised,
         **kwargs,
     )
