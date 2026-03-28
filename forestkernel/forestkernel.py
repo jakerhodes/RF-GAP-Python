@@ -25,6 +25,7 @@ import warnings
 
 # Extras
 from .extras import GAPExtrasMixin
+from forestkernel.wrappers.bagged_rotation_forest import BaggedRotationForest
 
 #TODO: add support for sklearn Quantile RandomForests and other tree-based models in sklearn and beyond (e.g. LightGBM, XGBoost, CatBoost)
 def ForestKernel(prediction_type=None, y=None, prox_method='gap', matrix_type='sparse',
@@ -73,7 +74,8 @@ def ForestKernel(prediction_type=None, y=None, prox_method='gap', matrix_type='s
         or integrating proximities across multiple models or datasets.
 
     model_type : str
-        'rf' for RandomForest (default), 'et' for ExtraTrees, or 'gbt' for GradientBoosting.
+        'rf' for RandomForest (default), 'et' for ExtraTrees, 'gbt' for GradientBoosting,
+        or 'rotf' for Bagged Rotation Forest.
 
     **kwargs
         Keyward arguements specific to the RandomForest/ExtraTrees/GradientBoosting Classifer or Regressor classes
@@ -82,7 +84,7 @@ def ForestKernel(prediction_type=None, y=None, prox_method='gap', matrix_type='s
     Returns
     -------
     self : object
-        The RF/ET/GBT object (unfitted)
+        The RF/ET/GBT/ROTF object (unfitted)
     
     """
 
@@ -101,6 +103,9 @@ def ForestKernel(prediction_type=None, y=None, prox_method='gap', matrix_type='s
     
     if model_type == 'gbt' and prox_method != 'gbt':
         raise ValueError("When model_type='gbt', prox_method must be 'gbt'")
+
+    if model_type == 'rotf' and prediction_type != 'classification':
+        raise ValueError("model_type='rotf' currently supports classification only.")
     
     if model_type == 'rf':
         if prediction_type == 'classification': base_model = RandomForestClassifier
@@ -111,8 +116,10 @@ def ForestKernel(prediction_type=None, y=None, prox_method='gap', matrix_type='s
     elif model_type == 'gbt':
         if prediction_type == 'classification': base_model = GradientBoostingClassifier
         elif prediction_type == 'regression': base_model = GradientBoostingRegressor
+    elif model_type == 'rotf':
+        base_model = BaggedRotationForest
     else:
-        raise ValueError("model_type must be either 'rf' (RandomForest), 'et' (ExtraTrees), or 'gbt' (GradientBoosting)")
+        raise ValueError("model_type must be either 'rf' (RandomForest), 'et' (ExtraTrees), 'gbt' (GradientBoosting), or 'rotf' (BaggedRotationForest)")
 
     class ForestKernel(GAPExtrasMixin, base_model):
         def __init__(self, prox_method=prox_method, matrix_type=matrix_type,
@@ -121,7 +128,7 @@ def ForestKernel(prediction_type=None, y=None, prox_method='gap', matrix_type='s
             
             # OOB- and RF-GAP-based proximities require bootstrap sampling.
             # We enforce the standard full-bootstrap setting used by this implementation.
-            if prox_method in ['oob', 'gap']:
+            if prox_method in ['oob', 'gap'] and model_type in ['rf', 'et']:
                 kwargs['bootstrap'] = True
                 kwargs['max_samples'] = None
             
@@ -211,7 +218,14 @@ def ForestKernel(prediction_type=None, y=None, prox_method='gap', matrix_type='s
             self._n_samples = X.shape[0]
         
             # 2. Pass training data to parent tree ensemble
-            super().fit(X, y, sample_weight)
+            try:
+                super().fit(X, y, sample_weight=sample_weight)
+            except TypeError:
+                if sample_weight is not None:
+                    warnings.warn(
+                        "sample_weight was provided but is ignored because the selected base model does not support it."
+                    )
+                super().fit(X, y)
             
             # 3. Store Metadata
             self.y = y
@@ -223,20 +237,14 @@ def ForestKernel(prediction_type=None, y=None, prox_method='gap', matrix_type='s
             # Shape: (N_samples, N_trees)
             if self.model_type == 'gbt':
                 self._tree_list = self._get_tree_list()
-                self.leaf_matrix_all = self._apply_all_trees(X)  # LOCAL IDS across all boosted trees
+
+            self.leaf_matrix_all = self._get_leaf_matrix(X)  # LOCAL IDS across all trees
                 
-                # Calculate offsets to flatten (Tree, Leaf) -> Global Feature ID
-                # This allows us to treat every node in the forest as a unique feature column.
-                n_leaves_per_tree = [t.tree_.node_count for t in self._tree_list]
-                self._leaf_offsets = np.concatenate(([0], np.cumsum(n_leaves_per_tree)[:-1]))
-                self._total_unique_nodes = np.sum(n_leaves_per_tree)
-            else:
-                self.leaf_matrix_all = self.apply(X)  # LOCAL IDS
-                
-                # Calculate offsets to flatten (Tree, Leaf) -> Global Feature ID
-                n_leaves_per_tree = [t.tree_.node_count for t in self.estimators_]
-                self._leaf_offsets = np.concatenate(([0], np.cumsum(n_leaves_per_tree)[:-1]))
-                self._total_unique_nodes = np.sum(n_leaves_per_tree)
+            # Calculate offsets to flatten (Tree, Leaf) -> Global Feature ID
+            # This allows us to treat every node in the forest as a unique feature column.
+            n_leaves_per_tree = self._get_n_nodes_per_tree()
+            self._leaf_offsets = np.concatenate(([0], np.cumsum(n_leaves_per_tree)[:-1]))
+            self._total_unique_nodes = np.sum(n_leaves_per_tree)
         
             # Set offset for virtual diagonal nodes (after the last real leaf), needed for non-zero diagonal in GAP
             # This avoids the memory-killing setdiag() operation on huge sparse matrices.
@@ -394,10 +402,7 @@ def ForestKernel(prediction_type=None, y=None, prox_method='gap', matrix_type='s
                 Proximities between X_new and the fitted data.
             """
             # 1. Pass X_new through the forest to get leaf indices
-            if self.model_type == 'gbt':
-                leaves_new = self._apply_all_trees(X_new)
-            else:
-                leaves_new = self.apply(X_new)
+            leaves_new = self._get_leaf_matrix(X_new)
             
             # 2. Build Query Matrix Q for NEW data
             # Q_new shape: (N_new, Total_Unique_Nodes)
@@ -449,6 +454,42 @@ def ForestKernel(prediction_type=None, y=None, prox_method='gap', matrix_type='s
         def _to_global_leaves(self, leaf_mat):
             """Offset local leaf IDs to global feature IDs."""
             return leaf_mat + self._leaf_offsets
+
+        def _extract_tree(self, estimator):
+            """
+            Helper to safely retrieve the raw decision tree object.
+            - RF / ET: estimator is already a sklearn tree
+            - GBT: tree list is already flattened raw trees
+            - ROTF: estimator may be a PCA/tree pipeline
+            """
+            if self.model_type == 'rotf':
+                if hasattr(estimator, 'steps'):
+                    return estimator.steps[-1][1]
+                return estimator
+            return estimator
+
+        def _get_base_estimators(self):
+            """
+            Returns the fitted estimator objects used by the ensemble.
+            """
+            if self.model_type == 'gbt':
+                return self._tree_list
+            return self.estimators_
+
+        def _get_leaf_matrix(self, X):
+            """
+            Return matrix of leaf ids of shape (N, T).
+            """
+            if self.model_type == 'gbt':
+                return self._apply_all_trees(X)
+            return self.apply(X).astype(np.int32)
+
+        def _get_n_nodes_per_tree(self):
+            """
+            Number of nodes per tree, used to offset local node ids into global ids.
+            """
+            estimators = self._get_base_estimators()
+            return [self._extract_tree(est).tree_.node_count for est in estimators]
         
         
         def _build_W_matrix(self):
@@ -657,18 +698,22 @@ def ForestKernel(prediction_type=None, y=None, prox_method='gap', matrix_type='s
             
             mask = vals != 0
             return sparse.csr_matrix(
-                (vals, (flat_rows, flat_cols)), 
+                (vals, (flat_rows[mask], flat_cols[mask])), 
                 shape=(N, total_cols), 
                 dtype=np.float32
             )
 
         # Forest/OOB Helpers
-        def get_oob_indices(self, X_train):
+        def get_oob_indices(self, X_train=None):
             """
             Returns OOB mask matrix of shape (N_train, T), where entry (i,t)=1 if sample i is OOB for tree t.
             """
             if self.model_type == 'gbt':
                 raise ValueError("OOB indices are not defined for GradientBoosting.")
+
+            if self.model_type == 'rotf':
+                c = self.get_in_bag_counts(X_train)
+                return (c == 0).astype(np.int8)
             
             n_samples = X_train.shape[0]
             n_trees = len(self.estimators_)
@@ -684,13 +729,25 @@ def ForestKernel(prediction_type=None, y=None, prox_method='gap', matrix_type='s
             
             return oob_mask
 
-        def get_in_bag_counts(self, X_train):
+        def get_in_bag_counts(self, X_train=None):
             """
             Returns in-bag multiplicity matrix of shape (N_train, T), where entry (i,t)
             is the number of times sample i was drawn for tree t.
             """
             if self.model_type == 'gbt':
                 raise ValueError("In-bag counts are not defined for GradientBoosting.")
+
+            if self.model_type == 'rotf':
+                n_trees = len(self.estimators_)
+                first_tree = self._extract_tree(self.estimators_[0])
+                n_samples = len(first_tree.in_bag_counts_)
+                counts = np.zeros((n_samples, n_trees), dtype=np.float32)
+
+                for t, est in enumerate(self.estimators_):
+                    tree = self._extract_tree(est)
+                    counts[:, t] = tree.in_bag_counts_
+
+                return counts
             
             n_samples = X_train.shape[0]
             n_trees = len(self.estimators_)
@@ -705,7 +762,7 @@ def ForestKernel(prediction_type=None, y=None, prox_method='gap', matrix_type='s
                 binc = np.bincount(sampled, minlength=n_samples)
                 counts[:, t] = binc
             
-            return counts
+            return counts.astype(np.float32)
         
         # GBT Helpers
         def _get_tree_list(self):
