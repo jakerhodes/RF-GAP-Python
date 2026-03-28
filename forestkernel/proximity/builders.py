@@ -49,12 +49,17 @@ def initialize_cache(
     cache.n_samples = int(n_samples)
     cache.n_trees = int(leaf_matrix_all.shape[1])
 
+    # Calculate offsets to flatten (Tree, Leaf) -> Global Feature ID.
+    # This allows us to treat every node in the forest as a unique feature column.
     cache.leaf_offsets = np.concatenate(([0], np.cumsum(n_nodes_per_tree)[:-1])).astype(np.int64)
     cache.total_unique_nodes = int(np.sum(n_nodes_per_tree))
+
+    # Set offset for virtual diagonal nodes (after the last real leaf), needed for
+    # non-zero diagonal tricks in OOB and GAP. This avoids costly sparse setdiag().
     cache.diag_offset = cache.total_unique_nodes
 
+    # Cache global flattened leaf structure for the fitted reference set.
     global_leaves_all = to_global_leaves(cache.leaf_matrix_all, cache.leaf_offsets)
-
     cache.flat_rows_all = np.repeat(np.arange(cache.n_samples), cache.n_trees)
     cache.flat_cols_all = global_leaves_all.flatten()
 
@@ -143,38 +148,89 @@ def build_W_matrix(cache, prox_method, force_nonzero_diag=False):
     """
     N = cache.n_samples
     T = cache.n_trees
+
+    # Reuse the cached flattened structure of the reference/training set.
+    # This avoids recomputing global leaves and flattened indices.
     flat_rows = cache.flat_rows_all
     flat_cols = cache.flat_cols_all
+
+    # Base number of columns for sparse W building (before optional virtual diagonal).
     total_cols = cache.total_unique_nodes
 
+    # ---------------------------------------------------------
+    # ORIGINAL PROXIMITY
+    # p(i,j) = (1/T) * Sum_t [ I( j in v_i(t) ) ]
+    #
+    # Mapping:
+    #   Use a symmetric factorization with sqrt(1/T) on both sides.
+    #   W handles the target/reference side.
+    # ---------------------------------------------------------
     if prox_method == "original":
         scale_factor = np.float32(1.0 / np.sqrt(T))
         weights = np.full(N * T, scale_factor, dtype=np.float32)
 
+    # ---------------------------------------------------------
+    # GBT PROXIMITY
+    # p(i,j) = Sum_t w_t * I( leaf_t(i) = leaf_t(j) )
+    #
+    # Mapping:
+    #   Use a symmetric factorization with sqrt(w_t) on both sides.
+    # ---------------------------------------------------------
     elif prox_method == "gbt":
         if cache.gbt_tree_weights is None:
             raise ValueError("cache.gbt_tree_weights is required for prox_method='gbt'.")
         sqrt_w = np.sqrt(cache.gbt_tree_weights).astype(np.float32)
         weights = np.tile(sqrt_w, N)
 
+    # ---------------------------------------------------------
+    # KeRF PROXIMITY
+    # p(i,j) = (1/T) * Sum_t [ I(leaf_t(i)=leaf_t(j)) / M_leaf(t) ]
+    #
+    # Mapping:
+    #   Again use a symmetric factorization:
+    #       1/sqrt(T) * 1/sqrt(M_leaf)
+    #   on both Q and W.
+    # ---------------------------------------------------------
     elif prox_method == "kerf":
         if cache.inv_sqrt_leaf_mass_unit is None:
             raise ValueError("cache.inv_sqrt_leaf_mass_unit is required for prox_method='kerf'.")
         weights = (1.0 / np.sqrt(T)) * cache.inv_sqrt_leaf_mass_unit[flat_cols]
 
+    # ---------------------------------------------------------
+    # OOB PROXIMITY (separable approximation)
+    #
+    # Reference-side weighting:
+    #   Keep only the trees where the reference sample j is OOB.
+    #
+    # Let M_j = number of OOB trees for sample j.
+    # Then W carries sqrt(T) / M_j on the retained sample-tree incidences.
+    #
+    # Diagonal trick:
+    #   The raw separable OOB factorization yields self-similarity T / M_j,
+    #   which is generally > 1. To replace the diagonal exactly by 1 without
+    #   calling sparse setdiag(), we append one private coordinate per sample:
+    #
+    #       QW^T  ->  QW^T + diag(1 - raw_diag)
+    #
+    #   This is done by adding N virtual columns after the real leaf columns.
+    # ---------------------------------------------------------
     elif prox_method == "oob":
         if cache.oob_mask_all is None:
             raise ValueError("cache.oob_mask_all is required for prox_method='oob'.")
 
+        # Apply OOB scope on the reference side: keep only OOB trees for each j.
         mask = cache.oob_mask_all.flatten() == 1
         flat_rows = flat_rows[mask]
         flat_cols = flat_cols[mask]
 
+        # M_j = number of OOB trees for sample j
         M = cache.oob_mask_all.sum(axis=1).astype(np.float32)
-        M[M == 0] = 1.0
+        M[M == 0] = 1.0  # safety
 
+        # Reference-side weights: sqrt(T) / M_j
         weights = (np.sqrt(T) / M[flat_rows]).astype(np.float32)
 
+        # Exact diagonal replacement trick for OOB.
         raw_diag = (T / M).astype(np.float32)
         diag_vals = (1.0 - raw_diag).astype(np.float32)
 
@@ -186,6 +242,23 @@ def build_W_matrix(cache, prox_method, force_nonzero_diag=False):
         weights = np.concatenate([weights, diag_vals])
         total_cols += N
 
+    # ---------------------------------------------------------
+    # RF-GAP PROXIMITY
+    # Term inside the sum:
+    #   c_j(t) / M_leaf(i,t)
+    #
+    # Mapping:
+    #   W handles the target/reference side through:
+    #       c_j(t) * 1 / M_leaf
+    #
+    # Diagonal trick:
+    #   Optional virtual diagonal injection avoids sparse setdiag() and restores
+    #   non-zero self-similarity. For row i, we inject
+    #
+    #       d_i = (sum_t c_i(t) / M_leaf(i,t)) / #{t : c_i(t) > 0}
+    #
+    #   via one private coordinate per sample.
+    # ---------------------------------------------------------
     elif prox_method == "gap":
         if cache.c_all is None:
             raise ValueError("cache.c_all is required for prox_method='gap'.")
@@ -212,6 +285,7 @@ def build_W_matrix(cache, prox_method, force_nonzero_diag=False):
     else:
         raise ValueError(f"Unknown prox_method='{prox_method}'.")
 
+    # Filter zeros and build sparse W
     mask = weights != 0
     W_mat = sparse.csr_matrix(
         (weights[mask], (flat_rows[mask], flat_cols[mask])),
@@ -258,37 +332,80 @@ def build_Q_matrix(
 
     flat_rows = np.repeat(np.arange(N), T)
     flat_cols = global_leaves.flatten()
+
+    # Base number of columns for sparse Q building (before optional virtual diagonal).
     total_cols = cache.total_unique_nodes
 
+    # ---------------------------------------------------------
+    # ORIGINAL PROXIMITY
+    # p(i,j) = (1/T) * Sum_t [ I( j in v_i(t) ) ]
+    #
+    # Mapping:
+    #   Use the same symmetric factorization as W:
+    #       sqrt(1/T)
+    # ---------------------------------------------------------
     if prox_method == "original":
         scale_factor = np.float32(1.0 / np.sqrt(T))
         vals = np.full(N * T, scale_factor, dtype=np.float32)
 
+    # ---------------------------------------------------------
+    # GBT PROXIMITY
+    # p(i,j) = Sum_t w_t * I( leaf_t(i) = leaf_t(j) )
+    #
+    # Mapping:
+    #   Use sqrt(w_t) on the query side too.
+    # ---------------------------------------------------------
     elif prox_method == "gbt":
         if cache.gbt_tree_weights is None:
             raise ValueError("cache.gbt_tree_weights is required for prox_method='gbt'.")
         sqrt_w = np.sqrt(cache.gbt_tree_weights).astype(np.float32)
         vals = np.tile(sqrt_w, N)
 
+    # ---------------------------------------------------------
+    # KeRF PROXIMITY
+    # p(i,j) = (1/T) * Sum_t [ I(leaf_t(i)=leaf_t(j)) / M_leaf(t) ]
+    #
+    # Mapping:
+    #   Same symmetric factorization as W:
+    #       1/sqrt(T) * 1/sqrt(M_leaf)
+    # ---------------------------------------------------------
     elif prox_method == "kerf":
         if cache.inv_sqrt_leaf_mass_unit is None:
             raise ValueError("cache.inv_sqrt_leaf_mass_unit is required for prox_method='kerf'.")
         vals = (1.0 / np.sqrt(T)) * cache.inv_sqrt_leaf_mass_unit[flat_cols]
 
+    # ---------------------------------------------------------
+    # OOB PROXIMITY (separable approximation)
+    #
+    # If is_training=True:
+    #   Restrict to the OOB trees for each query sample i.
+    #   Let |S_i| be the number of such trees.
+    #   Then Q carries sqrt(T) / |S_i|.
+    #
+    #   To match the exact diagonal replacement in W, append the same private
+    #   virtual coordinates with value 1 on the query side.
+    #
+    # If is_training=False:
+    #   By convention, new points are treated as OOB for all trees, so |S_i| = T.
+    # ---------------------------------------------------------
     elif prox_method == "oob":
         if is_training:
             if cache.oob_mask_all is None:
                 raise ValueError("cache.oob_mask_all is required for training-time prox_method='oob'.")
 
+            # Apply OOB scope on the query side: keep only OOB trees for each i.
             mask = cache.oob_mask_all.flatten() == 1
             flat_rows = flat_rows[mask]
             flat_cols = flat_cols[mask]
 
+            # |S_i| = number of OOB trees for sample i
             S_i_counts = cache.oob_mask_all.sum(axis=1).astype(np.float32)
             S_i_counts[S_i_counts == 0] = 1.0
 
+            # Query-side weights: sqrt(T) / |S_i|
             vals = (np.sqrt(T) / S_i_counts[flat_rows]).astype(np.float32)
 
+            # Matching private diagonal coordinates for exact diagonal replacement
             total_cols += cache.n_samples
             diag_rows = np.arange(N)
             diag_cols = np.arange(N) + cache.diag_offset
@@ -299,24 +416,47 @@ def build_Q_matrix(
             vals = np.concatenate([vals, diag_vals])
 
         else:
+            # For new data, all trees are considered OOB by convention (size T).
             vals = np.full(N * T, np.sqrt(T) / T, dtype=np.float32)
+
+            # The reference-side W includes private diagonal coordinates for the training set.
+            # New queries should have zero mass on these coordinates, but the matrix width must match.
             total_cols += cache.n_samples
 
+    # ---------------------------------------------------------
+    # RF-GAP PROXIMITY
+    # p(i,j) = (1 / |S_i|) * Sum_{t in S_i} [ c_j(t) / M_leaf(i,t) ]
+    #
+    # Mapping:
+    #   Q handles the query-side normalization:
+    #       1 / |S_i|
+    #
+    # If is_training=False:
+    #   New points are evaluated against all trees, so |S_i| = T.
+    #
+    # Optional non-zero diagonal:
+    #   If enabled, append one private coordinate per training sample with value 1
+    #   on the query side, matching the diagonal injection performed in W.
+    # ---------------------------------------------------------
     elif prox_method == "gap":
         if is_training:
             if cache.oob_mask_all is None:
                 raise ValueError("cache.oob_mask_all is required for training-time prox_method='gap'.")
 
+            # Apply OOB scope on the query side: keep only OOB trees for each i.
             mask = cache.oob_mask_all.flatten() == 1
             flat_rows = flat_rows[mask]
             flat_cols = flat_cols[mask]
 
+            # |S_i| = number of OOB trees for sample i
             S_i_counts = cache.oob_mask_all.sum(axis=1).astype(np.float32)
             S_i_counts[S_i_counts == 0] = 1.0
 
+            # Query-side weights: 1 / |S_i|
             vals = (1.0 / S_i_counts[flat_rows]).astype(np.float32)
 
         else:
+            # For new data, S_i is the set of ALL trees (size T).
             vals = np.full(N * T, 1.0 / T, dtype=np.float32)
 
         if force_nonzero_diag:
@@ -334,6 +474,7 @@ def build_Q_matrix(
     else:
         raise ValueError(f"Unknown prox_method='{prox_method}'.")
 
+    # Filter zeros and build sparse Q
     mask = vals != 0
     Q = sparse.csr_matrix(
         (vals[mask], (flat_rows[mask], flat_cols[mask])),
