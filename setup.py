@@ -3,7 +3,7 @@ from setuptools import setup, find_packages
 with open("README.md", "r", encoding = "utf-8") as f:
     long_description = f.read()
 
-install_requires = ['scikit-learn', 'numpy', 'pandas', 'scipy', 'packaging']
+install_requires = ['scikit-learn', 'numpy', 'pandas', 'scipy', 'packaging', 'aeon']
 
 setup(
     name = 'rfgap',
