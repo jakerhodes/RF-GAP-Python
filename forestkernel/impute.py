@@ -1,7 +1,7 @@
 from sklearn.impute import KNNImputer
 import pandas as pd
 import numpy as np
-from rfgap import ForestKernel
+from forestkernel import ForestKernel
 from .missingmetrics import missing_metrics
 import warnings
 
