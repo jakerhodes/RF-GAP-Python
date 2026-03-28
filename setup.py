@@ -1,6 +1,6 @@
 from setuptools import setup, find_packages
 
-with open("README.rst", "r", encoding="utf-8") as f:
+with open("README.md", "r", encoding="utf-8") as f:
     long_description = f.read()
 
 setup(
@@ -13,5 +13,5 @@ setup(
     packages=find_packages(include=["forestkernel", "forestkernel.*"]),
     install_requires=['scikit-learn', 'numpy', 'pandas', 'scipy', 'packaging', 'aeon'],
     long_description=long_description,
-    long_description_content_type="text/x-rst",
+    long_description_content_type="text/markdown",
 )
