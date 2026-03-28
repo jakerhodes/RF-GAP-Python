@@ -73,8 +73,8 @@ def ForestKernel(
         Whether to force symmetry via block symmetrization.
 
     normalize_diagonal : bool
-        Whether to normalize rows by the diagonal elements before the final dot product when relevant.
-
+        Whether to row-normalize by self-similarity so that the diagonal becomes 1 when applicable
+        
     model_type : str
         One of {'rf', 'et', 'gbt', 'rotf'}.
 
