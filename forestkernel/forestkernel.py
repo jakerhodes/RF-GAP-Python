@@ -74,7 +74,7 @@ def ForestKernel(
 
     normalize_diagonal : bool
         Whether to row-normalize by self-similarity so that the diagonal becomes 1 when applicable
-        
+
     model_type : str
         One of {'rf', 'et', 'gbt', 'rotf'}.
 
@@ -180,11 +180,6 @@ def ForestKernel(
                     "Unlabeled targets were detected in y, but semi-supervised mode is disabled. "
                     "This transductive proximity heuristic is only enabled when "
                     "allow_semi_supervised=True."
-                )
-
-            if has_unlabeled and self.model_type == "gbt":
-                raise ValueError(
-                    "Semi-supervised mode is not supported for model_type='gbt'."
                 )
 
             # Preserve original X order through labeled/unlabeled indices
