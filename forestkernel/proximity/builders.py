@@ -27,39 +27,31 @@ def initialize_cache(
     leaf_matrix_all,
     n_nodes_per_tree,
     n_samples,
+    idx_labeled=None,
+    idx_unlabeled=None,
+    n_train_samples=None,
 ):
     """
     Initialize the structural part of the proximity cache from a leaf matrix.
-
-    Parameters
-    ----------
-    leaf_matrix_all : ndarray of shape (N, T)
-        Local node ids for all reference samples.
-    n_nodes_per_tree : sequence[int]
-        Number of nodes in each tree.
-    n_samples : int
-        Number of reference samples.
-
-    Returns
-    -------
-    ProximityCache
     """
     cache = ProximityCache()
     cache.leaf_matrix_all = leaf_matrix_all.astype(np.int32, copy=False)
     cache.n_samples = int(n_samples)
     cache.n_trees = int(leaf_matrix_all.shape[1])
 
-    # Calculate offsets to flatten (Tree, Leaf) -> Global Feature ID.
-    # This allows us to treat every node in the forest as a unique feature column.
+    cache.idx_labeled = None if idx_labeled is None else np.asarray(idx_labeled, dtype=np.int64)
+    cache.idx_unlabeled = None if idx_unlabeled is None else np.asarray(idx_unlabeled, dtype=np.int64)
+    cache.n_train_samples = int(n_train_samples) if n_train_samples is not None else int(n_samples)
+    cache.is_semi_supervised = (
+        cache.idx_unlabeled is not None and len(cache.idx_unlabeled) > 0
+    )
+
     cache.leaf_offsets = np.concatenate(([0], np.cumsum(n_nodes_per_tree)[:-1])).astype(np.int64)
     cache.total_unique_nodes = int(np.sum(n_nodes_per_tree))
-
-    # Set offset for virtual diagonal nodes (after the last real leaf), needed for
-    # non-zero diagonal tricks in OOB and GAP. This avoids costly sparse setdiag().
     cache.diag_offset = cache.total_unique_nodes
 
-    # Cache global flattened leaf structure for the fitted reference set.
     global_leaves_all = to_global_leaves(cache.leaf_matrix_all, cache.leaf_offsets)
+
     cache.flat_rows_all = np.repeat(np.arange(cache.n_samples), cache.n_trees)
     cache.flat_cols_all = global_leaves_all.flatten()
 
@@ -86,12 +78,19 @@ def attach_gbt_weights(cache, gbt_tree_weights):
 
 def compute_unit_leaf_mass(cache):
     """
-    Precompute unit leaf mass statistics used by KeRF:
-        M_leaf = number of sample-tree incidences in each global leaf
-        inv_sqrt_leaf_mass_unit = 1 / sqrt(M_leaf)
+    Precompute unit leaf mass statistics used by KeRF.
+
+    In semi-supervised mode, only labeled sample-tree incidences contribute
+    to the leaf mass. This matches the old transductive heuristic.
     """
+    if cache.idx_labeled is None:
+        flat_cols = cache.flat_cols_all
+    else:
+        labeled_incidence_mask = np.isin(cache.flat_rows_all, cache.idx_labeled)
+        flat_cols = cache.flat_cols_all[labeled_incidence_mask]
+
     cache.leaf_mass_unit = np.bincount(
-        cache.flat_cols_all,
+        flat_cols,
         minlength=cache.total_unique_nodes
     ).astype(np.float32)
 
@@ -104,18 +103,26 @@ def compute_unit_leaf_mass(cache):
 
 def compute_multiplicity_leaf_mass(cache):
     """
-    Precompute multiplicity leaf mass statistics used by RF-GAP:
-        M_leaf = sum_j c_j(t) over all sample-tree incidences in each global leaf
-        inv_leaf_mass_mult = 1 / M_leaf
+    Precompute multiplicity leaf mass statistics used by RF-GAP.
+
+    In semi-supervised mode, only labeled sample-tree incidences contribute
+    to the denominator leaf mass, even though c_all is defined for all points.
     """
     if cache.c_all is None:
         raise ValueError("cache.c_all is required to compute multiplicity leaf mass.")
 
-    c_flat = cache.c_all.flatten()
+    c_flat = cache.c_all.flatten().astype(np.float32)
+
+    if cache.idx_labeled is None:
+        weights = c_flat
+    else:
+        labeled_incidence_mask = np.isin(cache.flat_rows_all, cache.idx_labeled)
+        weights = c_flat.copy()
+        weights[~labeled_incidence_mask] = 0.0
 
     cache.leaf_mass_mult = np.bincount(
         cache.flat_cols_all,
-        weights=c_flat,
+        weights=weights,
         minlength=cache.total_unique_nodes
     ).astype(np.float32)
 
@@ -461,12 +468,32 @@ def build_Q_matrix(
 
         if force_nonzero_diag:
             total_cols += cache.n_samples
-
+        
             if is_training:
                 diag_rows = np.arange(N)
                 diag_cols = np.arange(N) + cache.diag_offset
+        
+                # Default: labeled diagonal injection is 1.0
                 diag_vals = np.ones(N, dtype=np.float32)
-
+        
+                # Semi-supervised heuristic:
+                # unlabeled rows already receive an ordinary overlap contribution
+                # from all trees, since they are treated as OOB everywhere on the
+                # query side and as phantom targets with c_j(t)=1 on the reference side.
+                #
+                # We rescale the virtual diagonal injection for unlabeled rows so
+                # that their diagonal is brought to a level comparable to labeled
+                # points, based on the empirical average number of in-bag trees on
+                # labeled samples.
+                if cache.is_semi_supervised and cache.idx_unlabeled is not None and len(cache.idx_unlabeled) > 0:
+                    if cache.idx_labeled is not None and len(cache.idx_labeled) > 0 and cache.c_all is not None:
+                        inbag_counts = (cache.c_all[cache.idx_labeled, :] > 0).sum(axis=1).astype(np.float32)
+                        avg_inbag = float(inbag_counts.mean()) if inbag_counts.size > 0 else 0.0
+        
+                        if avg_inbag > 0:
+                            alpha = (T / avg_inbag) - 1.0
+                            diag_vals[cache.idx_unlabeled] = np.float32(alpha)
+        
                 flat_rows = np.concatenate([flat_rows, diag_rows])
                 flat_cols = np.concatenate([flat_cols, diag_cols])
                 vals = np.concatenate([vals, diag_vals])

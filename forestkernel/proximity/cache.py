@@ -9,41 +9,41 @@ from scipy import sparse
 class ProximityCache:
     """
     Container for all cached quantities used to build proximity matrices.
-
-    This separates:
-    - fitted ensemble state
-    - proximity algebra state
-
-    so that the main estimator class remains lighter and easier to maintain.
     """
 
     # Core leaf structure
-    leaf_matrix_all: Optional[np.ndarray] = None          # shape: (N, T), local node ids
-    leaf_offsets: Optional[np.ndarray] = None             # shape: (T,)
-    total_unique_nodes: Optional[int] = None             # total number of global node ids
-    diag_offset: Optional[int] = None                    # offset for virtual diagonal coordinates
+    leaf_matrix_all: Optional[np.ndarray] = None
+    leaf_offsets: Optional[np.ndarray] = None
+    total_unique_nodes: Optional[int] = None
+    diag_offset: Optional[int] = None
 
     # Optional OOB / multiplicity structure
-    oob_mask_all: Optional[np.ndarray] = None            # shape: (N, T), int8/bool
-    c_all: Optional[np.ndarray] = None                   # shape: (N, T), float32
+    oob_mask_all: Optional[np.ndarray] = None
+    c_all: Optional[np.ndarray] = None
 
     # Flattened global leaf incidences
-    flat_rows_all: Optional[np.ndarray] = None           # shape: (N*T,)
-    flat_cols_all: Optional[np.ndarray] = None           # shape: (N*T,)
+    flat_rows_all: Optional[np.ndarray] = None
+    flat_cols_all: Optional[np.ndarray] = None
 
     # Leaf masses
-    leaf_mass_unit: Optional[np.ndarray] = None          # counts sample-tree incidences per global leaf
-    inv_sqrt_leaf_mass_unit: Optional[np.ndarray] = None # used by KeRF
+    leaf_mass_unit: Optional[np.ndarray] = None
+    inv_sqrt_leaf_mass_unit: Optional[np.ndarray] = None
 
-    leaf_mass_mult: Optional[np.ndarray] = None          # sums multiplicities per global leaf
-    inv_leaf_mass_mult: Optional[np.ndarray] = None      # used by RF-GAP
+    leaf_mass_mult: Optional[np.ndarray] = None
+    inv_leaf_mass_mult: Optional[np.ndarray] = None
 
     # GBT-specific
-    gbt_tree_weights: Optional[np.ndarray] = None        # shape: (T_total,)
+    gbt_tree_weights: Optional[np.ndarray] = None
 
     # Sparse right factor
-    W_mat: Optional[sparse.csr_matrix] = None            # shape: (N_ref, total_cols)
+    W_mat: Optional[sparse.csr_matrix] = None
 
     # Metadata
-    n_samples: Optional[int] = None                      # number of reference samples
-    n_trees: Optional[int] = None                        # number of trees
+    n_samples: Optional[int] = None          # total reference samples (labeled + unlabeled if transductive)
+    n_trees: Optional[int] = None
+    n_train_samples: Optional[int] = None    # number of labeled samples actually used to fit the forest
+
+    # Semi-supervised bookkeeping (original X order)
+    idx_labeled: Optional[np.ndarray] = None
+    idx_unlabeled: Optional[np.ndarray] = None
+    is_semi_supervised: bool = False

@@ -36,6 +36,7 @@ def ForestKernel(
     force_symmetric=None,
     max_normalize=False,
     model_type="rf",
+    allow_semi_supervised=False,
     **kwargs,
 ):
     """
@@ -77,6 +78,11 @@ def ForestKernel(
     model_type : str
         One of {'rf', 'et', 'gbt', 'rotf'}.
 
+    allow_semi_supervised : bool
+        Whether to allow the transductive semi-supervised heuristic when y
+        contains unlabeled entries (-1 and/or NaN depending on task type).
+        If False and unlabeled targets are detected, fit() raises an error.
+
     **kwargs
         Estimator-specific keyword arguments.
 
@@ -103,6 +109,7 @@ def ForestKernel(
             force_nonzero_diag=force_nonzero_diag,
             force_symmetric=force_symmetric,
             max_normalize=max_normalize,
+            allow_semi_supervised=allow_semi_supervised,
             **kwargs,
         ):
             super(ForestKernel, self).__init__(**kwargs)
@@ -114,6 +121,7 @@ def ForestKernel(
             self.force_symmetric = force_symmetric
             self.max_normalize = max_normalize
             self.model_type = model_type
+            self.allow_semi_supervised = allow_semi_supervised
 
             # Proximity internals
             self.cache = None
@@ -123,11 +131,17 @@ def ForestKernel(
             self.idx_labeled_ = None
             self.idx_unlabeled_ = None
             self._n_total_samples = 0
+            self._n_train_samples = 0
 
         def fit(self, X, y, sample_weight=None):
             """
             Fits the tree ensemble and pre-computes the sparse weight matrix W
             necessary for proximity calculations.
+
+            In semi-supervised mode, unlabeled points are not used to fit the
+            forest, but are still inserted into the reference set used to build
+            proximities. This is a transductive heuristic and is enabled only
+            when allow_semi_supervised=True.
 
             RUNTIME COMPLEXITY: O(N * T * log(N))
                 - Ensemble Construction: O(N * T * log(N) * #features sampled at each node)
@@ -137,30 +151,84 @@ def ForestKernel(
                 - Stores leaf indices and sparse weights.
                 - Efficiently sparse: only stores 1 entry per tree per sample.
             """
+            # ---------------------------------------------------------
+            # STEP 0: Handle partial labels (semi-supervised heuristic)
+            # ---------------------------------------------------------
+            self._n_total_samples = X.shape[0]
+
             y = np.asarray(y)
             if self.prediction_type == "regression" and not np.issubdtype(y.dtype, np.floating):
                 y = y.astype(np.float32)
 
-            self._n_samples = X.shape[0]
+            # Detect unlabeled samples depending on task type
+            if self.prediction_type == "classification":
+                if np.issubdtype(y.dtype, np.floating):
+                    # Treat BOTH -1 and NaN as unlabeled (robust)
+                    mask_unlabeled = np.isnan(y) | (y == -1)
+                else:
+                    mask_unlabeled = (y == -1)
+            else:
+                # regression: NaN is unlabeled
+                if not np.issubdtype(y.dtype, np.floating):
+                    y = y.astype(np.float32)
+                mask_unlabeled = np.isnan(y)
+
+            has_unlabeled = bool(np.any(mask_unlabeled))
+
+            if has_unlabeled and not self.allow_semi_supervised:
+                raise ValueError(
+                    "Unlabeled targets were detected in y, but semi-supervised mode is disabled. "
+                    "This transductive proximity heuristic is only enabled when "
+                    "allow_semi_supervised=True."
+                )
+
+            if has_unlabeled and self.model_type == "gbt":
+                raise ValueError(
+                    "Semi-supervised mode is not supported for model_type='gbt'."
+                )
+
+            # Preserve original X order through labeled/unlabeled indices
+            self.idx_labeled_ = np.flatnonzero(~mask_unlabeled)
+            self.idx_unlabeled_ = np.flatnonzero(mask_unlabeled)
+
+            if not has_unlabeled:
+                # Case A: Fully supervised
+                X_train = X
+                y_train = y
+                sample_weight_train = sample_weight
+            else:
+                # Case B: Semi-supervised (transductive heuristic)
+                X_train = X[self.idx_labeled_]
+                y_train = y[self.idx_labeled_]
+
+                if sample_weight is not None:
+                    sample_weight_train = np.asarray(sample_weight)[self.idx_labeled_]
+                else:
+                    sample_weight_train = None
+
+            self._n_train_samples = X_train.shape[0]
             self.y = y
 
-            # Fit underlying ensemble
+            # ---------------------------------------------------------
+            # STEP 1: Fit underlying ensemble on labeled data only
+            # ---------------------------------------------------------
             try:
-                super().fit(X, y, sample_weight=sample_weight)
+                super().fit(X_train, y_train, sample_weight=sample_weight_train)
             except TypeError:
-                if sample_weight is not None:
+                if sample_weight_train is not None:
                     warnings.warn(
                         "sample_weight was provided but is ignored because the selected "
                         "base model does not support it."
                     )
-                super().fit(X, y)
+                super().fit(X_train, y_train)
 
             # Build ensemble adapter
             self._adapter = make_adapter(self, self.model_type)
 
             # ---------------------------------------------------------
-            # STEP 1: Leaf structure
+            # STEP 2: Leaf structure for ALL points (original order)
             # ---------------------------------------------------------
+            # NOTE: we compute leaves for ALL points (labeled+unlabeled) in ORIGINAL order.
             leaf_matrix_all = self._adapter.get_leaf_matrix(X)
             n_nodes_per_tree = self._adapter.get_n_nodes_per_tree()
 
@@ -168,26 +236,54 @@ def ForestKernel(
                 leaf_matrix_all=leaf_matrix_all,
                 n_nodes_per_tree=n_nodes_per_tree,
                 n_samples=X.shape[0],
+                idx_labeled=self.idx_labeled_,
+                idx_unlabeled=self.idx_unlabeled_,
+                n_train_samples=X_train.shape[0],
             )
 
             # ---------------------------------------------------------
-            # STEP 2: OOB / multiplicity structure
+            # STEP 3: OOB / multiplicity structure
             # ---------------------------------------------------------
             if self.prox_method in ["oob", "gap"]:
-                oob_mask_all = self._adapter.get_oob_mask(X)
-                c_all = self._adapter.get_in_bag_counts(X) if self.prox_method == "gap" else None
+                # NOTE: OOB / in-bag statistics are computed on TRAINING (labeled) samples only
+                oob_labeled = self._adapter.get_oob_mask(X_train)
+
+                if has_unlabeled:
+                    T = self.cache.n_trees
+
+                    # Unlabeled rows are treated as OOB everywhere in the transductive heuristic
+                    oob_mask_all = np.ones((self.cache.n_samples, T), dtype=np.int8)
+                    oob_mask_all[self.idx_labeled_, :] = oob_labeled.astype(np.int8)
+
+                    if self.prox_method == "gap":
+                        # Unlabeled rows follow the phantom-target convention: c_j(t)=1 for all trees
+                        c_labeled = self._adapter.get_in_bag_counts(X_train).astype(np.float32)
+                        c_all = np.ones((self.cache.n_samples, T), dtype=np.float32)
+                        c_all[self.idx_labeled_, :] = c_labeled
+                    else:
+                        c_all = None
+                else:
+                    oob_mask_all = oob_labeled.astype(np.int8)
+                    c_all = (
+                        self._adapter.get_in_bag_counts(X_train).astype(np.float32)
+                        if self.prox_method == "gap"
+                        else None
+                    )
+
                 attach_oob_structure(self.cache, oob_mask_all=oob_mask_all, c_all=c_all)
 
             # ---------------------------------------------------------
-            # STEP 3: GBT tree weights
+            # STEP 4: GBT tree weights
             # ---------------------------------------------------------
             if self.prox_method == "gbt":
-                gbt_tree_weights = self._adapter.get_tree_weights(X)
+                gbt_tree_weights = self._adapter.get_tree_weights(X_train)
                 attach_gbt_weights(self.cache, gbt_tree_weights)
 
             # ---------------------------------------------------------
-            # STEP 4: Leaf statistics used by specific proximities
+            # STEP 5: Leaf statistics used by specific proximities
             # ---------------------------------------------------------
+            # In semi-supervised mode, these are computed from LABELED incidences only,
+            # according to the heuristic implemented in builders.py.
             if self.prox_method == "kerf":
                 compute_unit_leaf_mass(self.cache)
 
@@ -195,8 +291,9 @@ def ForestKernel(
                 compute_multiplicity_leaf_mass(self.cache)
 
             # ---------------------------------------------------------
-            # STEP 5: Build sparse right factor W
+            # STEP 6: Build sparse right factor W
             # ---------------------------------------------------------
+            # NOTE: W is built for ALL points directly in original order.
             self.cache.W_mat = build_W_matrix(
                 self.cache,
                 prox_method=self.prox_method,
@@ -279,5 +376,6 @@ def ForestKernel(
         force_nonzero_diag=force_nonzero_diag,
         force_symmetric=force_symmetric,
         max_normalize=max_normalize,
+        allow_semi_supervised=allow_semi_supervised,
         **kwargs,
     )
