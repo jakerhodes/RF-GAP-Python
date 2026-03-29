@@ -95,15 +95,8 @@ def sanitize_model_kwargs(model_type, prox_method, kwargs):
     kwargs = dict(kwargs)
 
     # OOB- and RF-GAP-based proximities require bootstrap sampling for RF / ET.
-    # We default to the classical full-bootstrap setting, but allow the user to
-    # override max_samples if they explicitly want a subsampled variant.
     if prox_method in ["oob", "gap"] and model_type in ["rf", "et"]:
         kwargs["bootstrap"] = True
-        kwargs.setdefault("max_samples", None)
-    else:
-        # For all other proximities, sklearn OOB score is irrelevant here and can
-        # cause errors when bootstrap=False (e.g. ExtraTrees + kerf + oob_score=True).
-        kwargs.pop("oob_score", None)
 
     # Rotation Forest has a different constructor signature from sklearn forests.
     if model_type == "rotf":

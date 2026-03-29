@@ -55,6 +55,21 @@ def initialize_cache(
     cache.flat_rows_all = np.repeat(np.arange(cache.n_samples), cache.n_trees)
     cache.flat_cols_all = global_leaves_all.flatten()
 
+    # Cached row-level masks for semi-supervised builders
+    cache.row_is_labeled = np.zeros(cache.n_samples, dtype=bool)
+    if cache.idx_labeled is not None:
+        cache.row_is_labeled[cache.idx_labeled] = True
+
+    cache.row_is_unlabeled = np.zeros(cache.n_samples, dtype=bool)
+    if cache.idx_unlabeled is not None:
+        cache.row_is_unlabeled[cache.idx_unlabeled] = True
+
+    cache.flat_is_labeled = np.repeat(cache.row_is_labeled, cache.n_trees)
+    cache.flat_is_unlabeled = np.repeat(cache.row_is_unlabeled, cache.n_trees)
+
+    # Cached tree ids for flattened sample-tree arrays
+    cache.flat_tree_ids = np.tile(np.arange(cache.n_trees, dtype=np.int64), cache.n_samples)
+
     return cache
 
 
@@ -86,7 +101,7 @@ def compute_unit_leaf_mass(cache):
     if cache.idx_labeled is None:
         flat_cols = cache.flat_cols_all
     else:
-        labeled_incidence_mask = np.isin(cache.flat_rows_all, cache.idx_labeled)
+        labeled_incidence_mask = cache.flat_is_labeled
         flat_cols = cache.flat_cols_all[labeled_incidence_mask]
 
     cache.leaf_mass_unit = np.bincount(
@@ -103,22 +118,32 @@ def compute_unit_leaf_mass(cache):
 
 def compute_multiplicity_leaf_mass(cache):
     """
-    Precompute multiplicity leaf mass statistics used by RF-GAP.
+    Precompute multiplicity leaf-mass statistics used by RF-GAP.
 
     In semi-supervised mode, only labeled sample-tree incidences contribute
     to the denominator leaf mass, even though c_all is defined for all points.
+
+    For unlabeled phantom targets, we use the following surrogates:
+
+    - empirical_mult_all_by_tree[t]
+      average multiplicity among all labeled samples in tree t,
+      used for the ordinary unlabeled off-diagonal target contribution
+
+    - empirical_mult_inbag_by_tree[t]
+      average multiplicity among in-bag labeled samples in tree t,
+      used for the unlabeled diagonal target
     """
     if cache.c_all is None:
         raise ValueError("cache.c_all is required to compute multiplicity leaf mass.")
 
-    c_flat = cache.c_all.flatten().astype(np.float32)
+    c_all = cache.c_all.astype(np.float32, copy=False)
+    c_flat = c_all.flatten()
 
     if cache.idx_labeled is None:
         weights = c_flat
     else:
-        labeled_incidence_mask = np.isin(cache.flat_rows_all, cache.idx_labeled)
         weights = c_flat.copy()
-        weights[~labeled_incidence_mask] = 0.0
+        weights[~cache.flat_is_labeled] = 0.0
 
     cache.leaf_mass_mult = np.bincount(
         cache.flat_cols_all,
@@ -129,6 +154,31 @@ def compute_multiplicity_leaf_mass(cache):
     with np.errstate(divide="ignore", invalid="ignore"):
         cache.inv_leaf_mass_mult = 1.0 / cache.leaf_mass_mult
     cache.inv_leaf_mass_mult[~np.isfinite(cache.inv_leaf_mass_mult)] = 0.0
+
+    T = cache.n_trees
+
+    if cache.idx_labeled is not None and len(cache.idx_labeled) > 0:
+        c_labeled = c_all[cache.idx_labeled]
+
+        # Per-tree average multiplicity among all labeled samples,
+        # used for the ordinary unlabeled off-diagonal target contribution
+        cache.empirical_mult_all_by_tree = c_labeled.mean(axis=0).astype(np.float32)
+
+        # Per-tree average multiplicity among in-bag labeled samples,
+        # used only for the unlabeled diagonal target
+        inbag_mask = c_labeled > 0
+        inbag_counts = inbag_mask.sum(axis=0).astype(np.float32)
+        inbag_sums = c_labeled.sum(axis=0).astype(np.float32)
+
+        empirical_mult_inbag_by_tree = np.ones(T, dtype=np.float32)
+        positive = inbag_counts > 0
+        empirical_mult_inbag_by_tree[positive] = (
+            inbag_sums[positive] / inbag_counts[positive]
+        )
+        cache.empirical_mult_inbag_by_tree = empirical_mult_inbag_by_tree
+    else:
+        cache.empirical_mult_all_by_tree = np.ones(T, dtype=np.float32)
+        cache.empirical_mult_inbag_by_tree = np.ones(T, dtype=np.float32)
 
     return cache
 
@@ -251,20 +301,41 @@ def build_W_matrix(cache, prox_method, force_nonzero_diag=False):
 
     # ---------------------------------------------------------
     # RF-GAP PROXIMITY
-    # Term inside the sum:
-    #   c_j(t) / M_leaf(i,t)
     #
-    # Mapping:
-    #   W handles the target/reference side through:
-    #       c_j(t) * 1 / M_leaf
+    # Ordinary leaf term:
+    #   W stores the target-side factor
     #
-    # Diagonal trick:
-    #   Optional virtual diagonal injection avoids sparse setdiag() and restores
-    #   non-zero self-similarity. For row i, we inject
+    #       c_j(t) / M_leaf
     #
-    #       d_i = (sum_t c_i(t) / M_leaf(i,t)) / #{t : c_i(t) > 0}
+    #   on each sample-tree incidence.
     #
-    #   via one private coordinate per sample.
+    #   - labeled targets use their observed multiplicity c_j(t)
+    #   - unlabeled phantom targets use the empirical unconditional surrogate
+    #     empirical_mult_all_by_tree[t]
+    #
+    # Private diagonal term:
+    #   One optional private coordinate per training sample is appended
+    #   after the leaf coordinates.
+    #
+    #   - If force_nonzero_diag=False and semi-supervised mode is active,
+    #     unlabeled private coordinates are used so that Q can cancel the
+    #     ordinary unlabeled diagonal exactly.
+    #
+    #   - If force_nonzero_diag=True, the private coordinates restore the
+    #     desired training diagonal:
+    #
+    #       labeled rows:
+    #           (sum_t c_i(t) / M_leaf(i,t)) / #{t : c_i(t) > 0}
+    #
+    #       unlabeled rows:
+    #           (1/T) * sum_t empirical_mult_inbag_by_tree[t] / M_i(t)
+    #
+    #     where empirical_mult_inbag_by_tree[t] is the average multiplicity
+    #     among in-bag labeled samples in tree t.
+    #
+    #     Since the ordinary leaf part already contributes a nonzero
+    #     unlabeled diagonal, the private coordinate stores only the
+    #     missing correction.
     # ---------------------------------------------------------
     elif prox_method == "gap":
         if cache.c_all is None:
@@ -272,22 +343,100 @@ def build_W_matrix(cache, prox_method, force_nonzero_diag=False):
         if cache.inv_leaf_mass_mult is None:
             raise ValueError("cache.inv_leaf_mass_mult is required for prox_method='gap'.")
 
-        c_j_t = cache.c_all.flatten()
+        has_unlabeled = cache.is_semi_supervised
+        needs_private_cols = force_nonzero_diag or has_unlabeled
+
+        # ----- Ordinary target-side term -----
+        c_j_t = cache.c_all.flatten().astype(np.float32, copy=True)
+        if has_unlabeled:
+            c_j_t[cache.flat_is_unlabeled] = cache.empirical_mult_all_by_tree[
+                cache.flat_tree_ids[cache.flat_is_unlabeled]
+            ]
+
         weights = c_j_t * cache.inv_leaf_mass_mult[flat_cols]
 
+        # ----- Private diagonal correction -----
+        diag_rows = np.empty(0, dtype=np.int64)
+        diag_cols = np.empty(0, dtype=np.int64)
+        diag_vals = np.empty(0, dtype=np.float32)
+
         if force_nonzero_diag:
+            # Labeled target diagonal
             row_sums = np.bincount(flat_rows, weights=weights, minlength=N).astype(np.float32)
-            denom = (cache.c_all > 0).sum(axis=1).astype(np.float32)
-            denom[denom == 0] = 1.0
-            diag_vals = row_sums / denom
+            inbag_counts = (cache.c_all > 0).sum(axis=1).astype(np.float32)
+            inbag_counts[inbag_counts == 0] = 1.0
+            labeled_target_diag = row_sums / inbag_counts
 
-            diag_rows = np.arange(N)
-            diag_cols = np.arange(N) + cache.diag_offset
+            if has_unlabeled:
+                unl = cache.idx_unlabeled.astype(np.int64, copy=False)
 
+                # Desired unlabeled diagonal:
+                #   (1/T) * sum_t empirical_mult_inbag_by_tree[t] / M_i(t)
+                desired_unl_diag_all = np.bincount(
+                    flat_rows,
+                    weights=cache.empirical_mult_inbag_by_tree[cache.flat_tree_ids] * cache.inv_leaf_mass_mult[flat_cols],
+                    minlength=N
+                ).astype(np.float32) / np.float32(T)
+                desired_unl_diag = desired_unl_diag_all[unl]
+
+                # Ordinary unlabeled diagonal contributed by the non-private leaf part:
+                #   (1 / |S_i|) * sum_{t in S_i} empirical_mult_all_by_tree[t] / M_i(t)
+                if cache.oob_mask_all is None:
+                    raise ValueError("cache.oob_mask_all is required for training-time prox_method='gap'.")
+
+                q_mask = cache.oob_mask_all.flatten() == 1
+                q_rows = cache.flat_rows_all[q_mask]
+                q_cols = cache.flat_cols_all[q_mask]
+                q_tree_ids = cache.flat_tree_ids[q_mask]
+
+                S_i_counts = cache.oob_mask_all.sum(axis=1).astype(np.float32)
+                S_i_counts[S_i_counts == 0] = 1.0
+                q_vals = (1.0 / S_i_counts[q_rows]).astype(np.float32)
+
+                ordinary_unl_diag = np.bincount(
+                    q_rows,
+                    weights=q_vals * cache.empirical_mult_all_by_tree[q_tree_ids] * cache.inv_leaf_mass_mult[q_cols],
+                    minlength=N
+                ).astype(np.float32)[unl]
+
+                # Labeled rows get their full target diagonal
+                lab_mask = ~cache.row_is_unlabeled
+                lab = np.arange(N, dtype=np.int64)[lab_mask]
+
+                lab_diag_rows = lab
+                lab_diag_cols = lab + cache.diag_offset
+                lab_diag_vals = labeled_target_diag[lab]
+
+                # Unlabeled rows get only the missing correction
+                unl_diag_rows = unl
+                unl_diag_cols = unl + cache.diag_offset
+                unl_diag_vals = desired_unl_diag - ordinary_unl_diag
+
+                diag_rows = np.concatenate([lab_diag_rows, unl_diag_rows])
+                diag_cols = np.concatenate([lab_diag_cols, unl_diag_cols])
+                diag_vals = np.concatenate([lab_diag_vals, unl_diag_vals]).astype(np.float32)
+
+            else:
+                diag_rows = np.arange(N, dtype=np.int64)
+                diag_cols = diag_rows + cache.diag_offset
+                diag_vals = labeled_target_diag.astype(np.float32)
+
+        elif has_unlabeled:
+            # In the zero-diagonal semi-supervised case, W places value 1 on
+            # unlabeled private coordinates so that Q can cancel the ordinary
+            # unlabeled diagonal exactly.
+            diag_rows = cache.idx_unlabeled.astype(np.int64, copy=False)
+            diag_cols = diag_rows + cache.diag_offset
+            diag_vals = np.ones(len(diag_rows), dtype=np.float32)
+
+        # ----- Final assembly -----
+        if needs_private_cols:
+            total_cols += N
+
+        if diag_vals.size > 0:
             flat_rows = np.concatenate([flat_rows, diag_rows])
             flat_cols = np.concatenate([flat_cols, diag_cols])
             weights = np.concatenate([weights, diag_vals])
-            total_cols += N
 
     else:
         raise ValueError(f"Unknown prox_method='{prox_method}'.")
@@ -432,71 +581,84 @@ def build_Q_matrix(
 
     # ---------------------------------------------------------
     # RF-GAP PROXIMITY
-    # p(i,j) = (1 / |S_i|) * Sum_{t in S_i} [ c_j(t) / M_leaf(i,t) ]
     #
-    # Mapping:
-    #   Q handles the query-side normalization:
+    # Ordinary query term:
+    #   Q stores only the query-side normalization
+    #
     #       1 / |S_i|
     #
-    # If is_training=False:
-    #   New points are evaluated against all trees, so |S_i| = T.
+    #   where S_i is:
+    #   - the OOB set of sample i during training
+    #   - all trees for extension points
     #
-    # Optional non-zero diagonal:
-    #   If enabled, append one private coordinate per training sample with value 1
-    #   on the query side, matching the diagonal injection performed in W.
+    # Private diagonal term:
+    #   These private coordinates must match the extra columns created in W.
+    #
+    #   - If force_nonzero_diag=True, Q places value 1 on all private
+    #     coordinates, and W determines the final diagonal magnitude.
+    #
+    #   - If force_nonzero_diag=False in semi-supervised mode, Q places a
+    #     negative value on unlabeled private coordinates to cancel the
+    #     ordinary unlabeled diagonal induced by the leaf part.
+    #
+    #     In that ordinary term, unlabeled phantom targets use the
+    #     empirical unconditional surrogate empirical_mult_all_by_tree[t]
+    #     on the target side.
     # ---------------------------------------------------------
     elif prox_method == "gap":
+        has_unlabeled = cache.is_semi_supervised
+        needs_private_cols = force_nonzero_diag or has_unlabeled
+
+        diag_rows = np.empty(0, dtype=np.int64)
+        diag_cols = np.empty(0, dtype=np.int64)
+        diag_vals = np.empty(0, dtype=np.float32)
+
+        # ----- Ordinary query-side term -----
         if is_training:
             if cache.oob_mask_all is None:
                 raise ValueError("cache.oob_mask_all is required for training-time prox_method='gap'.")
 
-            # Apply OOB scope on the query side: keep only OOB trees for each i.
             mask = cache.oob_mask_all.flatten() == 1
             flat_rows = flat_rows[mask]
             flat_cols = flat_cols[mask]
+            flat_tree_ids = cache.flat_tree_ids[mask]
 
-            # |S_i| = number of OOB trees for sample i
             S_i_counts = cache.oob_mask_all.sum(axis=1).astype(np.float32)
             S_i_counts[S_i_counts == 0] = 1.0
-
-            # Query-side weights: 1 / |S_i|
             vals = (1.0 / S_i_counts[flat_rows]).astype(np.float32)
 
+            if force_nonzero_diag:
+                # Q carries value 1 on all private coordinates.
+                # W determines the final diagonal target.
+                diag_rows = np.arange(N, dtype=np.int64)
+                diag_cols = diag_rows + cache.diag_offset
+                diag_vals = np.ones(N, dtype=np.float32)
+
+            elif has_unlabeled:
+                # Ordinary unlabeled diagonal induced by the leaf coordinates:
+                # unlabeled phantom targets use empirical_mult_all_by_tree[t]
+                ordinary_unl_diag = np.bincount(
+                    flat_rows,
+                    weights=vals * cache.empirical_mult_all_by_tree[flat_tree_ids] * cache.inv_leaf_mass_mult[flat_cols],
+                    minlength=N
+                ).astype(np.float32)
+
+                diag_rows = cache.idx_unlabeled.astype(np.int64, copy=False)
+                diag_cols = diag_rows + cache.diag_offset
+                diag_vals = -ordinary_unl_diag[diag_rows]
+
         else:
-            # For new data, S_i is the set of ALL trees (size T).
+            # Extension points average over all trees
             vals = np.full(N * T, 1.0 / T, dtype=np.float32)
 
-        if force_nonzero_diag:
+        # ----- Final assembly -----
+        if needs_private_cols:
             total_cols += cache.n_samples
-        
-            if is_training:
-                diag_rows = np.arange(N)
-                diag_cols = np.arange(N) + cache.diag_offset
-        
-                # Default: labeled diagonal injection is 1.0
-                diag_vals = np.ones(N, dtype=np.float32)
-        
-                # Semi-supervised heuristic:
-                # unlabeled rows already receive an ordinary overlap contribution
-                # from all trees, since they are treated as OOB everywhere on the
-                # query side and as phantom targets with c_j(t)=1 on the reference side.
-                #
-                # We rescale the virtual diagonal injection for unlabeled rows so
-                # that their diagonal is brought to a level comparable to labeled
-                # points, based on the empirical average number of in-bag trees on
-                # labeled samples.
-                if cache.is_semi_supervised and cache.idx_unlabeled is not None and len(cache.idx_unlabeled) > 0:
-                    if cache.idx_labeled is not None and len(cache.idx_labeled) > 0 and cache.c_all is not None:
-                        inbag_counts = (cache.c_all[cache.idx_labeled, :] > 0).sum(axis=1).astype(np.float32)
-                        avg_inbag = float(inbag_counts.mean()) if inbag_counts.size > 0 else 0.0
-        
-                        if avg_inbag > 0:
-                            alpha = (T / avg_inbag) - 1.0
-                            diag_vals[cache.idx_unlabeled] = np.float32(alpha)
-        
-                flat_rows = np.concatenate([flat_rows, diag_rows])
-                flat_cols = np.concatenate([flat_cols, diag_cols])
-                vals = np.concatenate([vals, diag_vals])
+
+        if diag_vals.size > 0:
+            flat_rows = np.concatenate([flat_rows, diag_rows])
+            flat_cols = np.concatenate([flat_cols, diag_cols])
+            vals = np.concatenate([vals, diag_vals])
 
     else:
         raise ValueError(f"Unknown prox_method='{prox_method}'.")
