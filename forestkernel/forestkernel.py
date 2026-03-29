@@ -8,7 +8,6 @@ from .config import (
     infer_prediction_type,
     validate_model_configuration,
     get_base_model,
-    sanitize_model_kwargs,
     validate_model_kwargs,
 )
 from .adapters import make_adapter
@@ -58,9 +57,9 @@ def ForestKernel(
         model_type=model_type,
         kernel_method=kernel_method,
         prediction_type=prediction_type,
+        kwargs=kwargs,
     )
     base_model = get_base_model(model_type=model_type, prediction_type=prediction_type)
-    kwargs = sanitize_model_kwargs(model_type=model_type, kernel_method=kernel_method, kwargs=kwargs)
     validate_model_kwargs(base_model, kwargs)
 
     class ForestKernel(GAPExtrasMixin, base_model):
@@ -117,11 +116,18 @@ def ForestKernel(
 
             has_unlabeled = bool(np.any(mask_unlabeled))
 
-            if has_unlabeled and not self.allow_semi_supervised:
-                raise ValueError(
-                    "Unlabeled targets were detected in y, but semi-supervised mode is disabled. "
-                    "Set allow_semi_supervised=True to enable the transductive kernel heuristic."
-                )
+            if has_unlabeled:
+                if not self.allow_semi_supervised:
+                    raise ValueError(
+                        "Unlabeled targets were detected in y, but semi-supervised mode is disabled. "
+                        "Set allow_semi_supervised=True to enable the transductive kernel heuristic."
+                    )
+                if self.kernel_method == "gap" and not self.force_nonzero_diag:
+                    raise ValueError(
+                        "Semi-supervised GAP currently requires force_nonzero_diag=True. "
+                        "The zero-diagonal semi-supervised GAP variant is not supported "
+                        "because it relies on signed private correction coordinates."
+                    )
 
             idx_labeled = np.flatnonzero(~mask_unlabeled)
             idx_unlabeled = np.flatnonzero(mask_unlabeled)
@@ -186,9 +192,9 @@ def ForestKernel(
                     oob_mask_all[idx_labeled, :] = oob_labeled.astype(np.int8)
 
                     if self.kernel_method == "gap":
-                        # Labeled rows keep their observed in-bag counts.
-                        # Unlabeled rows are initialized and later reweighted
-                        # through the GAP-specific target-side surrogates.
+                        # Unlabeled rows are initialized with placeholder unit counts.
+                        # The GAP builders later replace these target-side values using
+                        # the cached treewise surrogates.
                         c_labeled = self._adapter.get_in_bag_counts(X_train).astype(np.float32)
                         c_all = np.ones((self.cache.n_samples, T), dtype=np.float32)
                         c_all[idx_labeled, :] = c_labeled

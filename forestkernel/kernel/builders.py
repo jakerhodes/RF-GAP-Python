@@ -298,8 +298,8 @@ def build_W_matrix(cache, kernel_method, force_nonzero_diag=False):
         raw_diag = (T / M).astype(np.float32)
         diag_vals = (1.0 - raw_diag).astype(np.float32)
 
-        diag_rows = np.arange(N)
-        diag_cols = np.arange(N) + cache.diag_offset
+        diag_rows = np.arange(N, dtype=np.int64)
+        diag_cols = diag_rows + cache.diag_offset
 
         flat_rows = np.concatenate([flat_rows, diag_rows])
         flat_cols = np.concatenate([flat_cols, diag_cols])
@@ -324,9 +324,8 @@ def build_W_matrix(cache, kernel_method, force_nonzero_diag=False):
     #   One optional private coordinate per training sample is appended
     #   after the leaf coordinates.
     #
-    #   - If force_nonzero_diag=False and semi-supervised mode is active,
-    #     unlabeled private coordinates are used so that Q can cancel the
-    #     ordinary unlabeled diagonal exactly.
+    #   - Semi-supervised GAP with force_nonzero_diag=False is currently
+    #     not supported at the API level.
     #
     #   - If force_nonzero_diag=True, the private coordinates restore the
     #     desired training diagonal:
@@ -349,9 +348,12 @@ def build_W_matrix(cache, kernel_method, force_nonzero_diag=False):
             raise ValueError("cache.c_all is required for kernel_method='gap'.")
         if cache.inv_leaf_mass_mult is None:
             raise ValueError("cache.inv_leaf_mass_mult is required for kernel_method='gap'.")
+        if cache.is_semi_supervised and not force_nonzero_diag:
+            raise ValueError(
+                "Semi-supervised GAP with force_nonzero_diag=False is not supported."
+            )
 
         has_unlabeled = cache.is_semi_supervised
-        needs_private_cols = force_nonzero_diag or has_unlabeled
 
         # ----- Ordinary target-side term -----
         c_j_t = cache.c_all.flatten().astype(np.float32, copy=True)
@@ -363,11 +365,9 @@ def build_W_matrix(cache, kernel_method, force_nonzero_diag=False):
         weights = c_j_t * cache.inv_leaf_mass_mult[flat_cols]
 
         # ----- Private diagonal correction -----
-        diag_rows = np.empty(0, dtype=np.int64)
-        diag_cols = np.empty(0, dtype=np.int64)
-        diag_vals = np.empty(0, dtype=np.float32)
-
         if force_nonzero_diag:
+            total_cols += N
+
             # Labeled target diagonal
             row_sums = np.bincount(flat_rows, weights=weights, minlength=N).astype(np.float32)
             inbag_counts = (cache.c_all > 0).sum(axis=1).astype(np.float32)
@@ -407,40 +407,20 @@ def build_W_matrix(cache, kernel_method, force_nonzero_diag=False):
                 ).astype(np.float32)[unl]
 
                 # Labeled rows get their full target diagonal
-                lab_mask = ~cache.row_is_unlabeled
-                lab = np.arange(N, dtype=np.int64)[lab_mask]
+                lab = np.flatnonzero(~cache.row_is_unlabeled)
 
-                lab_diag_rows = lab
-                lab_diag_cols = lab + cache.diag_offset
-                lab_diag_vals = labeled_target_diag[lab]
-
-                # Unlabeled rows get only the missing correction
-                unl_diag_rows = unl
-                unl_diag_cols = unl + cache.diag_offset
-                unl_diag_vals = desired_unl_diag - ordinary_unl_diag
-
-                diag_rows = np.concatenate([lab_diag_rows, unl_diag_rows])
-                diag_cols = np.concatenate([lab_diag_cols, unl_diag_cols])
-                diag_vals = np.concatenate([lab_diag_vals, unl_diag_vals]).astype(np.float32)
+                diag_rows = np.concatenate([lab, unl])
+                diag_cols = diag_rows + cache.diag_offset
+                diag_vals = np.concatenate([
+                    labeled_target_diag[lab],
+                    desired_unl_diag - ordinary_unl_diag,
+                ]).astype(np.float32)
 
             else:
                 diag_rows = np.arange(N, dtype=np.int64)
                 diag_cols = diag_rows + cache.diag_offset
                 diag_vals = labeled_target_diag.astype(np.float32)
 
-        elif has_unlabeled:
-            # In the zero-diagonal semi-supervised case, W places value 1 on
-            # unlabeled private coordinates so that Q can cancel the ordinary
-            # unlabeled diagonal exactly.
-            diag_rows = cache.idx_unlabeled.astype(np.int64, copy=False)
-            diag_cols = diag_rows + cache.diag_offset
-            diag_vals = np.ones(len(diag_rows), dtype=np.float32)
-
-        # ----- Final assembly -----
-        if needs_private_cols:
-            total_cols += N
-
-        if diag_vals.size > 0:
             flat_rows = np.concatenate([flat_rows, diag_rows])
             flat_cols = np.concatenate([flat_cols, diag_cols])
             weights = np.concatenate([weights, diag_vals])
@@ -570,8 +550,8 @@ def build_Q_matrix(
 
             # Matching private diagonal coordinates for exact diagonal replacement
             total_cols += cache.n_samples
-            diag_rows = np.arange(N)
-            diag_cols = np.arange(N) + cache.diag_offset
+            diag_rows = np.arange(N, dtype=np.int64)
+            diag_cols = diag_rows + cache.diag_offset
             diag_vals = np.ones(N, dtype=np.float32)
 
             flat_rows = np.concatenate([flat_rows, diag_rows])
@@ -601,24 +581,17 @@ def build_Q_matrix(
     # Private diagonal term:
     #   These private coordinates must match the extra columns created in W.
     #
+    #   - Semi-supervised GAP with force_nonzero_diag=False is currently
+    #     not supported at the API level.
+    #
     #   - If force_nonzero_diag=True, Q places value 1 on all private
     #     coordinates, and W determines the final diagonal magnitude.
-    #
-    #   - If force_nonzero_diag=False in semi-supervised mode, Q places a
-    #     negative value on unlabeled private coordinates to cancel the
-    #     ordinary unlabeled diagonal induced by the leaf part.
-    #
-    #     In that ordinary term, unlabeled phantom targets use the
-    #     empirical unconditional surrogate empirical_mult_all_by_tree[t]
-    #     on the target side.
     # ---------------------------------------------------------
     elif kernel_method == "gap":
-        has_unlabeled = cache.is_semi_supervised
-        needs_private_cols = force_nonzero_diag or has_unlabeled
-
-        diag_rows = np.empty(0, dtype=np.int64)
-        diag_cols = np.empty(0, dtype=np.int64)
-        diag_vals = np.empty(0, dtype=np.float32)
+        if cache.is_semi_supervised and not force_nonzero_diag:
+            raise ValueError(
+                "Semi-supervised GAP with force_nonzero_diag=False is not supported."
+            )
 
         # ----- Ordinary query-side term -----
         if is_training:
@@ -628,41 +601,23 @@ def build_Q_matrix(
             mask = cache.oob_mask_all.flatten() == 1
             flat_rows = flat_rows[mask]
             flat_cols = flat_cols[mask]
-            flat_tree_ids = cache.flat_tree_ids[mask]
 
             S_i_counts = cache.oob_mask_all.sum(axis=1).astype(np.float32)
             S_i_counts[S_i_counts == 0] = 1.0
             vals = (1.0 / S_i_counts[flat_rows]).astype(np.float32)
-
-            if force_nonzero_diag:
-                # Q carries value 1 on all private coordinates.
-                # W determines the final diagonal target.
-                diag_rows = np.arange(N, dtype=np.int64)
-                diag_cols = diag_rows + cache.diag_offset
-                diag_vals = np.ones(N, dtype=np.float32)
-
-            elif has_unlabeled:
-                # Ordinary unlabeled diagonal induced by the leaf coordinates:
-                # unlabeled phantom targets use empirical_mult_all_by_tree[t]
-                ordinary_unl_diag = np.bincount(
-                    flat_rows,
-                    weights=vals * cache.empirical_mult_all_by_tree[flat_tree_ids] * cache.inv_leaf_mass_mult[flat_cols],
-                    minlength=N
-                ).astype(np.float32)
-
-                diag_rows = cache.idx_unlabeled.astype(np.int64, copy=False)
-                diag_cols = diag_rows + cache.diag_offset
-                diag_vals = -ordinary_unl_diag[diag_rows]
 
         else:
             # Extension points average over all trees
             vals = np.full(N * T, 1.0 / T, dtype=np.float32)
 
         # ----- Final assembly -----
-        if needs_private_cols:
+        if force_nonzero_diag:
             total_cols += cache.n_samples
 
-        if diag_vals.size > 0:
+            diag_rows = np.arange(N, dtype=np.int64)
+            diag_cols = diag_rows + cache.diag_offset
+            diag_vals = np.ones(N, dtype=np.float32)
+
             flat_rows = np.concatenate([flat_rows, diag_rows])
             flat_cols = np.concatenate([flat_cols, diag_cols])
             vals = np.concatenate([vals, diag_vals])

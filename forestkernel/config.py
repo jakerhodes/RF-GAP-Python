@@ -1,7 +1,6 @@
+import inspect
 import numpy as np
 import pandas as pd
-import inspect
-
 
 from sklearn.ensemble import (
     RandomForestClassifier,
@@ -50,23 +49,51 @@ def infer_prediction_type(prediction_type=None, y=None):
         return "classification"
 
 
-def validate_model_configuration(model_type, kernel_method, prediction_type):
+def validate_model_configuration(model_type, kernel_method, prediction_type, kwargs=None):
     """
-    Validate the combination of model type, kernel_method, and prediction type.
+    Validate the high-level compatibility between model_type, kernel_method,
+    prediction_type, and a few kernel-specific estimator requirements.
+
+    Parameters
+    ----------
+    model_type : str
+        One of {'rf', 'et', 'gbt', 'rotf'}.
+    kernel_method : str
+        One of {'original', 'oob', 'gap', 'kerf', 'gbt'}.
+    prediction_type : str
+        One of {'classification', 'regression'}.
+    kwargs : dict or None
+        Estimator kwargs supplied by the user. These are not modified here,
+        only checked when needed for kernel-specific requirements.
     """
-    if kernel_method == "gbt" and model_type != "gbt":
-        raise ValueError("kernel_method='gbt' requires model_type='gbt'")
-
-    if model_type == "gbt" and kernel_method != "gbt":
-        raise ValueError("When model_type='gbt', kernel_method must be 'gbt'")
-
-    if model_type == "rotf" and prediction_type != "classification":
-        raise ValueError("model_type='rotf' currently supports classification only.")
-
     if model_type not in {"rf", "et", "gbt", "rotf"}:
         raise ValueError(
             "model_type must be one of {'rf', 'et', 'gbt', 'rotf'}"
         )
+
+    if kernel_method == "gbt" and model_type != "gbt":
+        raise ValueError("kernel_method='gbt' requires model_type='gbt'.")
+
+    if model_type == "gbt" and kernel_method != "gbt":
+        raise ValueError("When model_type='gbt', kernel_method must be 'gbt'.")
+
+    if model_type == "rotf" and prediction_type != "classification":
+        raise ValueError("model_type='rotf' currently supports classification only.")
+
+    kwargs = {} if kwargs is None else dict(kwargs)
+
+    # OOB- and GAP-based kernels rely on bootstrap/OOB logic for RF / ET.
+    # We do not silently override user parameters.
+    if kernel_method in {"oob", "gap"} and model_type in {"rf", "et"}:
+        if "bootstrap" in kwargs and kwargs["bootstrap"] is not True:
+            raise ValueError(
+                f"kernel_method='{kernel_method}' with model_type='{model_type}' "
+                "requires bootstrap=True."
+            )
+
+    # Gradient boosting does not support the RF/ET/OOB-style kernel methods.
+    if model_type == "gbt" and kernel_method != "gbt":
+        raise ValueError("Gradient boosting only supports kernel_method='gbt'.")
 
 
 def get_base_model(model_type, prediction_type):
@@ -74,38 +101,30 @@ def get_base_model(model_type, prediction_type):
     Return the base estimator class corresponding to model_type / prediction_type.
     """
     if model_type == "rf":
-        return RandomForestClassifier if prediction_type == "classification" else RandomForestRegressor
+        return (
+            RandomForestClassifier
+            if prediction_type == "classification"
+            else RandomForestRegressor
+        )
 
     if model_type == "et":
-        return ExtraTreesClassifier if prediction_type == "classification" else ExtraTreesRegressor
+        return (
+            ExtraTreesClassifier
+            if prediction_type == "classification"
+            else ExtraTreesRegressor
+        )
 
     if model_type == "gbt":
-        return GradientBoostingClassifier if prediction_type == "classification" else GradientBoostingRegressor
+        return (
+            GradientBoostingClassifier
+            if prediction_type == "classification"
+            else GradientBoostingRegressor
+        )
 
     if model_type == "rotf":
         return BaggedRotationForest
 
     raise ValueError(f"Unsupported model_type='{model_type}'")
-
-
-def sanitize_model_kwargs(model_type, kernel_method, kwargs):
-    """
-    Clean / augment kwargs before passing them to the base estimator.
-    """
-    kwargs = dict(kwargs)
-
-    # OOB- and RF-GAP-based kernels require bootstrap sampling for RF / ET.
-    if kernel_method in ["oob", "gap"] and model_type in ["rf", "et"]:
-        kwargs["bootstrap"] = True
-
-    # Rotation Forest has a different constructor signature from sklearn forests.
-    if model_type == "rotf":
-        kwargs.pop("oob_score", None)
-        kwargs.pop("verbose", None)
-        kwargs.pop("bootstrap", None)
-        kwargs.pop("max_samples", None)
-
-    return kwargs
 
 
 def validate_model_kwargs(base_model, kwargs, extra_allowed=None):
@@ -117,7 +136,7 @@ def validate_model_kwargs(base_model, kwargs, extra_allowed=None):
     base_model : class
         Estimator class that will be instantiated.
     kwargs : dict
-        Final kwargs after sanitization.
+        User-provided kwargs to forward to the estimator constructor.
     extra_allowed : iterable[str] or None
         Optional additional kwargs to tolerate.
 
@@ -131,13 +150,17 @@ def validate_model_kwargs(base_model, kwargs, extra_allowed=None):
     sig = inspect.signature(base_model.__init__)
     params = sig.parameters
 
-    # If constructor accepts **kwargs, no strict validation is possible/needed.
-    has_var_kw = any(p.kind == inspect.Parameter.VAR_KEYWORD for p in params.values())
+    # If constructor accepts **kwargs, strict validation is not possible here.
+    has_var_kw = any(
+        p.kind == inspect.Parameter.VAR_KEYWORD
+        for p in params.values()
+    )
     if has_var_kw:
         return
 
     allowed = {
-        name for name, p in params.items()
+        name
+        for name, p in params.items()
         if name != "self" and p.kind in (
             inspect.Parameter.POSITIONAL_OR_KEYWORD,
             inspect.Parameter.KEYWORD_ONLY,
