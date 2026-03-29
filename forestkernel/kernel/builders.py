@@ -190,7 +190,7 @@ def compute_multiplicity_leaf_mass(cache):
     return cache
 
 
-def build_W_matrix(cache, method, force_nonzero_diag=False):
+def build_W_matrix(cache, kernel_method, force_nonzero_diag=False):
     """
     Builds the Weight Matrix W (N_ref x N_total_nodes_plus_optional_diag).
 
@@ -200,7 +200,7 @@ def build_W_matrix(cache, method, force_nonzero_diag=False):
     Parameters
     ----------
     cache : KernelCache
-    method : str
+    kernel_method : str
         One of {'original', 'oob', 'gap', 'kerf', 'gbt'}
     force_nonzero_diag : bool, default=False
         Only relevant for RF-GAP. Whether to inject virtual diagonal
@@ -229,7 +229,7 @@ def build_W_matrix(cache, method, force_nonzero_diag=False):
     #   Use a symmetric factorization with sqrt(1/T) on both sides.
     #   W handles the target/reference side.
     # ---------------------------------------------------------
-    if method == "original":
+    if kernel_method == "original":
         scale_factor = np.float32(1.0 / np.sqrt(T))
         weights = np.full(N * T, scale_factor, dtype=np.float32)
 
@@ -240,9 +240,9 @@ def build_W_matrix(cache, method, force_nonzero_diag=False):
     # Mapping:
     #   Use a symmetric factorization with sqrt(w_t) on both sides.
     # ---------------------------------------------------------
-    elif method == "gbt":
+    elif kernel_method == "gbt":
         if cache.gbt_tree_weights is None:
-            raise ValueError("cache.gbt_tree_weights is required for method='gbt'.")
+            raise ValueError("cache.gbt_tree_weights is required for kernel_method='gbt'.")
         sqrt_w = np.sqrt(cache.gbt_tree_weights).astype(np.float32)
         weights = np.tile(sqrt_w, N)
 
@@ -255,9 +255,9 @@ def build_W_matrix(cache, method, force_nonzero_diag=False):
     #       1/sqrt(T) * 1/sqrt(M_leaf)
     #   on both Q and W.
     # ---------------------------------------------------------
-    elif method == "kerf":
+    elif kernel_method == "kerf":
         if cache.inv_sqrt_leaf_mass_unit is None:
-            raise ValueError("cache.inv_sqrt_leaf_mass_unit is required for method='kerf'.")
+            raise ValueError("cache.inv_sqrt_leaf_mass_unit is required for kernel_method='kerf'.")
         weights = (1.0 / np.sqrt(T)) * cache.inv_sqrt_leaf_mass_unit[flat_cols]
 
     # ---------------------------------------------------------
@@ -278,9 +278,9 @@ def build_W_matrix(cache, method, force_nonzero_diag=False):
     #
     #   This is done by adding N virtual columns after the real leaf columns.
     # ---------------------------------------------------------
-    elif method == "oob":
+    elif kernel_method == "oob":
         if cache.oob_mask_all is None:
-            raise ValueError("cache.oob_mask_all is required for method='oob'.")
+            raise ValueError("cache.oob_mask_all is required for kernel_method='oob'.")
 
         # Apply OOB scope on the reference side: keep only OOB trees for each j.
         mask = cache.oob_mask_all.flatten() == 1
@@ -344,11 +344,11 @@ def build_W_matrix(cache, method, force_nonzero_diag=False):
     #     unlabeled diagonal, the private coordinate stores only the
     #     missing correction.
     # ---------------------------------------------------------
-    elif method == "gap":
+    elif kernel_method == "gap":
         if cache.c_all is None:
-            raise ValueError("cache.c_all is required for method='gap'.")
+            raise ValueError("cache.c_all is required for kernel_method='gap'.")
         if cache.inv_leaf_mass_mult is None:
-            raise ValueError("cache.inv_leaf_mass_mult is required for method='gap'.")
+            raise ValueError("cache.inv_leaf_mass_mult is required for kernel_method='gap'.")
 
         has_unlabeled = cache.is_semi_supervised
         needs_private_cols = force_nonzero_diag or has_unlabeled
@@ -389,7 +389,7 @@ def build_W_matrix(cache, method, force_nonzero_diag=False):
                 # Ordinary unlabeled diagonal contributed by the non-private leaf part:
                 #   (1 / |S_i|) * sum_{t in S_i} empirical_mult_all_by_tree[t] / M_i(t)
                 if cache.oob_mask_all is None:
-                    raise ValueError("cache.oob_mask_all is required for training-time method='gap'.")
+                    raise ValueError("cache.oob_mask_all is required for training-time kernel_method='gap'.")
 
                 q_mask = cache.oob_mask_all.flatten() == 1
                 q_rows = cache.flat_rows_all[q_mask]
@@ -446,7 +446,7 @@ def build_W_matrix(cache, method, force_nonzero_diag=False):
             weights = np.concatenate([weights, diag_vals])
 
     else:
-        raise ValueError(f"Unknown method='{method}'.")
+        raise ValueError(f"Unknown kernel_method='{kernel_method}'.")
 
     # Filter zeros and build sparse W
     mask = weights != 0
@@ -460,7 +460,7 @@ def build_W_matrix(cache, method, force_nonzero_diag=False):
 
 def build_Q_matrix(
     cache,
-    method,
+    kernel_method,
     leaves=None,
     is_training=True,
     force_nonzero_diag=False,
@@ -473,7 +473,7 @@ def build_Q_matrix(
     Parameters
     ----------
     cache : ProximityCache
-    method : str
+    kernel_method : str
         One of {'original', 'oob', 'gap', 'kerf', 'gbt'}
     leaves : ndarray of shape (N_query, T), optional
         Query leaf matrix. If None, uses cache.leaf_matrix_all.
@@ -507,7 +507,7 @@ def build_Q_matrix(
     #   Use the same symmetric factorization as W:
     #       sqrt(1/T)
     # ---------------------------------------------------------
-    if method == "original":
+    if kernel_method == "original":
         scale_factor = np.float32(1.0 / np.sqrt(T))
         vals = np.full(N * T, scale_factor, dtype=np.float32)
 
@@ -518,9 +518,9 @@ def build_Q_matrix(
     # Mapping:
     #   Use sqrt(w_t) on the query side too.
     # ---------------------------------------------------------
-    elif method == "gbt":
+    elif kernel_method == "gbt":
         if cache.gbt_tree_weights is None:
-            raise ValueError("cache.gbt_tree_weights is required for method='gbt'.")
+            raise ValueError("cache.gbt_tree_weights is required for kernel_method='gbt'.")
         sqrt_w = np.sqrt(cache.gbt_tree_weights).astype(np.float32)
         vals = np.tile(sqrt_w, N)
 
@@ -532,9 +532,9 @@ def build_Q_matrix(
     #   Same symmetric factorization as W:
     #       1/sqrt(T) * 1/sqrt(M_leaf)
     # ---------------------------------------------------------
-    elif method == "kerf":
+    elif kernel_method == "kerf":
         if cache.inv_sqrt_leaf_mass_unit is None:
-            raise ValueError("cache.inv_sqrt_leaf_mass_unit is required for method='kerf'.")
+            raise ValueError("cache.inv_sqrt_leaf_mass_unit is required for kernel_method='kerf'.")
         vals = (1.0 / np.sqrt(T)) * cache.inv_sqrt_leaf_mass_unit[flat_cols]
 
     # ---------------------------------------------------------
@@ -551,10 +551,10 @@ def build_Q_matrix(
     # If is_training=False:
     #   By convention, new points are treated as OOB for all trees, so |S_i| = T.
     # ---------------------------------------------------------
-    elif method == "oob":
+    elif kernel_method == "oob":
         if is_training:
             if cache.oob_mask_all is None:
-                raise ValueError("cache.oob_mask_all is required for training-time method='oob'.")
+                raise ValueError("cache.oob_mask_all is required for training-time kernel_method='oob'.")
 
             # Apply OOB scope on the query side: keep only OOB trees for each i.
             mask = cache.oob_mask_all.flatten() == 1
@@ -612,7 +612,7 @@ def build_Q_matrix(
     #     empirical unconditional surrogate empirical_mult_all_by_tree[t]
     #     on the target side.
     # ---------------------------------------------------------
-    elif method == "gap":
+    elif kernel_method == "gap":
         has_unlabeled = cache.is_semi_supervised
         needs_private_cols = force_nonzero_diag or has_unlabeled
 
@@ -623,7 +623,7 @@ def build_Q_matrix(
         # ----- Ordinary query-side term -----
         if is_training:
             if cache.oob_mask_all is None:
-                raise ValueError("cache.oob_mask_all is required for training-time method='gap'.")
+                raise ValueError("cache.oob_mask_all is required for training-time kernel_method='gap'.")
 
             mask = cache.oob_mask_all.flatten() == 1
             flat_rows = flat_rows[mask]
@@ -668,7 +668,7 @@ def build_Q_matrix(
             vals = np.concatenate([vals, diag_vals])
 
     else:
-        raise ValueError(f"Unknown method='{method}'.")
+        raise ValueError(f"Unknown kernel_method='{kernel_method}'.")
 
     # Filter zeros and build sparse Q
     mask = vals != 0

@@ -51,7 +51,7 @@ class GAPExtrasMixin:
         if self.prediction_type != 'classification':
             raise ValueError("Classification trust scores are only available for classification models")   
         
-        if self.method != 'gap':
+        if self.kernel_method != 'gap':
             raise ValueError("Trust scores are only available for RF-GAP proximities")
     
         # Compute out-of-bag probabilities and correctness
@@ -114,7 +114,7 @@ class GAPExtrasMixin:
         if self.prediction_type != 'classification':
             raise ValueError("Classification trust scores are only available for classification models")   
     
-        if self.method != 'gap':
+        if self.kernel_method != 'gap':
             raise ValueError("Trust scores are only available for RF-GAP proximities")       
     
         # Compute out-of-bag probabilities and correctness
@@ -187,8 +187,8 @@ class GAPExtrasMixin:
             or `oob_score` was not enabled during training.
         """
         
-        # Validate method applicability
-        if self.method != 'gap':
+        # Validate kernel_method applicability
+        if self.kernel_method != 'gap':
             raise ValueError("Prediction intervals are only available for RF-GAP proximities.")
         
         if self.prediction_type == 'classification':
@@ -305,10 +305,10 @@ class GAPExtrasMixin:
             self.oob_predictions = np.argmax(self.oob_proba, axis=1)
     
             # Use RF-GAP proximities to compute nonconformity scores
-            original_prox_method = self.method
+            original_prox_method = self.kernel_method
     
             if proximity_type is not None:
-                self.method = proximity_type
+                self.kernel_method = proximity_type
     
             proximities = self.get_kernel()
     
@@ -419,8 +419,8 @@ class GAPExtrasMixin:
                 self.conformity_quantiles_test = np.quantile(self.conformity_scores_test, np.linspace(0, 0.99, 100))
     
         finally:
-            # Restore the original proximity method
-            self.method = original_prox_method
+            # Restore the original proximity kernel_method
+            self.kernel_method = original_prox_method
     
     
     def accuracy_rejection_auc(self, quantiles: np.ndarray, scores: np.ndarray) -> tuple:

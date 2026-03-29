@@ -28,7 +28,7 @@ from .kernel import (
 def ForestKernel(
     prediction_type=None,
     y=None,
-    method="gap",
+    kernel_method="gap",
     matrix_type="sparse",
     force_nonzero_diag=False,
     force_symmetric=None,
@@ -56,17 +56,17 @@ def ForestKernel(
     prediction_type = infer_prediction_type(prediction_type=prediction_type, y=y)
     validate_model_configuration(
         model_type=model_type,
-        method=method,
+        kernel_method=kernel_method,
         prediction_type=prediction_type,
     )
     base_model = get_base_model(model_type=model_type, prediction_type=prediction_type)
-    kwargs = sanitize_model_kwargs(model_type=model_type, method=method, kwargs=kwargs)
+    kwargs = sanitize_model_kwargs(model_type=model_type, kernel_method=kernel_method, kwargs=kwargs)
     validate_model_kwargs(base_model, kwargs)
 
     class ForestKernel(GAPExtrasMixin, base_model):
         def __init__(
             self,
-            method=method,
+            kernel_method=kernel_method,
             matrix_type=matrix_type,
             force_nonzero_diag=force_nonzero_diag,
             force_symmetric=force_symmetric,
@@ -76,7 +76,7 @@ def ForestKernel(
         ):
             super(ForestKernel, self).__init__(**kwargs)
 
-            self.method = method
+            self.kernel_method = kernel_method
             self.matrix_type = matrix_type
             self.prediction_type = prediction_type
             self.force_nonzero_diag = force_nonzero_diag
@@ -175,7 +175,7 @@ def ForestKernel(
             # ---------------------------------------------------------
             # STEP 4: attach OOB / multiplicity structure when needed
             # ---------------------------------------------------------
-            if self.method in ["oob", "gap"]:
+            if self.kernel_method in ["oob", "gap"]:
                 oob_labeled = self._adapter.get_oob_mask(X_train)
 
                 if has_unlabeled:
@@ -185,7 +185,7 @@ def ForestKernel(
                     oob_mask_all = np.ones((self.cache.n_samples, T), dtype=np.int8)
                     oob_mask_all[idx_labeled, :] = oob_labeled.astype(np.int8)
 
-                    if self.method == "gap":
+                    if self.kernel_method == "gap":
                         # Labeled rows keep their observed in-bag counts.
                         # Unlabeled rows are initialized and later reweighted
                         # through the GAP-specific target-side surrogates.
@@ -198,7 +198,7 @@ def ForestKernel(
                     oob_mask_all = oob_labeled.astype(np.int8)
                     c_all = (
                         self._adapter.get_in_bag_counts(X_train).astype(np.float32)
-                        if self.method == "gap"
+                        if self.kernel_method == "gap"
                         else None
                     )
 
@@ -207,17 +207,17 @@ def ForestKernel(
             # ---------------------------------------------------------
             # STEP 5: attach tree weights when needed
             # ---------------------------------------------------------
-            if self.method == "gbt":
+            if self.kernel_method == "gbt":
                 gbt_tree_weights = self._adapter.get_tree_weights(X_train)
                 attach_gbt_weights(self.cache, gbt_tree_weights)
 
             # ---------------------------------------------------------
             # STEP 6: attach kernel-specific cached statistics
             # ---------------------------------------------------------
-            if self.method == "kerf":
+            if self.kernel_method == "kerf":
                 compute_unit_leaf_mass(self.cache)
 
-            if self.method == "gap":
+            if self.kernel_method == "gap":
                 compute_multiplicity_leaf_mass(self.cache)
 
             # ---------------------------------------------------------
@@ -225,7 +225,7 @@ def ForestKernel(
             # ---------------------------------------------------------
             self.cache.W_mat = build_W_matrix(
                 self.cache,
-                method=self.method,
+                kernel_method=self.kernel_method,
                 force_nonzero_diag=self.force_nonzero_diag,
             )
 
@@ -246,15 +246,15 @@ def ForestKernel(
 
             Q_train = build_Q_matrix(
                 self.cache,
-                method=self.method,
+                kernel_method=self.kernel_method,
                 leaves=self.cache.leaf_matrix_all,
                 is_training=True,
                 force_nonzero_diag=self.force_nonzero_diag,
             )
 
             if self.normalize_diagonal and (
-                (self.method == "gap" and self.force_nonzero_diag)
-                or self.method == "kerf"
+                (self.kernel_method == "gap" and self.force_nonzero_diag)
+                or self.kernel_method == "kerf"
             ):
                 diagonal = Q_train.multiply(self.cache.W_mat).sum(axis=1).A.ravel()
                 diagonal[diagonal == 0] = 1.0
@@ -271,7 +271,7 @@ def ForestKernel(
             leaves_new = self._adapter.get_leaf_matrix(X_new)
             return build_Q_matrix(
                 self.cache,
-                method=self.method,
+                kernel_method=self.kernel_method,
                 leaves=leaves_new,
                 is_training=False,
                 force_nonzero_diag=self.force_nonzero_diag,
@@ -294,8 +294,8 @@ def ForestKernel(
             Q_train = self.get_train_query_map()
 
             if self.force_symmetric and (
-                self.method == "gap"
-                or (self.method == "kerf" and self.normalize_diagonal)
+                self.kernel_method == "gap"
+                or (self.kernel_method == "kerf" and self.normalize_diagonal)
             ):
                 K = block_symmetrize(Q_train, self.cache.W_mat)
             else:
@@ -312,7 +312,7 @@ def ForestKernel(
             return self.get_kernel_from_query_map(Q_new)
 
     return ForestKernel(
-        method=method,
+        kernel_method=kernel_method,
         matrix_type=matrix_type,
         force_nonzero_diag=force_nonzero_diag,
         force_symmetric=force_symmetric,
