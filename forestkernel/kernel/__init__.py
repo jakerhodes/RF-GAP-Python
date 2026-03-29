@@ -1,4 +1,4 @@
-from .cache import ProximityCache
+from .cache import KernelCache
 from .builders import (
     to_global_leaves,
     initialize_cache,

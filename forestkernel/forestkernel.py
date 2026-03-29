@@ -12,7 +12,7 @@ from .config import (
     validate_model_kwargs,
 )
 from .adapters import make_adapter
-from .proximity import (
+from .kernel import (
     initialize_cache,
     attach_oob_structure,
     attach_gbt_weights,
@@ -25,12 +25,10 @@ from .proximity import (
 )
 
 
-# TODO: add support for sklearn Quantile RandomForests and other tree-based models
-# in sklearn and beyond (e.g. LightGBM, XGBoost, CatBoost)
 def ForestKernel(
     prediction_type=None,
     y=None,
-    prox_method="gap",
+    method="gap",
     matrix_type="sparse",
     force_nonzero_diag=False,
     force_symmetric=None,
@@ -40,71 +38,35 @@ def ForestKernel(
     **kwargs,
 ):
     """
-    Factory function to create an optimized Random Forest, Extra Trees,
-    Gradient Boosting, or Rotation Forest proximity object.
+    Factory function creating a tree ensemble equipped with leaf-space
+    kernel maps and kernel construction methods.
 
-    This class takes on a tree ensemble predictor and adds methods to
-    construct proximities from the fitted ensemble object.
+    The fitted kernel is represented in factored form as
 
-    This implementation uses Sparse Matrix Algebra (Inverted Indexing)
-    with Gustavson scipy sparse multiplication:
-        P = Q W^T
-    where Q and W are query (i) and weight (j) sparse matrices as per the
-    proximity definitions.
+        K = Q W^T
 
-    Parameters
-    ----------
-    prediction_type : str
-        Options are 'regression' or 'classification'.
+    where:
+    - Q is the query-side leaf feature map
+    - W is the reference-side leaf feature map
 
-    y : array-like of shape (n_samples,) or (n_samples, n_outputs)
-        Optional target values used to infer prediction_type.
-
-    prox_method : str
-        One of {'original', 'oob', 'gap', 'kerf', 'gbt'}.
-
-    matrix_type : str
-        'sparse' or 'dense'.
-
-    force_nonzero_diag : bool
-        Only used for RF-GAP proximities. Whether to inject non-zero diagonal.
-
-    force_symmetric : bool or None
-        Whether to force symmetry via block symmetrization.
-
-    normalize_diagonal : bool
-        Whether to row-normalize by self-similarity so that the diagonal becomes 1 when applicable
-
-    model_type : str
-        One of {'rf', 'et', 'gbt', 'rotf'}.
-
-    allow_semi_supervised : bool
-        Whether to allow the transductive semi-supervised heuristic when y
-        contains unlabeled entries (-1 and/or NaN depending on task type).
-        If False and unlabeled targets are detected, fit() raises an error.
-
-    **kwargs
-        Estimator-specific keyword arguments.
-
-    Returns
-    -------
-    self : object
-        Unfitted estimator enhanced with proximity methods.
+    In symmetric cases, this reduces to an ordinary dot-product kernel.
+    In asymmetric cases such as GAP, this is a bilinear kernel between
+    two distinct feature maps.
     """
     prediction_type = infer_prediction_type(prediction_type=prediction_type, y=y)
     validate_model_configuration(
         model_type=model_type,
-        prox_method=prox_method,
+        method=method,
         prediction_type=prediction_type,
     )
     base_model = get_base_model(model_type=model_type, prediction_type=prediction_type)
-    kwargs = sanitize_model_kwargs(model_type=model_type, prox_method=prox_method, kwargs=kwargs)
+    kwargs = sanitize_model_kwargs(model_type=model_type, method=method, kwargs=kwargs)
     validate_model_kwargs(base_model, kwargs)
 
     class ForestKernel(GAPExtrasMixin, base_model):
         def __init__(
             self,
-            prox_method=prox_method,
+            method=method,
             matrix_type=matrix_type,
             force_nonzero_diag=force_nonzero_diag,
             force_symmetric=force_symmetric,
@@ -114,7 +76,7 @@ def ForestKernel(
         ):
             super(ForestKernel, self).__init__(**kwargs)
 
-            self.prox_method = prox_method
+            self.method = method
             self.matrix_type = matrix_type
             self.prediction_type = prediction_type
             self.force_nonzero_diag = force_nonzero_diag
@@ -123,52 +85,32 @@ def ForestKernel(
             self.model_type = model_type
             self.allow_semi_supervised = allow_semi_supervised
 
-            # Proximity internals
+            # Kernel internals
             self.cache = None
             self._adapter = None
 
-            # Partial-label bookkeeping placeholder
-            self.idx_labeled_ = None
-            self.idx_unlabeled_ = None
-            self._n_total_samples = 0
-            self._n_train_samples = 0
-
         def fit(self, X, y, sample_weight=None):
             """
-            Fits the tree ensemble and pre-computes the sparse weight matrix W
-            necessary for proximity calculations.
+            Fit the ensemble and precompute the reference-side leaf map W.
 
-            In semi-supervised mode, unlabeled points are not used to fit the
-            forest, but are still inserted into the reference set used to build
-            proximities. This is a transductive heuristic and is enabled only
-            when allow_semi_supervised=True.
-
-            RUNTIME COMPLEXITY: O(N * T * log(N))
-                - Ensemble Construction: O(N * T * log(N) * #features sampled at each node)
-                - Matrix Construction: O(N * T)
-
-            MEMORY COMPLEXITY: O(N * T)
-                - Stores leaf indices and sparse weights.
-                - Efficiently sparse: only stores 1 entry per tree per sample.
+            In semi-supervised mode, unlabeled samples are excluded from the
+            ensemble fit, but retained in the reference set used for kernel
+            construction through the transductive heuristic implemented in
+            builders.py.
             """
-            # ---------------------------------------------------------
-            # STEP 0: Handle partial labels (semi-supervised heuristic)
-            # ---------------------------------------------------------
-            self._n_total_samples = X.shape[0]
-
             y = np.asarray(y)
             if self.prediction_type == "regression" and not np.issubdtype(y.dtype, np.floating):
                 y = y.astype(np.float32)
 
-            # Detect unlabeled samples depending on task type
+            # ---------------------------------------------------------
+            # STEP 0: detect unlabeled samples
+            # ---------------------------------------------------------
             if self.prediction_type == "classification":
                 if np.issubdtype(y.dtype, np.floating):
-                    # Treat BOTH -1 and NaN as unlabeled (robust)
                     mask_unlabeled = np.isnan(y) | (y == -1)
                 else:
                     mask_unlabeled = (y == -1)
             else:
-                # regression: NaN is unlabeled
                 if not np.issubdtype(y.dtype, np.floating):
                     y = y.astype(np.float32)
                 mask_unlabeled = np.isnan(y)
@@ -178,34 +120,30 @@ def ForestKernel(
             if has_unlabeled and not self.allow_semi_supervised:
                 raise ValueError(
                     "Unlabeled targets were detected in y, but semi-supervised mode is disabled. "
-                    "This transductive proximity heuristic is only enabled when "
-                    "allow_semi_supervised=True."
+                    "Set allow_semi_supervised=True to enable the transductive kernel heuristic."
                 )
 
-            # Preserve original X order through labeled/unlabeled indices
-            self.idx_labeled_ = np.flatnonzero(~mask_unlabeled)
-            self.idx_unlabeled_ = np.flatnonzero(mask_unlabeled)
+            idx_labeled = np.flatnonzero(~mask_unlabeled)
+            idx_unlabeled = np.flatnonzero(mask_unlabeled)
 
+            # ---------------------------------------------------------
+            # STEP 1: build the fitting subset
+            # ---------------------------------------------------------
             if not has_unlabeled:
-                # Case A: Fully supervised
                 X_train = X
                 y_train = y
                 sample_weight_train = sample_weight
             else:
-                # Case B: Semi-supervised (transductive heuristic)
-                X_train = X[self.idx_labeled_]
-                y_train = y[self.idx_labeled_]
+                X_train = X[idx_labeled]
+                y_train = y[idx_labeled]
+                sample_weight_train = (
+                    None if sample_weight is None else np.asarray(sample_weight)[idx_labeled]
+                )
 
-                if sample_weight is not None:
-                    sample_weight_train = np.asarray(sample_weight)[self.idx_labeled_]
-                else:
-                    sample_weight_train = None
-
-            self._n_train_samples = X_train.shape[0]
             self.y = y
 
             # ---------------------------------------------------------
-            # STEP 1: Fit underlying ensemble on labeled data only
+            # STEP 2: fit the underlying ensemble
             # ---------------------------------------------------------
             try:
                 super().fit(X_train, y_train, sample_weight=sample_weight_train)
@@ -217,13 +155,11 @@ def ForestKernel(
                     )
                 super().fit(X_train, y_train)
 
-            # Build ensemble adapter
             self._adapter = make_adapter(self, self.model_type)
 
             # ---------------------------------------------------------
-            # STEP 2: Leaf structure for ALL points (original order)
+            # STEP 3: initialize cache from leaf structure on ALL points
             # ---------------------------------------------------------
-            # NOTE: we compute leaves for ALL points (labeled+unlabeled) in ORIGINAL order.
             leaf_matrix_all = self._adapter.get_leaf_matrix(X)
             n_nodes_per_tree = self._adapter.get_n_nodes_per_tree()
 
@@ -231,142 +167,152 @@ def ForestKernel(
                 leaf_matrix_all=leaf_matrix_all,
                 n_nodes_per_tree=n_nodes_per_tree,
                 n_samples=X.shape[0],
-                idx_labeled=self.idx_labeled_,
-                idx_unlabeled=self.idx_unlabeled_,
+                idx_labeled=idx_labeled,
+                idx_unlabeled=idx_unlabeled,
                 n_train_samples=X_train.shape[0],
             )
 
             # ---------------------------------------------------------
-            # STEP 3: OOB / multiplicity structure
+            # STEP 4: attach OOB / multiplicity structure when needed
             # ---------------------------------------------------------
-            if self.prox_method in ["oob", "gap"]:
-                # NOTE: OOB / in-bag statistics are computed on TRAINING (labeled) samples only
+            if self.method in ["oob", "gap"]:
                 oob_labeled = self._adapter.get_oob_mask(X_train)
 
                 if has_unlabeled:
                     T = self.cache.n_trees
 
-                    # Unlabeled rows are treated as OOB everywhere in the transductive heuristic
+                    # Unlabeled rows are treated as OOB in every tree
                     oob_mask_all = np.ones((self.cache.n_samples, T), dtype=np.int8)
-                    oob_mask_all[self.idx_labeled_, :] = oob_labeled.astype(np.int8)
+                    oob_mask_all[idx_labeled, :] = oob_labeled.astype(np.int8)
 
-                    if self.prox_method == "gap":
-                        # Unlabeled rows follow the phantom-target convention: c_j(t)=1 for all trees
+                    if self.method == "gap":
+                        # Labeled rows keep their observed in-bag counts.
+                        # Unlabeled rows are initialized and later reweighted
+                        # through the GAP-specific target-side surrogates.
                         c_labeled = self._adapter.get_in_bag_counts(X_train).astype(np.float32)
                         c_all = np.ones((self.cache.n_samples, T), dtype=np.float32)
-                        c_all[self.idx_labeled_, :] = c_labeled
+                        c_all[idx_labeled, :] = c_labeled
                     else:
                         c_all = None
                 else:
                     oob_mask_all = oob_labeled.astype(np.int8)
                     c_all = (
                         self._adapter.get_in_bag_counts(X_train).astype(np.float32)
-                        if self.prox_method == "gap"
+                        if self.method == "gap"
                         else None
                     )
 
                 attach_oob_structure(self.cache, oob_mask_all=oob_mask_all, c_all=c_all)
 
             # ---------------------------------------------------------
-            # STEP 4: GBT tree weights
+            # STEP 5: attach tree weights when needed
             # ---------------------------------------------------------
-            if self.prox_method == "gbt":
+            if self.method == "gbt":
                 gbt_tree_weights = self._adapter.get_tree_weights(X_train)
                 attach_gbt_weights(self.cache, gbt_tree_weights)
 
             # ---------------------------------------------------------
-            # STEP 5: Leaf statistics used by specific proximities
+            # STEP 6: attach kernel-specific cached statistics
             # ---------------------------------------------------------
-            # In semi-supervised mode, these are computed from LABELED incidences only,
-            # according to the heuristic implemented in builders.py.
-            if self.prox_method == "kerf":
+            if self.method == "kerf":
                 compute_unit_leaf_mass(self.cache)
 
-            if self.prox_method == "gap":
+            if self.method == "gap":
                 compute_multiplicity_leaf_mass(self.cache)
 
             # ---------------------------------------------------------
-            # STEP 6: Build sparse right factor W
+            # STEP 7: build the reference-side feature map W
             # ---------------------------------------------------------
-            # NOTE: W is built for ALL points directly in original order.
             self.cache.W_mat = build_W_matrix(
                 self.cache,
-                prox_method=self.prox_method,
+                method=self.method,
                 force_nonzero_diag=self.force_nonzero_diag,
             )
 
             return self
 
-        def get_proximities(self):
+        def get_reference_map(self):
             """
-            Computes the proximity matrix P = Q W^T using sparse matrix multiplication.
+            Return the fitted reference-side leaf feature map W.
+            """
+            check_is_fitted(self)
+            return self.cache.W_mat
 
-            Returns
-            -------
-            array-like or csr_matrix
-                Dense or sparse proximity matrix depending on matrix_type.
+        def get_train_query_map(self):
+            """
+            Return the query-side leaf feature map Q on the fitted reference set.
             """
             check_is_fitted(self)
 
-            Q_total = build_Q_matrix(
+            Q_train = build_Q_matrix(
                 self.cache,
-                prox_method=self.prox_method,
+                method=self.method,
                 leaves=self.cache.leaf_matrix_all,
                 is_training=True,
                 force_nonzero_diag=self.force_nonzero_diag,
             )
 
-            # Fast diagonal normalization (Hadamard trick)
             if self.normalize_diagonal and (
-                (self.prox_method == "gap" and self.force_nonzero_diag)
-                or self.prox_method == "kerf"
+                (self.method == "gap" and self.force_nonzero_diag)
+                or self.method == "kerf"
             ):
-                diagonal = Q_total.multiply(self.cache.W_mat).sum(axis=1).A.ravel()
+                diagonal = Q_train.multiply(self.cache.W_mat).sum(axis=1).A.ravel()
                 diagonal[diagonal == 0] = 1.0
-                csr_row_scale_inplace(Q_total, 1.0 / diagonal)
+                csr_row_scale_inplace(Q_train, 1.0 / diagonal)
 
-            # Final sparse multiplication
-            if self.force_symmetric and (
-                self.prox_method == "gap"
-                or (self.prox_method == "kerf" and self.normalize_diagonal)
-            ):
-                prox_matrix = block_symmetrize(Q_total, self.cache.W_mat)
-            else:
-                prox_matrix = Q_total.dot(self.cache.W_mat.T)
+            return Q_train
 
-            return prox_matrix.toarray() if self.matrix_type == "dense" else prox_matrix
-
-        def prox_extend(self, X_new):
+        def get_query_map(self, X_new):
             """
-            Calculates proximities between new data (rows) and the fitted
-            reference data (cols).
-
-            Parameters
-            ----------
-            X_new : array-like of shape (n_samples_new, n_features)
-
-            Returns
-            -------
-            array-like or csr_matrix
-                Proximities between X_new and the fitted reference data.
+            Return the out-of-sample query-side leaf feature map Q(X_new).
             """
             check_is_fitted(self)
 
             leaves_new = self._adapter.get_leaf_matrix(X_new)
-
-            Q_new = build_Q_matrix(
+            return build_Q_matrix(
                 self.cache,
-                prox_method=self.prox_method,
+                method=self.method,
                 leaves=leaves_new,
                 is_training=False,
                 force_nonzero_diag=self.force_nonzero_diag,
             )
 
-            prox_new = Q_new.dot(self.cache.W_mat.T)
-            return prox_new.toarray() if self.matrix_type == "dense" else prox_new
+        def get_kernel_from_query_map(self, Q):
+            """
+            Form a kernel block K = Q W^T from a query-side map Q.
+            """
+            check_is_fitted(self)
+            K = Q.dot(self.cache.W_mat.T)
+            return K.toarray() if self.matrix_type == "dense" else K
+
+        def get_kernel(self):
+            """
+            Return the fitted kernel matrix on the reference set.
+            """
+            check_is_fitted(self)
+
+            Q_train = self.get_train_query_map()
+
+            if self.force_symmetric and (
+                self.method == "gap"
+                or (self.method == "kerf" and self.normalize_diagonal)
+            ):
+                K = block_symmetrize(Q_train, self.cache.W_mat)
+            else:
+                K = Q_train.dot(self.cache.W_mat.T)
+
+            return K.toarray() if self.matrix_type == "dense" else K
+
+        def kernel_extend(self, X_new):
+            """
+            Return the kernel block between X_new and the fitted reference set.
+            """
+            check_is_fitted(self)
+            Q_new = self.get_query_map(X_new)
+            return self.get_kernel_from_query_map(Q_new)
 
     return ForestKernel(
-        prox_method=prox_method,
+        method=method,
         matrix_type=matrix_type,
         force_nonzero_diag=force_nonzero_diag,
         force_symmetric=force_symmetric,

@@ -353,10 +353,10 @@ def gap_impute(x, y, n_iters=10, initialization='median', global_initialization=
     for _ in range(n_iters):
         rf.fit(x_imputed, y)
         scores['oob_scores'].append(rf.oob_score_)
-        proximities = rf.get_proximities()
+        proximities = rf.get_kernel()
 
         if x_test is not None:
-            proximities_test = rf.prox_extend(x_test_imputed)
+            proximities_test = rf.kernel_extend(x_test_imputed)
 
         # TODO: Check not working with regression data
         if internal_check:

@@ -50,15 +50,15 @@ def infer_prediction_type(prediction_type=None, y=None):
         return "classification"
 
 
-def validate_model_configuration(model_type, prox_method, prediction_type):
+def validate_model_configuration(model_type, method, prediction_type):
     """
-    Validate the combination of model type, proximity method, and prediction type.
+    Validate the combination of model type, kernel method, and prediction type.
     """
-    if prox_method == "gbt" and model_type != "gbt":
-        raise ValueError("prox_method='gbt' requires model_type='gbt'")
+    if method == "gbt" and model_type != "gbt":
+        raise ValueError("method='gbt' requires model_type='gbt'")
 
-    if model_type == "gbt" and prox_method != "gbt":
-        raise ValueError("When model_type='gbt', prox_method must be 'gbt'")
+    if model_type == "gbt" and method != "gbt":
+        raise ValueError("When model_type='gbt', method must be 'gbt'")
 
     if model_type == "rotf" and prediction_type != "classification":
         raise ValueError("model_type='rotf' currently supports classification only.")
@@ -88,14 +88,14 @@ def get_base_model(model_type, prediction_type):
     raise ValueError(f"Unsupported model_type='{model_type}'")
 
 
-def sanitize_model_kwargs(model_type, prox_method, kwargs):
+def sanitize_model_kwargs(model_type, method, kwargs):
     """
     Clean / augment kwargs before passing them to the base estimator.
     """
     kwargs = dict(kwargs)
 
-    # OOB- and RF-GAP-based proximities require bootstrap sampling for RF / ET.
-    if prox_method in ["oob", "gap"] and model_type in ["rf", "et"]:
+    # OOB- and RF-GAP-based kernels require bootstrap sampling for RF / ET.
+    if method in ["oob", "gap"] and model_type in ["rf", "et"]:
         kwargs["bootstrap"] = True
 
     # Rotation Forest has a different constructor signature from sklearn forests.

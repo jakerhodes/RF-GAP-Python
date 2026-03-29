@@ -9,7 +9,7 @@ class GAPExtrasMixin:
     
     def prox_predict(self, y):
         
-        prox = self.get_proximities()
+        prox = self.get_kernel()
     
         if self.prediction_type == 'classification':
             y_one_hot = np.zeros((y.size, y.max() + 1))
@@ -51,7 +51,7 @@ class GAPExtrasMixin:
         if self.prediction_type != 'classification':
             raise ValueError("Classification trust scores are only available for classification models")   
         
-        if self.prox_method != 'gap':
+        if self.method != 'gap':
             raise ValueError("Trust scores are only available for RF-GAP proximities")
     
         # Compute out-of-bag probabilities and correctness
@@ -61,7 +61,7 @@ class GAPExtrasMixin:
     
         # Ensure proximities are computed
         if not hasattr(self, "proximities"):
-            proximities_result = self.get_proximities()
+            proximities_result = self.get_kernel()
             self.proximities = proximities_result.toarray() if isinstance(proximities_result, sparse.csr_matrix) else proximities_result
     
         elif isinstance(self.proximities, sparse.csr_matrix):
@@ -114,7 +114,7 @@ class GAPExtrasMixin:
         if self.prediction_type != 'classification':
             raise ValueError("Classification trust scores are only available for classification models")   
     
-        if self.prox_method != 'gap':
+        if self.method != 'gap':
             raise ValueError("Trust scores are only available for RF-GAP proximities")       
     
         # Compute out-of-bag probabilities and correctness
@@ -123,10 +123,10 @@ class GAPExtrasMixin:
         self.is_correct_oob = self.oob_predictions == self.y 
     
         # Ensure proximities are computed properly
-        if not hasattr(self, "prox_extend"):
-            raise AttributeError("The method 'prox_extend' is not defined in this class.")
+        if not hasattr(self, "kernel_extend"):
+            raise AttributeError("The method 'kernel_extend' is not defined in this class.")
     
-        self.test_proximities = self.prox_extend(x_test)
+        self.test_proximities = self.kernel_extend(x_test)
         
         # Convert to dense array if sparse
         if isinstance(self.test_proximities, sparse.csr_matrix):
@@ -188,7 +188,7 @@ class GAPExtrasMixin:
         """
         
         # Validate method applicability
-        if self.prox_method != 'gap':
+        if self.method != 'gap':
             raise ValueError("Prediction intervals are only available for RF-GAP proximities.")
         
         if self.prediction_type == 'classification':
@@ -200,10 +200,10 @@ class GAPExtrasMixin:
         self.interval_level = level
     
         # Retrieve proximities
-        self.proximities: np.ndarray = self.get_proximities().toarray()
+        self.proximities: np.ndarray = self.get_kernel().toarray()
     
         # Compute test proximities
-        test_proximities = self.prox_extend(X_test)
+        test_proximities = self.kernel_extend(X_test)
         if isinstance(test_proximities, sparse.csr_matrix):
             test_proximities = test_proximities.toarray()
     
@@ -305,12 +305,12 @@ class GAPExtrasMixin:
             self.oob_predictions = np.argmax(self.oob_proba, axis=1)
     
             # Use RF-GAP proximities to compute nonconformity scores
-            original_prox_method = self.prox_method
+            original_prox_method = self.method
     
             if proximity_type is not None:
-                self.prox_method = proximity_type
+                self.method = proximity_type
     
-            proximities = self.get_proximities()
+            proximities = self.get_kernel()
     
             # Convert sparse matrix to dense if necessary
             if isinstance(proximities, sparse.csr_matrix):
@@ -356,7 +356,7 @@ class GAPExtrasMixin:
                 self.test_preds = self.predict(x_test)
     
                 # Get the proximities between test samples and training samples (shape n_test, n_train)
-                proximities_test = self.prox_extend(x_test)
+                proximities_test = self.kernel_extend(x_test)
     
                 # Convert sparse matrix to dense if necessary
                 if isinstance(proximities_test, sparse.csr_matrix):
@@ -420,7 +420,7 @@ class GAPExtrasMixin:
     
         finally:
             # Restore the original proximity method
-            self.prox_method = original_prox_method
+            self.method = original_prox_method
     
     
     def accuracy_rejection_auc(self, quantiles: np.ndarray, scores: np.ndarray) -> tuple:
@@ -514,7 +514,7 @@ class GAPExtrasMixin:
             if is_symmetric:
                 self.force_symmetric = False
     
-        proximities = self.get_proximities()
+        proximities = self.get_kernel()
         proximities = proximities.toarray() if isinstance(proximities, sparse.csr_matrix) else proximities
     
         self.force_nonzero_diag = force_nonzero_diag

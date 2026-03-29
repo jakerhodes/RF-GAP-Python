@@ -1,7 +1,7 @@
 import numpy as np
 from scipy import sparse
 
-from .cache import ProximityCache
+from .cache import KernelCache
 
 
 def to_global_leaves(leaf_mat, leaf_offsets):
@@ -32,9 +32,16 @@ def initialize_cache(
     n_train_samples=None,
 ):
     """
-    Initialize the structural part of the proximity cache from a leaf matrix.
+    Initialize the reusable structural part of the kernel cache from
+    a leaf matrix.
+    
+    This includes:
+    - global leaf indexing
+    - flattened sample-tree incidences
+    - semi-supervised row/flat masks
+    - flattened tree ids used by tree-specific GAP surrogates
     """
-    cache = ProximityCache()
+    cache = KernelCache()
     cache.leaf_matrix_all = leaf_matrix_all.astype(np.int32, copy=False)
     cache.n_samples = int(n_samples)
     cache.n_trees = int(leaf_matrix_all.shape[1])
@@ -183,17 +190,17 @@ def compute_multiplicity_leaf_mass(cache):
     return cache
 
 
-def build_W_matrix(cache, prox_method, force_nonzero_diag=False):
+def build_W_matrix(cache, method, force_nonzero_diag=False):
     """
     Builds the Weight Matrix W (N_ref x N_total_nodes_plus_optional_diag).
 
-    This matrix handles the 'j' term (target/reference) in the proximity
+    This matrix handles the 'j' term (target/reference) in the kernel
     definitions.
 
     Parameters
     ----------
-    cache : ProximityCache
-    prox_method : str
+    cache : KernelCache
+    method : str
         One of {'original', 'oob', 'gap', 'kerf', 'gbt'}
     force_nonzero_diag : bool, default=False
         Only relevant for RF-GAP. Whether to inject virtual diagonal
@@ -222,7 +229,7 @@ def build_W_matrix(cache, prox_method, force_nonzero_diag=False):
     #   Use a symmetric factorization with sqrt(1/T) on both sides.
     #   W handles the target/reference side.
     # ---------------------------------------------------------
-    if prox_method == "original":
+    if method == "original":
         scale_factor = np.float32(1.0 / np.sqrt(T))
         weights = np.full(N * T, scale_factor, dtype=np.float32)
 
@@ -233,9 +240,9 @@ def build_W_matrix(cache, prox_method, force_nonzero_diag=False):
     # Mapping:
     #   Use a symmetric factorization with sqrt(w_t) on both sides.
     # ---------------------------------------------------------
-    elif prox_method == "gbt":
+    elif method == "gbt":
         if cache.gbt_tree_weights is None:
-            raise ValueError("cache.gbt_tree_weights is required for prox_method='gbt'.")
+            raise ValueError("cache.gbt_tree_weights is required for method='gbt'.")
         sqrt_w = np.sqrt(cache.gbt_tree_weights).astype(np.float32)
         weights = np.tile(sqrt_w, N)
 
@@ -248,9 +255,9 @@ def build_W_matrix(cache, prox_method, force_nonzero_diag=False):
     #       1/sqrt(T) * 1/sqrt(M_leaf)
     #   on both Q and W.
     # ---------------------------------------------------------
-    elif prox_method == "kerf":
+    elif method == "kerf":
         if cache.inv_sqrt_leaf_mass_unit is None:
-            raise ValueError("cache.inv_sqrt_leaf_mass_unit is required for prox_method='kerf'.")
+            raise ValueError("cache.inv_sqrt_leaf_mass_unit is required for method='kerf'.")
         weights = (1.0 / np.sqrt(T)) * cache.inv_sqrt_leaf_mass_unit[flat_cols]
 
     # ---------------------------------------------------------
@@ -271,9 +278,9 @@ def build_W_matrix(cache, prox_method, force_nonzero_diag=False):
     #
     #   This is done by adding N virtual columns after the real leaf columns.
     # ---------------------------------------------------------
-    elif prox_method == "oob":
+    elif method == "oob":
         if cache.oob_mask_all is None:
-            raise ValueError("cache.oob_mask_all is required for prox_method='oob'.")
+            raise ValueError("cache.oob_mask_all is required for method='oob'.")
 
         # Apply OOB scope on the reference side: keep only OOB trees for each j.
         mask = cache.oob_mask_all.flatten() == 1
@@ -337,11 +344,11 @@ def build_W_matrix(cache, prox_method, force_nonzero_diag=False):
     #     unlabeled diagonal, the private coordinate stores only the
     #     missing correction.
     # ---------------------------------------------------------
-    elif prox_method == "gap":
+    elif method == "gap":
         if cache.c_all is None:
-            raise ValueError("cache.c_all is required for prox_method='gap'.")
+            raise ValueError("cache.c_all is required for method='gap'.")
         if cache.inv_leaf_mass_mult is None:
-            raise ValueError("cache.inv_leaf_mass_mult is required for prox_method='gap'.")
+            raise ValueError("cache.inv_leaf_mass_mult is required for method='gap'.")
 
         has_unlabeled = cache.is_semi_supervised
         needs_private_cols = force_nonzero_diag or has_unlabeled
@@ -382,7 +389,7 @@ def build_W_matrix(cache, prox_method, force_nonzero_diag=False):
                 # Ordinary unlabeled diagonal contributed by the non-private leaf part:
                 #   (1 / |S_i|) * sum_{t in S_i} empirical_mult_all_by_tree[t] / M_i(t)
                 if cache.oob_mask_all is None:
-                    raise ValueError("cache.oob_mask_all is required for training-time prox_method='gap'.")
+                    raise ValueError("cache.oob_mask_all is required for training-time method='gap'.")
 
                 q_mask = cache.oob_mask_all.flatten() == 1
                 q_rows = cache.flat_rows_all[q_mask]
@@ -439,7 +446,7 @@ def build_W_matrix(cache, prox_method, force_nonzero_diag=False):
             weights = np.concatenate([weights, diag_vals])
 
     else:
-        raise ValueError(f"Unknown prox_method='{prox_method}'.")
+        raise ValueError(f"Unknown method='{method}'.")
 
     # Filter zeros and build sparse W
     mask = weights != 0
@@ -453,7 +460,7 @@ def build_W_matrix(cache, prox_method, force_nonzero_diag=False):
 
 def build_Q_matrix(
     cache,
-    prox_method,
+    method,
     leaves=None,
     is_training=True,
     force_nonzero_diag=False,
@@ -466,7 +473,7 @@ def build_Q_matrix(
     Parameters
     ----------
     cache : ProximityCache
-    prox_method : str
+    method : str
         One of {'original', 'oob', 'gap', 'kerf', 'gbt'}
     leaves : ndarray of shape (N_query, T), optional
         Query leaf matrix. If None, uses cache.leaf_matrix_all.
@@ -500,7 +507,7 @@ def build_Q_matrix(
     #   Use the same symmetric factorization as W:
     #       sqrt(1/T)
     # ---------------------------------------------------------
-    if prox_method == "original":
+    if method == "original":
         scale_factor = np.float32(1.0 / np.sqrt(T))
         vals = np.full(N * T, scale_factor, dtype=np.float32)
 
@@ -511,9 +518,9 @@ def build_Q_matrix(
     # Mapping:
     #   Use sqrt(w_t) on the query side too.
     # ---------------------------------------------------------
-    elif prox_method == "gbt":
+    elif method == "gbt":
         if cache.gbt_tree_weights is None:
-            raise ValueError("cache.gbt_tree_weights is required for prox_method='gbt'.")
+            raise ValueError("cache.gbt_tree_weights is required for method='gbt'.")
         sqrt_w = np.sqrt(cache.gbt_tree_weights).astype(np.float32)
         vals = np.tile(sqrt_w, N)
 
@@ -525,9 +532,9 @@ def build_Q_matrix(
     #   Same symmetric factorization as W:
     #       1/sqrt(T) * 1/sqrt(M_leaf)
     # ---------------------------------------------------------
-    elif prox_method == "kerf":
+    elif method == "kerf":
         if cache.inv_sqrt_leaf_mass_unit is None:
-            raise ValueError("cache.inv_sqrt_leaf_mass_unit is required for prox_method='kerf'.")
+            raise ValueError("cache.inv_sqrt_leaf_mass_unit is required for method='kerf'.")
         vals = (1.0 / np.sqrt(T)) * cache.inv_sqrt_leaf_mass_unit[flat_cols]
 
     # ---------------------------------------------------------
@@ -544,10 +551,10 @@ def build_Q_matrix(
     # If is_training=False:
     #   By convention, new points are treated as OOB for all trees, so |S_i| = T.
     # ---------------------------------------------------------
-    elif prox_method == "oob":
+    elif method == "oob":
         if is_training:
             if cache.oob_mask_all is None:
-                raise ValueError("cache.oob_mask_all is required for training-time prox_method='oob'.")
+                raise ValueError("cache.oob_mask_all is required for training-time method='oob'.")
 
             # Apply OOB scope on the query side: keep only OOB trees for each i.
             mask = cache.oob_mask_all.flatten() == 1
@@ -605,7 +612,7 @@ def build_Q_matrix(
     #     empirical unconditional surrogate empirical_mult_all_by_tree[t]
     #     on the target side.
     # ---------------------------------------------------------
-    elif prox_method == "gap":
+    elif method == "gap":
         has_unlabeled = cache.is_semi_supervised
         needs_private_cols = force_nonzero_diag or has_unlabeled
 
@@ -616,7 +623,7 @@ def build_Q_matrix(
         # ----- Ordinary query-side term -----
         if is_training:
             if cache.oob_mask_all is None:
-                raise ValueError("cache.oob_mask_all is required for training-time prox_method='gap'.")
+                raise ValueError("cache.oob_mask_all is required for training-time method='gap'.")
 
             mask = cache.oob_mask_all.flatten() == 1
             flat_rows = flat_rows[mask]
@@ -661,7 +668,7 @@ def build_Q_matrix(
             vals = np.concatenate([vals, diag_vals])
 
     else:
-        raise ValueError(f"Unknown prox_method='{prox_method}'.")
+        raise ValueError(f"Unknown method='{method}'.")
 
     # Filter zeros and build sparse Q
     mask = vals != 0

@@ -17,7 +17,7 @@ def csr_row_scale_inplace(A, scale):
 
 def block_symmetrize(Q, W):
     """
-    Computes symmetric proximity P using optimized sparse strategies.
+    Computes symmetric 'kernel' P using optimized sparse strategies.
 
     P = 0.5 * (Q W^T + W Q^T)
       = 0.5 * [Q, W] [W^T; Q^T]
