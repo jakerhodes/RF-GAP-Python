@@ -47,11 +47,8 @@ class KernelCache:
     # ------------------------------------------------------------------
     # Leaf masses
     # ------------------------------------------------------------------
-    leaf_mass_unit: Optional[np.ndarray] = None
-    inv_sqrt_leaf_mass_unit: Optional[np.ndarray] = None
-
-    leaf_mass_mult: Optional[np.ndarray] = None
-    inv_leaf_mass_mult: Optional[np.ndarray] = None
+    inv_sqrt_leaf_mass: Optional[np.ndarray] = None
+    inv_inbag_leaf_mass: Optional[np.ndarray] = None
 
     # ------------------------------------------------------------------
     # GAP-specific semi-supervised target surrogates

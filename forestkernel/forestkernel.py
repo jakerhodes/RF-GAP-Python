@@ -1,5 +1,4 @@
 import numpy as np
-import warnings
 
 from sklearn.utils.validation import check_is_fitted
 
@@ -13,14 +12,20 @@ from .config import (
 from .adapters import make_adapter
 from .kernel import (
     initialize_cache,
-    attach_oob_structure,
+    attach_bootstrap_stats,
     attach_gbt_weights,
-    compute_unit_leaf_mass,
-    compute_multiplicity_leaf_mass,
+    attach_inv_sqrt_leaf_mass,
+    attach_inv_inbag_leaf_mass,
+    attach_unlabeled_multiplicity_surrogates,
     build_W_matrix,
     build_Q_matrix,
     csr_row_scale_inplace,
     block_symmetrize,
+)
+from .fit_utils import (
+    prepare_targets,
+    detect_unlabeled,
+    split_labeled_data,
 )
 
 
@@ -59,7 +64,10 @@ def ForestKernel(
         prediction_type=prediction_type,
         kwargs=kwargs,
     )
-    base_model = get_base_model(model_type=model_type, prediction_type=prediction_type)
+    base_model = get_base_model(
+        model_type=model_type,
+        prediction_type=prediction_type,
+    )
     validate_model_kwargs(base_model, kwargs)
 
     class ForestKernel(GAPExtrasMixin, base_model):
@@ -88,7 +96,7 @@ def ForestKernel(
             self.cache = None
             self._adapter = None
 
-        def fit(self, X, y, sample_weight=None):
+        def fit(self, X, y, **fit_kwargs):
             """
             Fit the ensemble and precompute the reference-side leaf map W.
 
@@ -96,24 +104,16 @@ def ForestKernel(
             ensemble fit, but retained in the reference set used for kernel
             construction through the transductive heuristic implemented in
             builders.py.
+
+            Additional keyword arguments are forwarded to the underlying base
+            estimator fit() method. In semi-supervised mode, sample-aligned
+            fit kwargs are restricted to labeled rows.
             """
-            y = np.asarray(y)
-            if self.prediction_type == "regression" and not np.issubdtype(y.dtype, np.floating):
-                y = y.astype(np.float32)
-
             # ---------------------------------------------------------
-            # STEP 0: detect unlabeled samples
+            # STEP 0: prepare targets and detect unlabeled samples
             # ---------------------------------------------------------
-            if self.prediction_type == "classification":
-                if np.issubdtype(y.dtype, np.floating):
-                    mask_unlabeled = np.isnan(y) | (y == -1)
-                else:
-                    mask_unlabeled = (y == -1)
-            else:
-                if not np.issubdtype(y.dtype, np.floating):
-                    y = y.astype(np.float32)
-                mask_unlabeled = np.isnan(y)
-
+            y = prepare_targets(y, self.prediction_type)
+            mask_unlabeled = detect_unlabeled(y, self.prediction_type)
             has_unlabeled = bool(np.any(mask_unlabeled))
 
             if has_unlabeled:
@@ -129,38 +129,29 @@ def ForestKernel(
                         "because it relies on signed private correction coordinates."
                     )
 
-            idx_labeled = np.flatnonzero(~mask_unlabeled)
-            idx_unlabeled = np.flatnonzero(mask_unlabeled)
-
             # ---------------------------------------------------------
             # STEP 1: build the fitting subset
             # ---------------------------------------------------------
-            if not has_unlabeled:
-                X_train = X
-                y_train = y
-                sample_weight_train = sample_weight
-            else:
-                X_train = X[idx_labeled]
-                y_train = y[idx_labeled]
-                sample_weight_train = (
-                    None if sample_weight is None else np.asarray(sample_weight)[idx_labeled]
-                )
+            (
+                X_train,
+                y_train,
+                fit_kwargs_train,
+                idx_labeled,
+                idx_unlabeled,
+                has_unlabeled,
+            ) = split_labeled_data(
+                X=X,
+                y=y,
+                fit_kwargs=fit_kwargs,
+                mask_unlabeled=mask_unlabeled,
+            )
 
             self.y = y
 
             # ---------------------------------------------------------
             # STEP 2: fit the underlying ensemble
             # ---------------------------------------------------------
-            try:
-                super().fit(X_train, y_train, sample_weight=sample_weight_train)
-            except TypeError:
-                if sample_weight_train is not None:
-                    warnings.warn(
-                        "sample_weight was provided but is ignored because the selected "
-                        "base model does not support it."
-                    )
-                super().fit(X_train, y_train)
-
+            super().fit(X_train, y_train, **fit_kwargs_train)
             self._adapter = make_adapter(self, self.model_type)
 
             # ---------------------------------------------------------
@@ -179,7 +170,7 @@ def ForestKernel(
             )
 
             # ---------------------------------------------------------
-            # STEP 4: attach OOB / multiplicity structure when needed
+            # STEP 4: attach OOB / multiplicity structure to cache when needed
             # ---------------------------------------------------------
             if self.kernel_method in ["oob", "gap"]:
                 oob_labeled = self._adapter.get_oob_mask(X_train)
@@ -187,16 +178,16 @@ def ForestKernel(
                 if has_unlabeled:
                     T = self.cache.n_trees
 
-                    # Unlabeled rows are treated as OOB in every tree
+                    # Unlabeled rows are treated as OOB in every tree, so the OOB mask is initialized with ones and then labeled rows are filled in.
                     oob_mask_all = np.ones((self.cache.n_samples, T), dtype=np.int8)
                     oob_mask_all[idx_labeled, :] = oob_labeled.astype(np.int8)
 
                     if self.kernel_method == "gap":
-                        # Unlabeled rows are initialized with placeholder unit counts.
+                        # Unlabeled rows are initialized with placeholder zeros.
                         # The GAP builders later replace these target-side values using
                         # the cached treewise surrogates.
                         c_labeled = self._adapter.get_in_bag_counts(X_train).astype(np.float32)
-                        c_all = np.ones((self.cache.n_samples, T), dtype=np.float32)
+                        c_all = np.zeros((self.cache.n_samples, T), dtype=np.float32)
                         c_all[idx_labeled, :] = c_labeled
                     else:
                         c_all = None
@@ -208,7 +199,11 @@ def ForestKernel(
                         else None
                     )
 
-                attach_oob_structure(self.cache, oob_mask_all=oob_mask_all, c_all=c_all)
+                attach_bootstrap_stats(
+                    self.cache,
+                    oob_mask_all=oob_mask_all,
+                    c_all=c_all,
+                )
 
             # ---------------------------------------------------------
             # STEP 5: attach tree weights when needed
@@ -221,10 +216,13 @@ def ForestKernel(
             # STEP 6: attach kernel-specific cached statistics
             # ---------------------------------------------------------
             if self.kernel_method == "kerf":
-                compute_unit_leaf_mass(self.cache)
+                attach_inv_sqrt_leaf_mass(self.cache)
 
             if self.kernel_method == "gap":
-                compute_multiplicity_leaf_mass(self.cache)
+                attach_inv_inbag_leaf_mass(self.cache)
+            
+                if has_unlabeled:
+                    attach_unlabeled_multiplicity_surrogates(self.cache)
 
             # ---------------------------------------------------------
             # STEP 7: build the reference-side feature map W

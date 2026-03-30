@@ -80,7 +80,7 @@ def initialize_cache(
     return cache
 
 
-def attach_oob_structure(cache, oob_mask_all, c_all=None):
+def attach_bootstrap_stats(cache, oob_mask_all, c_all=None):
     """
     Attach OOB and optional multiplicity information to an existing cache.
     """
@@ -98,9 +98,9 @@ def attach_gbt_weights(cache, gbt_tree_weights):
     return cache
 
 
-def compute_unit_leaf_mass(cache):
+def attach_inv_sqrt_leaf_mass(cache):
     """
-    Precompute unit leaf mass statistics used by KeRF.
+    Attach inverse square-root unit leaf-mass statistics used by KeRF.
 
     In semi-supervised mode, only labeled sample-tree incidences contribute
     to the leaf mass. This matches the old transductive heuristic.
@@ -111,34 +111,25 @@ def compute_unit_leaf_mass(cache):
         labeled_incidence_mask = cache.flat_is_labeled
         flat_cols = cache.flat_cols_all[labeled_incidence_mask]
 
-    cache.leaf_mass_unit = np.bincount(
+    leaf_mass = np.bincount(
         flat_cols,
-        minlength=cache.total_unique_nodes
+        minlength=cache.total_unique_nodes,
     ).astype(np.float32)
 
     with np.errstate(divide="ignore", invalid="ignore"):
-        cache.inv_sqrt_leaf_mass_unit = 1.0 / np.sqrt(cache.leaf_mass_unit)
-    cache.inv_sqrt_leaf_mass_unit[~np.isfinite(cache.inv_sqrt_leaf_mass_unit)] = 0.0
+        cache.inv_sqrt_leaf_mass_unit = 1.0 / np.sqrt(leaf_mass)
+    cache.inv_sqrt_leaf_mass[~np.isfinite(cache.inv_sqrt_leaf_mass)] = 0.0
 
     return cache
 
 
-def compute_multiplicity_leaf_mass(cache):
+def attach_inv_inbag_leaf_mass(cache):
     """
-    Precompute multiplicity leaf-mass statistics used by RF-GAP.
+    Attach inverse multiplicity leaf-mass statistics used by GAP.
 
     In semi-supervised mode, only labeled sample-tree incidences contribute
-    to the denominator leaf mass, even though c_all is defined for all points.
-
-    For unlabeled phantom targets, we use the following surrogates:
-
-    - empirical_mult_all_by_tree[t]
-      average multiplicity among all labeled samples in tree t,
-      used for the ordinary unlabeled off-diagonal target contribution
-
-    - empirical_mult_inbag_by_tree[t]
-      average multiplicity among in-bag labeled samples in tree t,
-      used for the unlabeled diagonal target
+    to the denominator leaf mass, even though c_all may be defined on all
+    reference points.
     """
     if cache.c_all is None:
         raise ValueError("cache.c_all is required to compute multiplicity leaf mass.")
@@ -152,40 +143,70 @@ def compute_multiplicity_leaf_mass(cache):
         weights = c_flat.copy()
         weights[~cache.flat_is_labeled] = 0.0
 
-    cache.leaf_mass_mult = np.bincount(
+    inbag_leaf_mass = np.bincount(
         cache.flat_cols_all,
         weights=weights,
-        minlength=cache.total_unique_nodes
+        minlength=cache.total_unique_nodes,
     ).astype(np.float32)
 
     with np.errstate(divide="ignore", invalid="ignore"):
-        cache.inv_leaf_mass_mult = 1.0 / cache.leaf_mass_mult
-    cache.inv_leaf_mass_mult[~np.isfinite(cache.inv_leaf_mass_mult)] = 0.0
+        cache.inv_inbag_leaf_mass = 1.0 / inbag_leaf_mass
+    cache.inv_inbag_leaf_mass[~np.isfinite(cache.inv_inbag_leaf_mass)] = 0.0
 
-    T = cache.n_trees
+    return cache
 
-    if cache.idx_labeled is not None and len(cache.idx_labeled) > 0:
-        c_labeled = c_all[cache.idx_labeled]
 
-        # Per-tree average multiplicity among all labeled samples,
-        # used for the ordinary unlabeled off-diagonal target contribution
-        cache.empirical_mult_all_by_tree = c_labeled.mean(axis=0).astype(np.float32)
+def attach_unlabeled_multiplicity_surrogates(cache):
+    """
+    Precompute empirical treewise multiplicity surrogates for unlabeled
+    phantom targets in semi-supervised GAP.
 
-        # Per-tree average multiplicity among in-bag labeled samples,
-        # used only for the unlabeled diagonal target
-        inbag_mask = c_labeled > 0
-        inbag_counts = inbag_mask.sum(axis=0).astype(np.float32)
-        inbag_sums = c_labeled.sum(axis=0).astype(np.float32)
+    The following surrogates are stored:
 
-        empirical_mult_inbag_by_tree = np.ones(T, dtype=np.float32)
-        positive = inbag_counts > 0
-        empirical_mult_inbag_by_tree[positive] = (
-            inbag_sums[positive] / inbag_counts[positive]
+    - empirical_mult_all_by_tree[t]
+      average multiplicity among labeled samples in tree t,
+      used for ordinary unlabeled off-diagonal target contributions
+
+    - empirical_mult_inbag_by_tree[t]
+      average multiplicity among in-bag labeled samples in tree t,
+      used only for the unlabeled diagonal adjustment when
+      force_nonzero_diag=True
+    """
+    if cache.c_all is None:
+        raise ValueError(
+            "cache.c_all is required to compute unlabeled multiplicity surrogates."
         )
-        cache.empirical_mult_inbag_by_tree = empirical_mult_inbag_by_tree
-    else:
-        cache.empirical_mult_all_by_tree = np.ones(T, dtype=np.float32)
-        cache.empirical_mult_inbag_by_tree = np.ones(T, dtype=np.float32)
+
+    if not cache.is_semi_supervised:
+        raise ValueError(
+            "Unlabeled multiplicity surrogates are only defined in semi-supervised GAP."
+        )
+
+    if cache.idx_labeled is None or len(cache.idx_labeled) == 0:
+        raise ValueError(
+            "Semi-supervised GAP requires at least one labeled sample to compute "
+            "empirical unlabeled multiplicity surrogates."
+        )
+
+    c_labeled = cache.c_all[cache.idx_labeled].astype(np.float32, copy=False)
+
+    # Ordinary unlabeled target surrogate
+    cache.empirical_mult_all_by_tree = c_labeled.mean(axis=0).astype(np.float32)
+
+    # Diagonal-only unlabeled surrogate
+    inbag_mask = c_labeled > 0
+    inbag_counts = inbag_mask.sum(axis=0).astype(np.float32)
+    inbag_sums = c_labeled.sum(axis=0).astype(np.float32)
+
+    if np.any(inbag_counts == 0):
+        raise ValueError(
+            "Cannot compute empirical_mult_inbag_by_tree because at least one tree "
+            "has no labeled in-bag samples."
+        )
+
+    cache.empirical_mult_inbag_by_tree = (
+        inbag_sums / inbag_counts
+    ).astype(np.float32)
 
     return cache
 
@@ -203,7 +224,7 @@ def build_W_matrix(cache, kernel_method, force_nonzero_diag=False):
     kernel_method : str
         One of {'original', 'oob', 'gap', 'kerf', 'gbt'}
     force_nonzero_diag : bool, default=False
-        Only relevant for RF-GAP. Whether to inject virtual diagonal
+        Only relevant for GAP. Whether to inject virtual diagonal
         coordinates to restore non-zero self-similarities.
 
     Returns
@@ -256,9 +277,9 @@ def build_W_matrix(cache, kernel_method, force_nonzero_diag=False):
     #   on both Q and W.
     # ---------------------------------------------------------
     elif kernel_method == "kerf":
-        if cache.inv_sqrt_leaf_mass_unit is None:
-            raise ValueError("cache.inv_sqrt_leaf_mass_unit is required for kernel_method='kerf'.")
-        weights = (1.0 / np.sqrt(T)) * cache.inv_sqrt_leaf_mass_unit[flat_cols]
+        if cache.inv_sqrt_leaf_mass is None:
+            raise ValueError("cache.inv_sqrt_leaf_mass is required for kernel_method='kerf'.")
+        weights = (1.0 / np.sqrt(T)) * cache.inv_sqrt_leaf_mass[flat_cols]
 
     # ---------------------------------------------------------
     # OOB PROXIMITY (separable approximation)
@@ -307,7 +328,7 @@ def build_W_matrix(cache, kernel_method, force_nonzero_diag=False):
         total_cols += N
 
     # ---------------------------------------------------------
-    # RF-GAP PROXIMITY
+    # GAP PROXIMITY
     #
     # Ordinary leaf term:
     #   W stores the target-side factor
@@ -346,8 +367,8 @@ def build_W_matrix(cache, kernel_method, force_nonzero_diag=False):
     elif kernel_method == "gap":
         if cache.c_all is None:
             raise ValueError("cache.c_all is required for kernel_method='gap'.")
-        if cache.inv_leaf_mass_mult is None:
-            raise ValueError("cache.inv_leaf_mass_mult is required for kernel_method='gap'.")
+        if cache.inv_inbag_leaf_mass is None:
+            raise ValueError("cache.inv_inbag_leaf_mass is required for kernel_method='gap'.")
         if cache.is_semi_supervised and not force_nonzero_diag:
             raise ValueError(
                 "Semi-supervised GAP with force_nonzero_diag=False is not supported."
@@ -362,7 +383,7 @@ def build_W_matrix(cache, kernel_method, force_nonzero_diag=False):
                 cache.flat_tree_ids[cache.flat_is_unlabeled]
             ]
 
-        weights = c_j_t * cache.inv_leaf_mass_mult[flat_cols]
+        weights = c_j_t * cache.inv_inbag_leaf_mass[flat_cols]
 
         # ----- Private diagonal correction -----
         if force_nonzero_diag:
@@ -381,7 +402,7 @@ def build_W_matrix(cache, kernel_method, force_nonzero_diag=False):
                 #   (1/T) * sum_t empirical_mult_inbag_by_tree[t] / M_i(t)
                 desired_unl_diag_all = np.bincount(
                     flat_rows,
-                    weights=cache.empirical_mult_inbag_by_tree[cache.flat_tree_ids] * cache.inv_leaf_mass_mult[flat_cols],
+                    weights=cache.empirical_mult_inbag_by_tree[cache.flat_tree_ids] * cache.inv_inbag_leaf_mass[flat_cols],
                     minlength=N
                 ).astype(np.float32) / np.float32(T)
                 desired_unl_diag = desired_unl_diag_all[unl]
@@ -402,7 +423,7 @@ def build_W_matrix(cache, kernel_method, force_nonzero_diag=False):
 
                 ordinary_unl_diag = np.bincount(
                     q_rows,
-                    weights=q_vals * cache.empirical_mult_all_by_tree[q_tree_ids] * cache.inv_leaf_mass_mult[q_cols],
+                    weights=q_vals * cache.empirical_mult_all_by_tree[q_tree_ids] * cache.inv_inbag_leaf_mass[q_cols],
                     minlength=N
                 ).astype(np.float32)[unl]
 
@@ -461,7 +482,7 @@ def build_Q_matrix(
         Whether the query points are the same as the fitted reference points.
         Relevant for OOB and GAP.
     force_nonzero_diag : bool, default=False
-        Only relevant for RF-GAP.
+        Only relevant for GAP.
 
     Returns
     -------
@@ -513,9 +534,9 @@ def build_Q_matrix(
     #       1/sqrt(T) * 1/sqrt(M_leaf)
     # ---------------------------------------------------------
     elif kernel_method == "kerf":
-        if cache.inv_sqrt_leaf_mass_unit is None:
-            raise ValueError("cache.inv_sqrt_leaf_mass_unit is required for kernel_method='kerf'.")
-        vals = (1.0 / np.sqrt(T)) * cache.inv_sqrt_leaf_mass_unit[flat_cols]
+        if cache.inv_sqrt_leaf_mass is None:
+            raise ValueError("cache.inv_sqrt_leaf_mass is required for kernel_method='kerf'.")
+        vals = (1.0 / np.sqrt(T)) * cache.inv_sqrt_leaf_mass[flat_cols]
 
     # ---------------------------------------------------------
     # OOB PROXIMITY (separable approximation)
@@ -567,7 +588,7 @@ def build_Q_matrix(
             total_cols += cache.n_samples
 
     # ---------------------------------------------------------
-    # RF-GAP PROXIMITY
+    # GAP PROXIMITY
     #
     # Ordinary query term:
     #   Q stores only the query-side normalization
