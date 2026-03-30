@@ -88,3 +88,69 @@ def split_labeled_data(X, y, fit_kwargs, mask_unlabeled):
         )
 
     return X_train, y_train, fit_kwargs_train, idx_labeled, idx_unlabeled, has_unlabeled
+
+
+def prepare_fit_inputs(
+    X,
+    y,
+    fit_kwargs,
+    prediction_type,
+):
+    """
+    Prepare targets, detect unlabeled samples, and build the labeled fitting subset used by the underlying
+    ensemble.
+
+    Parameters
+    ----------
+    X : array-like of shape (n_samples, n_features)
+        Input data.
+
+    y : array-like
+        Target values.
+
+    fit_kwargs : dict
+        Keyword arguments intended for the underlying estimator fit() call.
+
+    prediction_type : str
+        One of {'classification', 'regression'}.
+
+    Returns
+    -------
+    dict
+        Dictionary containing:
+        - X
+        - y
+        - X_train
+        - y_train
+        - fit_kwargs_train
+        - idx_labeled
+        - idx_unlabeled
+        - has_unlabeled
+    """
+    y = prepare_targets(y, prediction_type)
+    mask_unlabeled = detect_unlabeled(y, prediction_type)
+    has_unlabeled = bool(np.any(mask_unlabeled))
+    (
+        X_train,
+        y_train,
+        fit_kwargs_train,
+        idx_labeled,
+        idx_unlabeled,
+        has_unlabeled,
+    ) = split_labeled_data(
+        X=X,
+        y=y,
+        fit_kwargs=fit_kwargs,
+        mask_unlabeled=mask_unlabeled,
+    )
+
+    return {
+        "X": X,
+        "y": y,
+        "X_train": X_train,
+        "y_train": y_train,
+        "fit_kwargs_train": fit_kwargs_train,
+        "idx_labeled": idx_labeled,
+        "idx_unlabeled": idx_unlabeled,
+        "has_unlabeled": has_unlabeled,
+    }

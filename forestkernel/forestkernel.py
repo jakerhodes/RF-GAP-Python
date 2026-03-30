@@ -22,11 +22,7 @@ from .kernel import (
     csr_row_scale_inplace,
     block_symmetrize,
 )
-from .fit_utils import (
-    prepare_targets,
-    detect_unlabeled,
-    split_labeled_data,
-)
+from .fit_utils import prepare_fit_inputs
 
 
 def ForestKernel(
@@ -95,28 +91,23 @@ def ForestKernel(
             # Kernel internals
             self.cache = None
             self._adapter = None
+            self.y = None
 
-        def fit(self, X, y, **fit_kwargs):
+
+        def fit_forest(self, X, y, **fit_kwargs):
             """
-            Fit the ensemble and precompute the reference-side leaf map W.
+            Fit only the underlying ensemble, without building kernel metadata.
 
-            In semi-supervised mode, unlabeled samples are excluded from the
-            ensemble fit, but retained in the reference set used for kernel
-            construction through the transductive heuristic implemented in
-            builders.py.
-
-            Additional keyword arguments are forwarded to the underlying base
-            estimator fit() method. In semi-supervised mode, sample-aligned
-            fit kwargs are restricted to labeled rows.
+            Useful for benchmarking forest fitting separately from kernel
+            preprocessing.
             """
-            # ---------------------------------------------------------
-            # STEP 0: prepare targets and detect unlabeled samples
-            # ---------------------------------------------------------
-            y = prepare_targets(y, self.prediction_type)
-            mask_unlabeled = detect_unlabeled(y, self.prediction_type)
-            has_unlabeled = bool(np.any(mask_unlabeled))
-
-            if has_unlabeled:
+            fit_data = prepare_fit_inputs(
+                X=X,
+                y=y,
+                fit_kwargs=fit_kwargs,
+                prediction_type=self.prediction_type,
+            )
+            if fit_data["has_unlabeled"]:
                 if not self.allow_semi_supervised:
                     raise ValueError(
                         "Unlabeled targets were detected in y, but semi-supervised mode is disabled. "
@@ -128,34 +119,42 @@ def ForestKernel(
                         "The zero-diagonal semi-supervised GAP variant is not supported "
                         "because it relies on signed private correction coordinates."
                     )
+                
+            self.y = fit_data["y"]
 
-            # ---------------------------------------------------------
-            # STEP 1: build the fitting subset
-            # ---------------------------------------------------------
-            (
-                X_train,
-                y_train,
-                fit_kwargs_train,
-                idx_labeled,
-                idx_unlabeled,
-                has_unlabeled,
-            ) = split_labeled_data(
-                X=X,
-                y=y,
-                fit_kwargs=fit_kwargs,
-                mask_unlabeled=mask_unlabeled,
+            super().fit(
+                fit_data["X_train"],
+                fit_data["y_train"],
+                **fit_data["fit_kwargs_train"],
             )
-
-            self.y = y
-
-            # ---------------------------------------------------------
-            # STEP 2: fit the underlying ensemble
-            # ---------------------------------------------------------
-            super().fit(X_train, y_train, **fit_kwargs_train)
             self._adapter = make_adapter(self, self.model_type)
 
+            return {
+                "X": fit_data["X"],
+                "X_train": fit_data["X_train"],
+                "idx_labeled": fit_data["idx_labeled"],
+                "idx_unlabeled": fit_data["idx_unlabeled"],
+                "has_unlabeled": fit_data["has_unlabeled"],
+            }
+
+        def build_kernel_cache(
+            self,
+            X,
+            X_train,
+            idx_labeled,
+            idx_unlabeled,
+            has_unlabeled,
+        ):
+            """
+            Build all post-fit kernel metadata and the reference-side leaf map W.
+
+            Useful for benchmarking kernel preprocessing separately from
+            forest fitting.
+            """
+            check_is_fitted(self)
+
             # ---------------------------------------------------------
-            # STEP 3: initialize cache from leaf structure on ALL points
+            # STEP 1: initialize cache from leaf structure on ALL points
             # ---------------------------------------------------------
             leaf_matrix_all = self._adapter.get_leaf_matrix(X)
             n_nodes_per_tree = self._adapter.get_n_nodes_per_tree()
@@ -170,7 +169,7 @@ def ForestKernel(
             )
 
             # ---------------------------------------------------------
-            # STEP 4: attach OOB / multiplicity structure to cache when needed
+            # STEP 2: attach OOB / multiplicity structure to cache when needed
             # ---------------------------------------------------------
             if self.kernel_method in ["oob", "gap"]:
                 oob_labeled = self._adapter.get_oob_mask(X_train)
@@ -206,26 +205,26 @@ def ForestKernel(
                 )
 
             # ---------------------------------------------------------
-            # STEP 5: attach tree weights when needed
+            # STEP 3: attach tree weights when needed
             # ---------------------------------------------------------
             if self.kernel_method == "gbt":
                 gbt_tree_weights = self._adapter.get_tree_weights(X_train)
                 attach_gbt_weights(self.cache, gbt_tree_weights)
 
             # ---------------------------------------------------------
-            # STEP 6: attach kernel-specific cached statistics
+            # STEP 4: attach kernel-specific cached statistics
             # ---------------------------------------------------------
             if self.kernel_method == "kerf":
                 attach_inv_sqrt_leaf_mass(self.cache)
 
             if self.kernel_method == "gap":
                 attach_inv_inbag_leaf_mass(self.cache)
-            
+
                 if has_unlabeled:
                     attach_unlabeled_multiplicity_surrogates(self.cache)
 
             # ---------------------------------------------------------
-            # STEP 7: build the reference-side feature map W
+            # STEP 5: build the reference-side feature map W
             # ---------------------------------------------------------
             self.cache.W_mat = build_W_matrix(
                 self.cache,
@@ -233,6 +232,23 @@ def ForestKernel(
                 force_nonzero_diag=self.force_nonzero_diag,
             )
 
+            return self
+
+        def fit(self, X, y, **fit_kwargs):
+            """
+            Fit the ensemble and precompute the reference-side leaf map W.
+
+            In semi-supervised mode, unlabeled samples are excluded from the
+            ensemble fit, but retained in the reference set used for kernel
+            construction through the transductive heuristic implemented in
+            builders.py.
+
+            Additional keyword arguments are forwarded to the underlying base
+            estimator fit() method. In semi-supervised mode, sample-aligned
+            fit kwargs are restricted to labeled rows.
+            """
+            fit_context = self.fit_forest(X, y, **fit_kwargs)
+            self.build_kernel_cache(**fit_context)
             return self
 
         def get_reference_map(self):
