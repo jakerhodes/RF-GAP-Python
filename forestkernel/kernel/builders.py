@@ -586,30 +586,27 @@ def build_Q_matrix(
     # GAP PROXIMITY
     #
     # Ordinary query term:
-    #   Q stores only the query-side averaging factor
+    #   Q stores only the query-side normalization
     #
     #       1 / |S_i|
     #
     #   where S_i is:
-    #   - the OOB set of query sample i during training-time construction
-    #   - all trees for out-of-sample extension points
+    #   - the OOB set of sample i during training
+    #   - all trees for extension points
     #
-    # Private diagonal coordinates:
-    #   When force_nonzero_diag=True, W contains an additional private
-    #   coordinate for each training sample. These coordinates are used
-    #   only to correct the training diagonal.
-    #
-    #   Therefore:
-    #   - for training-time Q, we append matching private coordinates
-    #     with value 1 on row i so that QW^T reproduces the corrected
-    #     training diagonal
-    #   - for OOS Q, we keep the same total number of columns
-    #     (N_leaves + N_train), but the private coordinates are left at 0,
-    #     since a new point should not activate any training-sample-private
-    #     diagonal correction feature
+    # Private diagonal term:
+    #   These private coordinates must match the extra columns created in W.
     #
     #   - Semi-supervised GAP with force_nonzero_diag=False is currently
     #     not supported at the API level.
+    #
+    #   - If force_nonzero_diag=True, Q places value 1 on all private
+    #     coordinates for training points, and W determines the final
+    #     diagonal magnitude.
+    #
+    #   - For OOS points, the ambient feature dimension must still match W,
+    #     so we keep the extra private-diagonal columns in the shape, but
+    #     OOS queries do not activate them.
     # ---------------------------------------------------------
     elif kernel_method == "gap":
         if cache.is_semi_supervised and not force_nonzero_diag:
@@ -617,16 +614,10 @@ def build_Q_matrix(
                 "Semi-supervised GAP with force_nonzero_diag=False is not supported."
             )
     
-        if force_nonzero_diag:
-            total_cols = cache.total_unique_nodes + cache.n_samples
-        else:
-            total_cols = cache.total_unique_nodes
-    
+        # ----- Ordinary query-side term -----
         if is_training:
             if cache.oob_mask_all is None:
-                raise ValueError(
-                    "cache.oob_mask_all is required for training-time kernel_method='gap'."
-                )
+                raise ValueError("cache.oob_mask_all is required for training-time kernel_method='gap'.")
     
             mask = cache.oob_mask_all.flatten() == 1
             flat_rows = flat_rows[mask]
@@ -636,7 +627,10 @@ def build_Q_matrix(
             S_i_counts[S_i_counts == 0] = 1.0
             vals = (1.0 / S_i_counts[flat_rows]).astype(np.float32)
     
+            # ----- Final assembly -----
             if force_nonzero_diag:
+                total_cols += cache.n_samples
+    
                 diag_rows = np.arange(N, dtype=np.int64)
                 diag_cols = diag_rows + cache.diag_offset
                 diag_vals = np.ones(N, dtype=np.float32)
@@ -648,9 +642,13 @@ def build_Q_matrix(
         else:
             # OOS: average over all trees
             vals = np.full(N * T, 1.0 / T, dtype=np.float32)
+    
             # IMPORTANT:
-            # keep total_cols = N_leaves + N_train if force_nonzero_diag=True,
-            # but do NOT add any private diagonal coordinates for OOS points.
+            # keep the same ambient feature dimension as W when
+            # force_nonzero_diag=True, but do NOT activate any private
+            # diagonal coordinates for OOS points.
+            if force_nonzero_diag:
+                total_cols += cache.n_samples
 
     else:
         raise ValueError(f"Unknown kernel_method='{kernel_method}'.")
