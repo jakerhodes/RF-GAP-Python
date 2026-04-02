@@ -303,6 +303,15 @@ def ForestKernel(
             check_is_fitted(self)
 
             leaves_new = self._adapter.get_leaf_matrix(X_new)
+
+            
+            max_ids_new = leaves_new.max(axis=0)
+            n_nodes = np.asarray(self._adapter.get_n_nodes_per_tree())
+            bad_new = np.where(max_ids_new >= n_nodes)[0]
+            
+            print("max raw node ids for X_new:", max_ids_new)
+            print("n_nodes_per_tree:", n_nodes)
+            print("bad trees for X_new:", bad_new)
             return build_Q_matrix(
                 self.cache,
                 kernel_method=self.kernel_method,
