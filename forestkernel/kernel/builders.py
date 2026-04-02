@@ -613,35 +613,41 @@ def build_Q_matrix(
             raise ValueError(
                 "Semi-supervised GAP with force_nonzero_diag=False is not supported."
             )
-
-        # ----- Ordinary query-side term -----
+    
+        if force_nonzero_diag:
+            total_cols = cache.total_unique_nodes + cache.n_samples
+        else:
+            total_cols = cache.total_unique_nodes
+    
         if is_training:
             if cache.oob_mask_all is None:
-                raise ValueError("cache.oob_mask_all is required for training-time kernel_method='gap'.")
-
+                raise ValueError(
+                    "cache.oob_mask_all is required for training-time kernel_method='gap'."
+                )
+    
             mask = cache.oob_mask_all.flatten() == 1
             flat_rows = flat_rows[mask]
             flat_cols = flat_cols[mask]
-
+    
             S_i_counts = cache.oob_mask_all.sum(axis=1).astype(np.float32)
             S_i_counts[S_i_counts == 0] = 1.0
             vals = (1.0 / S_i_counts[flat_rows]).astype(np.float32)
-
+    
+            if force_nonzero_diag:
+                diag_rows = np.arange(N, dtype=np.int64)
+                diag_cols = diag_rows + cache.diag_offset
+                diag_vals = np.ones(N, dtype=np.float32)
+    
+                flat_rows = np.concatenate([flat_rows, diag_rows])
+                flat_cols = np.concatenate([flat_cols, diag_cols])
+                vals = np.concatenate([vals, diag_vals])
+    
         else:
-            # Extension points average over all trees
+            # OOS: average over all trees
             vals = np.full(N * T, 1.0 / T, dtype=np.float32)
-
-        # ----- Final assembly -----
-        if force_nonzero_diag:
-            total_cols += cache.n_samples
-
-            diag_rows = np.arange(N, dtype=np.int64)
-            diag_cols = diag_rows + cache.diag_offset
-            diag_vals = np.ones(N, dtype=np.float32)
-
-            flat_rows = np.concatenate([flat_rows, diag_rows])
-            flat_cols = np.concatenate([flat_cols, diag_cols])
-            vals = np.concatenate([vals, diag_vals])
+            # IMPORTANT:
+            # keep total_cols = N_leaves + N_train if force_nonzero_diag=True,
+            # but do NOT add any private diagonal coordinates for OOS points.
 
     else:
         raise ValueError(f"Unknown kernel_method='{kernel_method}'.")
