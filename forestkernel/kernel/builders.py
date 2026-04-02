@@ -117,7 +117,7 @@ def attach_inv_sqrt_leaf_mass(cache):
     ).astype(np.float32)
 
     with np.errstate(divide="ignore", invalid="ignore"):
-        cache.inv_sqrt_leaf_mass_unit = 1.0 / np.sqrt(leaf_mass)
+        cache.inv_sqrt_leaf_mass = 1.0 / np.sqrt(leaf_mass)
     cache.inv_sqrt_leaf_mass[~np.isfinite(cache.inv_sqrt_leaf_mass)] = 0.0
 
     return cache
