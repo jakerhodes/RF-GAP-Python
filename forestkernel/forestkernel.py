@@ -159,6 +159,13 @@ def ForestKernel(
             leaf_matrix_all = self._adapter.get_leaf_matrix(X)
             n_nodes_per_tree = self._adapter.get_n_nodes_per_tree()
 
+            max_ids = leaf_matrix_all.max(axis=0)
+            bad = np.where(max_ids >= np.asarray(n_nodes_per_tree))[0]
+            
+            print("max raw node ids per tree:", max_ids)
+            print("n_nodes_per_tree:", n_nodes_per_tree)
+            print("bad trees:", bad)
+
             self.cache = initialize_cache(
                 leaf_matrix_all=leaf_matrix_all,
                 n_nodes_per_tree=n_nodes_per_tree,
@@ -167,6 +174,13 @@ def ForestKernel(
                 idx_unlabeled=idx_unlabeled,
                 n_train_samples=X_train.shape[0],
             )
+
+            max_ids = leaf_matrix_all.max(axis=0)
+            bad = np.where(max_ids >= np.asarray(n_nodes_per_tree))[0]
+            
+            print("max raw node ids per tree:", max_ids)
+            print("n_nodes_per_tree:", n_nodes_per_tree)
+            print("bad trees:", bad)
 
             # ---------------------------------------------------------
             # STEP 2: attach OOB / multiplicity structure to cache when needed
