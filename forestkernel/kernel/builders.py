@@ -330,39 +330,34 @@ def build_W_matrix(cache, kernel_method, force_nonzero_diag=False):
     # ---------------------------------------------------------
     # GAP PROXIMITY
     #
-    # Ordinary leaf term:
-    #   W stores the target-side factor
+    # Ordinary target-side term:
+    #   W stores the target/reference-side factor
     #
     #       c_j(t) / M_leaf
     #
     #   on each sample-tree incidence.
     #
-    #   - labeled targets use their observed multiplicity c_j(t)
-    #   - unlabeled phantom targets use the empirical unconditional surrogate
+    #   - labeled reference points use their observed multiplicity c_j(t)
+    #   - unlabeled phantom reference points use the empirical surrogate
     #     empirical_mult_all_by_tree[t]
     #
-    # Private diagonal term:
-    #   One optional private coordinate per training sample is appended
-    #   after the leaf coordinates.
+    # Private diagonal coordinates:
+    #   When force_nonzero_diag=True, one private coordinate per training
+    #   sample is appended after the leaf coordinates. These coordinates
+    #   are used only to correct training self-similarities.
+    #
+    #   - for labeled rows, the private coordinate restores the intended
+    #     training diagonal based on the labeled target-side GAP term
+    #   - for unlabeled rows in semi-supervised GAP, the private coordinate
+    #     contributes only the missing correction beyond the ordinary leaf
+    #     contribution already present in the unlabeled diagonal
+    #
+    #   These private coordinates are training-only correction features:
+    #   out-of-sample queries keep the corresponding columns in Q, but with
+    #   zero values.
     #
     #   - Semi-supervised GAP with force_nonzero_diag=False is currently
     #     not supported at the API level.
-    #
-    #   - If force_nonzero_diag=True, the private coordinates restore the
-    #     desired training diagonal:
-    #
-    #       labeled rows:
-    #           (sum_t c_i(t) / M_leaf(i,t)) / #{t : c_i(t) > 0}
-    #
-    #       unlabeled rows:
-    #           (1/T) * sum_t empirical_mult_inbag_by_tree[t] / M_i(t)
-    #
-    #     where empirical_mult_inbag_by_tree[t] is the average multiplicity
-    #     among in-bag labeled samples in tree t.
-    #
-    #     Since the ordinary leaf part already contributes a nonzero
-    #     unlabeled diagonal, the private coordinate stores only the
-    #     missing correction.
     # ---------------------------------------------------------
     elif kernel_method == "gap":
         if cache.c_all is None:
@@ -591,22 +586,30 @@ def build_Q_matrix(
     # GAP PROXIMITY
     #
     # Ordinary query term:
-    #   Q stores only the query-side normalization
+    #   Q stores only the query-side averaging factor
     #
     #       1 / |S_i|
     #
     #   where S_i is:
-    #   - the OOB set of sample i during training
-    #   - all trees for extension points
+    #   - the OOB set of query sample i during training-time construction
+    #   - all trees for out-of-sample extension points
     #
-    # Private diagonal term:
-    #   These private coordinates must match the extra columns created in W.
+    # Private diagonal coordinates:
+    #   When force_nonzero_diag=True, W contains an additional private
+    #   coordinate for each training sample. These coordinates are used
+    #   only to correct the training diagonal.
+    #
+    #   Therefore:
+    #   - for training-time Q, we append matching private coordinates
+    #     with value 1 on row i so that QW^T reproduces the corrected
+    #     training diagonal
+    #   - for OOS Q, we keep the same total number of columns
+    #     (N_leaves + N_train), but the private coordinates are left at 0,
+    #     since a new point should not activate any training-sample-private
+    #     diagonal correction feature
     #
     #   - Semi-supervised GAP with force_nonzero_diag=False is currently
     #     not supported at the API level.
-    #
-    #   - If force_nonzero_diag=True, Q places value 1 on all private
-    #     coordinates, and W determines the final diagonal magnitude.
     # ---------------------------------------------------------
     elif kernel_method == "gap":
         if cache.is_semi_supervised and not force_nonzero_diag:
