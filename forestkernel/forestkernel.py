@@ -12,7 +12,7 @@ from .fit_utils import prepare_reference_split
 from .kernel import (
     initialize_cache,
     attach_bootstrap_stats,
-    attach_gbt_weights,
+    attach_boosted_weights,
     attach_inv_sqrt_leaf_mass,
     attach_inv_inbag_leaf_mass,
     attach_unlabeled_multiplicity_surrogates,
@@ -66,7 +66,7 @@ def ForestKernel(
     )
     validate_model_kwargs(base_model, kwargs)
 
-    class ForestKernel(GAPExtrasMixin, base_model):
+    class ForestKernel(GAPExtrasMixin):
         def __init__(
             self,
             kernel_method=kernel_method,
@@ -76,8 +76,6 @@ def ForestKernel(
             normalize_diagonal=normalize_diagonal,
             **model_kwargs,
         ):
-            super(ForestKernel, self).__init__(**model_kwargs)
-
             self.kernel_method = kernel_method
             self.matrix_type = matrix_type
             self.prediction_type = prediction_type
@@ -86,10 +84,16 @@ def ForestKernel(
             self.normalize_diagonal = normalize_diagonal
             self.model_type = model_type
 
+            # Underlying model kwargs
+            self.model_kwargs = dict(model_kwargs)
+
             # Kernel internals
             self.cache = None
             self._adapter = None
             self.y = None
+
+            # Real underlying fitted forest / tree ensemble object
+            self.forest_ = base_model(**self.model_kwargs)
 
         def _check_fitted(self):
             if self._adapter is None or self.cache is None:
@@ -125,12 +129,12 @@ def ForestKernel(
 
             self.y = fit_data["y"]
 
-            super(ForestKernel, self).fit(
+            self.forest_.fit(
                 fit_data["X_train"],
                 fit_data["y_train"],
                 **fit_kwargs,
             )
-            self._adapter = make_adapter(self, self.model_type)
+            self._adapter = make_adapter(self.forest_, self.model_type)
 
             return {
                 "X": fit_data["X"],
@@ -211,9 +215,9 @@ def ForestKernel(
             # ---------------------------------------------------------
             # STEP 3: attach tree weights when needed
             # ---------------------------------------------------------
-            if self.kernel_method == "gbt":
-                gbt_tree_weights = self._adapter.get_tree_weights(X_train)
-                attach_gbt_weights(self.cache, gbt_tree_weights)
+            if self.kernel_method == "boosted":
+                boosted_tree_weights = self._adapter.get_tree_weights(X_train)
+                attach_boosted_weights(self.cache, boosted_tree_weights)
 
             # ---------------------------------------------------------
             # STEP 4: attach kernel-specific cached statistics
@@ -367,7 +371,39 @@ def ForestKernel(
                 return kernel_predict_regression(K_ext_labeled, y_labeled)
 
             return kernel_predict_classification(K_ext_labeled, y_labeled)
-        
+
+        # ---------------------------------------------------------
+        # Convenience accessors to the underlying fitted ensemble
+        # ---------------------------------------------------------
+        def predict_forest(self, X):
+            self._check_forest_fitted()
+            return self.forest_.predict(np.asarray(X))
+
+        def predict_proba_forest(self, X):
+            self._check_forest_fitted()
+            if not hasattr(self.forest_, "predict_proba"):
+                raise AttributeError("Underlying forest does not implement predict_proba().")
+            return self.forest_.predict_proba(np.asarray(X))
+
+        def apply(self, X):
+            self._check_forest_fitted()
+            if not hasattr(self.forest_, "apply"):
+                raise AttributeError("Underlying forest does not implement apply().")
+            return self.forest_.apply(np.asarray(X))
+
+        def get_params(self):
+            """
+            Return wrapper and model parameters.
+            """
+            return {
+                "kernel_method": self.kernel_method,
+                "matrix_type": self.matrix_type,
+                "force_nonzero_diag": self.force_nonzero_diag,
+                "force_symmetric": self.force_symmetric,
+                "normalize_diagonal": self.normalize_diagonal,
+                "model_type": self.model_type,
+                **self.model_kwargs,
+            }
 
     return ForestKernel(
         kernel_method=kernel_method,
