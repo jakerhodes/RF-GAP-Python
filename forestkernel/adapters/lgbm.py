@@ -1,0 +1,154 @@
+import numpy as np
+
+from .base import EnsembleAdapter
+
+
+class LightGBMAdapter(EnsembleAdapter):
+    """
+    Adapter for LightGBM sklearn-style estimators such as
+    lightgbm.LGBMClassifier and lightgbm.LGBMRegressor.
+
+    This adapter supports leaf-based kernels and tree-weighted boosted-tree
+    proximities, but does not support OOB- or in-bag-based quantities.
+    """
+
+    def _get_booster(self):
+        if not hasattr(self.estimator, "booster_"):
+            raise ValueError(
+                "LightGBM estimator must be fitted before using LightGBMAdapter."
+            )
+        return self.estimator.booster_
+
+    def _get_tree_info_list(self):
+        """
+        Return the flattened list of LightGBM trees from the dumped model.
+        """
+        booster = self._get_booster()
+        model_dump = booster.dump_model()
+        return model_dump["tree_info"]
+
+    def _count_nodes(self, node):
+        """
+        Recursively count all nodes in a LightGBM tree.
+        """
+        if "left_child" not in node and "right_child" not in node:
+            return 1
+        return (
+            1
+            + self._count_nodes(node["left_child"])
+            + self._count_nodes(node["right_child"])
+        )
+
+    def _collect_leaf_values(self, node, out):
+        """
+        Recursively collect a mapping {leaf_index -> leaf_value} for one tree.
+        """
+        if "left_child" not in node and "right_child" not in node:
+            out[int(node["leaf_index"])] = np.float32(node["leaf_value"])
+            return
+
+        self._collect_leaf_values(node["left_child"], out)
+        self._collect_leaf_values(node["right_child"], out)
+
+    def _get_leaf_value_maps(self):
+        """
+        Return one dictionary per tree mapping LightGBM leaf_index to leaf_value.
+        """
+        tree_info_list = self._get_tree_info_list()
+        maps = []
+
+        for tree_info in tree_info_list:
+            leaf_map = {}
+            self._collect_leaf_values(tree_info["tree_structure"], leaf_map)
+            maps.append(leaf_map)
+
+        return maps
+
+    def _predict_tree_outputs(self, X_ref):
+        """
+        Return per-tree raw contributions of shape (n_samples, n_trees_total).
+
+        This is used to define tree-specific weights. We reconstruct the output
+        of each tree from:
+        - pred_leaf=True assignments
+        - leaf_index -> leaf_value mappings from dump_model()
+
+        Note:
+        LightGBM tree dumps also contain a per-tree 'shrinkage' field. We apply
+        it here so the contribution matches the shrunken boosted update.
+
+        If your particular LightGBM version already stores shrunken leaf values
+        directly in leaf_value, then multiplying by shrinkage would double-count
+        the learning rate. In that case, remove the shrinkage factor below.
+        """
+        leaf_matrix = self.get_leaf_matrix(X_ref)
+        tree_info_list = self._get_tree_info_list()
+        leaf_value_maps = self._get_leaf_value_maps()
+
+        n_samples, n_trees = leaf_matrix.shape
+        outputs = np.zeros((n_samples, n_trees), dtype=np.float32)
+
+        for t, (tree_info, leaf_map) in enumerate(zip(tree_info_list, leaf_value_maps)):
+            shrinkage = np.float32(tree_info.get("shrinkage", 1.0))
+            outputs[:, t] = shrinkage * np.array(
+                [leaf_map[int(leaf_idx)] for leaf_idx in leaf_matrix[:, t]],
+                dtype=np.float32,
+            )
+
+        return outputs
+
+    def get_leaf_matrix(self, X):
+        """
+        Apply every LightGBM tree and return a leaf matrix of shape
+        (n_samples, n_trees_total).
+        """
+        booster = self._get_booster()
+        leaf_matrix = booster.predict(X, pred_leaf=True)
+
+        leaf_matrix = np.asarray(leaf_matrix, dtype=np.int32)
+        if leaf_matrix.ndim == 1:
+            leaf_matrix = leaf_matrix.reshape(-1, 1)
+
+        return leaf_matrix
+
+    def get_n_nodes_per_tree(self):
+        """
+        Return total node counts for each LightGBM tree.
+        """
+        tree_info_list = self._get_tree_info_list()
+        return [
+            self._count_nodes(tree_info["tree_structure"])
+            for tree_info in tree_info_list
+        ]
+
+    def get_oob_mask(self, X_train=None):
+        raise ValueError("OOB indices are not defined for LightGBM.")
+
+    def get_in_bag_counts(self, X_train=None):
+        raise ValueError("In-bag counts are not defined for LightGBM.")
+
+    def get_tree_weights(self, X_ref):
+        """
+        Compute tree-specific weights for boosted-tree proximities.
+
+        We mimic the GradientBoosting adapter idea:
+            w_t ∝ || h_t(X_ref) ||_2^2
+
+        where h_t is the per-tree shrunken raw contribution on X_ref.
+        """
+        contribs = self._predict_tree_outputs(X_ref)
+        weights = np.sum(contribs ** 2, axis=0).astype(np.float32)
+
+        if weights.size == 0:
+            raise RuntimeError("No trees found in fitted LightGBM model.")
+
+        total_weight = weights.sum()
+        if total_weight <= 0:
+            weights[:] = 1.0 / len(weights)
+        else:
+            weights /= total_weight
+
+        return weights.astype(np.float32)
+
+    def supports_tree_weights(self):
+        return True

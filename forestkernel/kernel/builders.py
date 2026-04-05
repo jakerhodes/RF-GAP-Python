@@ -93,11 +93,11 @@ def attach_bootstrap_stats(cache, oob_mask, inbag_counts=None):
     return cache
 
 
-def attach_gbt_weights(cache, gbt_tree_weights):
+def attach_boosted_weights(cache, boosted_tree_weights):
     """
-    Attach GBT tree weights to an existing cache.
+    Attach boosted-tree weights to an existing cache.
     """
-    cache.gbt_tree_weights = np.asarray(gbt_tree_weights, dtype=np.float32)
+    cache.boosted_tree_weights = np.asarray(boosted_tree_weights, dtype=np.float32)
     return cache
 
 
@@ -229,7 +229,7 @@ def build_W_matrix(cache, kernel_method, force_nonzero_diag=False):
     ----------
     cache : KernelCache
     kernel_method : str
-        One of {'original', 'oob', 'gap', 'kerf', 'gbt'}
+        One of {'original', 'oob', 'gap', 'kerf', 'boosted'}
     force_nonzero_diag : bool, default=False
         Only relevant for GAP. Whether to inject virtual diagonal
         coordinates to restore non-zero self-similarities.
@@ -262,16 +262,16 @@ def build_W_matrix(cache, kernel_method, force_nonzero_diag=False):
         weights = np.full(N * T, scale_factor, dtype=np.float32)
 
     # ---------------------------------------------------------
-    # GBT PROXIMITY
+    # TREE-WEIGHTED BOOSTED PROXIMITY
     # p(i,j) = Sum_t w_t * I( leaf_t(i) = leaf_t(j) )
     #
     # Mapping:
     #   Use a symmetric factorization with sqrt(w_t) on both sides.
     # ---------------------------------------------------------
-    elif kernel_method == "gbt":
-        if cache.gbt_tree_weights is None:
-            raise ValueError("cache.gbt_tree_weights is required for kernel_method='gbt'.")
-        sqrt_w = np.sqrt(cache.gbt_tree_weights).astype(np.float32)
+    elif kernel_method == "boosted":
+        if cache.boosted_tree_weights is None:
+            raise ValueError("cache.boosted_tree_weights is required for kernel_method='boosted'.")
+        sqrt_w = np.sqrt(cache.boosted_tree_weights).astype(np.float32)
         weights = np.tile(sqrt_w, N)
 
     # ---------------------------------------------------------
@@ -477,7 +477,7 @@ def build_Q_matrix(
     ----------
     cache : KernelCache
     kernel_method : str
-        One of {'original', 'oob', 'gap', 'kerf', 'gbt'}
+        One of {'original', 'oob', 'gap', 'kerf', 'boosted'}
     leaves : ndarray of shape (N_query, T), optional
         Query leaf matrix. If None, uses cache.leaf_matrix.
     is_training : bool, default=True
@@ -515,16 +515,16 @@ def build_Q_matrix(
         vals = np.full(N * T, scale_factor, dtype=np.float32)
 
     # ---------------------------------------------------------
-    # GBT PROXIMITY
+    # TREE-WEIGHTED BOOSTED PROXIMITY
     # p(i,j) = Sum_t w_t * I( leaf_t(i) = leaf_t(j) )
     #
     # Mapping:
     #   Use sqrt(w_t) on the query side too.
     # ---------------------------------------------------------
-    elif kernel_method == "gbt":
-        if cache.gbt_tree_weights is None:
-            raise ValueError("cache.gbt_tree_weights is required for kernel_method='gbt'.")
-        sqrt_w = np.sqrt(cache.gbt_tree_weights).astype(np.float32)
+    elif kernel_method == "boosted":
+        if cache.boosted_tree_weights is None:
+            raise ValueError("cache.boosted_tree_weights is required for kernel_method='boosted'.")
+        sqrt_w = np.sqrt(cache.boosted_tree_weights).astype(np.float32)
         vals = np.tile(sqrt_w, N)
 
     # ---------------------------------------------------------

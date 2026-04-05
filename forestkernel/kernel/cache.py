@@ -59,7 +59,7 @@ class KernelCache:
     # ------------------------------------------------------------------
     # GBT-specific
     # ------------------------------------------------------------------
-    gbt_tree_weights: Optional[np.ndarray] = None
+    boosted_tree_weights: Optional[np.ndarray] = None
 
     # ------------------------------------------------------------------
     # Sparse right factor

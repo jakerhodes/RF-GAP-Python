@@ -11,6 +11,8 @@ from sklearn.ensemble import (
     GradientBoostingRegressor,
 )
 
+from lightgbm import LGBMClassifier, LGBMRegressor
+
 from .wrappers.bagged_rotation_forest import BaggedRotationForest
 
 
@@ -57,43 +59,55 @@ def validate_model_configuration(model_type, kernel_method, prediction_type, kwa
     Parameters
     ----------
     model_type : str
-        One of {'rf', 'et', 'gbt', 'rotf'}.
+        One of {'rf', 'et', 'gbt', 'lgbm', 'rotf'}.
     kernel_method : str
-        One of {'original', 'oob', 'gap', 'kerf', 'gbt'}.
+        One of {'original', 'oob', 'gap', 'kerf', 'boosted'}.
     prediction_type : str
         One of {'classification', 'regression'}.
     kwargs : dict or None
         Estimator kwargs supplied by the user. These are not modified here,
         only checked when needed for kernel-specific requirements.
     """
-    if model_type not in {"rf", "et", "gbt", "rotf"}:
+    if model_type not in {"rf", "et", "gbt", "lgbm", "rotf"}:
         raise ValueError(
-            "model_type must be one of {'rf', 'et', 'gbt', 'rotf'}"
+            "model_type must be one of {'rf', 'et', 'gbt', 'lgbm', 'rotf'}"
         )
 
-    if kernel_method == "gbt" and model_type != "gbt":
-        raise ValueError("kernel_method='gbt' requires model_type='gbt'.")
-
-    if model_type == "gbt" and kernel_method != "gbt":
-        raise ValueError("When model_type='gbt', kernel_method must be 'gbt'.")
+    if kernel_method not in {"original", "oob", "gap", "kerf", "boosted"}:
+        raise ValueError(
+            "kernel_method must be one of {'original', 'oob', 'gap', 'kerf', 'boosted'}"
+        )
 
     if model_type == "rotf" and prediction_type != "classification":
         raise ValueError("model_type='rotf' currently supports classification only.")
 
     kwargs = {} if kwargs is None else dict(kwargs)
 
-    # OOB- and GAP-based kernels rely on bootstrap/OOB logic for RF / ET.
-    # We do not silently override user parameters.
-    if kernel_method in {"oob", "gap"} and model_type in {"rf", "et"}:
-        if "bootstrap" in kwargs and kwargs["bootstrap"] is not True:
-            raise ValueError(
-                f"kernel_method='{kernel_method}' with model_type='{model_type}' "
-                "requires bootstrap=True."
-            )
+    # ---------------------------------------------------------
+    # RF / ET / Rotation Forest:
+    # all forest-style kernels are allowed, but OOB / GAP need bootstrap
+    # ---------------------------------------------------------
+    if model_type in {"rf", "et", "rotf"}:
+        if kernel_method in {"oob", "gap"} and model_type in {"rf", "et"}:
+            if "bootstrap" in kwargs and kwargs["bootstrap"] is not True:
+                raise ValueError(
+                    f"kernel_method='{kernel_method}' with model_type='{model_type}' "
+                    "requires bootstrap=True."
+                )
+        return
 
-    # Gradient boosting does not support the RF/ET/OOB-style kernel methods.
-    if model_type == "gbt" and kernel_method != "gbt":
-        raise ValueError("Gradient boosting only supports kernel_method='gbt'.")
+    # ---------------------------------------------------------
+    # Boosted-tree models:
+    # allow leaf-based kernels that do not require OOB / in-bag structure
+    # ---------------------------------------------------------
+    if model_type in {"gbt", "lgbm"}:
+        if kernel_method in {"oob", "gap"}:
+            raise ValueError(
+                f"kernel_method='{kernel_method}' is not supported for "
+                f"model_type='{model_type}' because boosted trees do not provide "
+                "the RF-style OOB / in-bag structure required by these kernels."
+            )
+        return
 
 
 def get_base_model(model_type, prediction_type):
@@ -119,6 +133,13 @@ def get_base_model(model_type, prediction_type):
             GradientBoostingClassifier
             if prediction_type == "classification"
             else GradientBoostingRegressor
+        )
+
+    if model_type == "lgbm":
+        return (
+            LGBMClassifier
+            if prediction_type == "classification"
+            else LGBMRegressor
         )
 
     if model_type == "rotf":

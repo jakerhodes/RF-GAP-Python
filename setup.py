@@ -11,7 +11,7 @@ setup(
     author_email="jakerhodes8@gmail.com, adrien.aumon@umontreal.ca",
     url="https://github.com/jakerhodes/RF-GAP-Python",
     packages=find_packages(include=["forestkernel", "forestkernel.*"]),
-    install_requires=['scikit-learn', 'numpy', 'pandas', 'scipy', 'packaging', 'aeon'],
+    install_requires=['scikit-learn', 'numpy', 'pandas', 'scipy', 'packaging', 'aeon', 'lightgbm'],
     long_description=long_description,
     long_description_content_type="text/markdown",
 )
