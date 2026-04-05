@@ -14,3 +14,7 @@ from .sparse_utils import (
     csr_row_scale_inplace,
     block_symmetrize,
 )
+
+from .prediction import (
+    row_normalize_kernel_block, kernel_predict_regression, kernel_predict_classification
+)

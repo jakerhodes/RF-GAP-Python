@@ -18,7 +18,7 @@ class KernelCache:
     # ------------------------------------------------------------------
     # Core leaf structure
     # ------------------------------------------------------------------
-    leaf_matrix_all: Optional[np.ndarray] = None
+    leaf_matrix: Optional[np.ndarray] = None
     leaf_offsets: Optional[np.ndarray] = None
     total_unique_nodes: Optional[int] = None
     diag_offset: Optional[int] = None
@@ -26,18 +26,18 @@ class KernelCache:
     # ------------------------------------------------------------------
     # Optional OOB / multiplicity structure
     # ------------------------------------------------------------------
-    oob_mask_all: Optional[np.ndarray] = None
-    c_all: Optional[np.ndarray] = None
+    oob_mask: Optional[np.ndarray] = None
+    inbag_counts: Optional[np.ndarray] = None
 
     # ------------------------------------------------------------------
     # Flattened global leaf incidences
     # ------------------------------------------------------------------
-    flat_rows_all: Optional[np.ndarray] = None
-    flat_cols_all: Optional[np.ndarray] = None
+    flat_rows: Optional[np.ndarray] = None
+    flat_cols: Optional[np.ndarray] = None
     flat_tree_ids: Optional[np.ndarray] = None
 
     # ------------------------------------------------------------------
-    # Semi-supervised bookkeeping masks
+    # Optional labeled / unlabeled bookkeeping masks
     # ------------------------------------------------------------------
     row_is_labeled: Optional[np.ndarray] = None
     row_is_unlabeled: Optional[np.ndarray] = None
@@ -51,7 +51,7 @@ class KernelCache:
     inv_inbag_leaf_mass: Optional[np.ndarray] = None
 
     # ------------------------------------------------------------------
-    # GAP-specific semi-supervised target surrogates
+    # GAP-specific unlabeled target surrogates
     # ------------------------------------------------------------------
     empirical_mult_all_by_tree: Optional[np.ndarray] = None
     empirical_mult_inbag_by_tree: Optional[np.ndarray] = None
@@ -69,13 +69,13 @@ class KernelCache:
     # ------------------------------------------------------------------
     # Metadata
     # ------------------------------------------------------------------
-    n_samples: Optional[int] = None          # total reference samples
+    n_samples: Optional[int] = None
     n_trees: Optional[int] = None
-    n_train_samples: Optional[int] = None    # labeled samples actually used to fit the forest
+    n_train_samples: Optional[int] = None
 
     # ------------------------------------------------------------------
-    # Semi-supervised bookkeeping (original X order)
+    # Optional labeled / unlabeled indices on the reference set
     # ------------------------------------------------------------------
     idx_labeled: Optional[np.ndarray] = None
     idx_unlabeled: Optional[np.ndarray] = None
-    is_semi_supervised: bool = False
+    is_transductive: bool = False

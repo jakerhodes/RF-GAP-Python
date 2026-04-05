@@ -24,7 +24,7 @@ def to_global_leaves(leaf_mat, leaf_offsets):
 
 
 def initialize_cache(
-    leaf_matrix_all,
+    leaf_matrix,
     n_nodes_per_tree,
     n_samples,
     idx_labeled=None,
@@ -38,18 +38,21 @@ def initialize_cache(
     This includes:
     - global leaf indexing
     - flattened sample-tree incidences
-    - semi-supervised row/flat masks
+    - transductive row/flat masks
     - flattened tree ids used by tree-specific GAP surrogates
     """
     cache = KernelCache()
-    cache.leaf_matrix_all = leaf_matrix_all.astype(np.int32, copy=False)
+    cache.leaf_matrix = leaf_matrix.astype(np.int32, copy=False)
     cache.n_samples = int(n_samples)
-    cache.n_trees = int(leaf_matrix_all.shape[1])
+    cache.n_trees = int(leaf_matrix.shape[1])
 
     cache.idx_labeled = None if idx_labeled is None else np.asarray(idx_labeled, dtype=np.int64)
     cache.idx_unlabeled = None if idx_unlabeled is None else np.asarray(idx_unlabeled, dtype=np.int64)
     cache.n_train_samples = int(n_train_samples) if n_train_samples is not None else int(n_samples)
-    cache.is_semi_supervised = (
+
+    # Transductive mode means that some rows in the active reference set are
+    # explicitly marked as unlabeled.
+    cache.is_transductive = (
         cache.idx_unlabeled is not None and len(cache.idx_unlabeled) > 0
     )
 
@@ -57,12 +60,12 @@ def initialize_cache(
     cache.total_unique_nodes = int(np.sum(n_nodes_per_tree))
     cache.diag_offset = cache.total_unique_nodes
 
-    global_leaves_all = to_global_leaves(cache.leaf_matrix_all, cache.leaf_offsets)
+    global_leaves = to_global_leaves(cache.leaf_matrix, cache.leaf_offsets)
 
-    cache.flat_rows_all = np.repeat(np.arange(cache.n_samples), cache.n_trees)
-    cache.flat_cols_all = global_leaves_all.flatten()
+    cache.flat_rows = np.repeat(np.arange(cache.n_samples), cache.n_trees)
+    cache.flat_cols = global_leaves.flatten()
 
-    # Cached row-level masks for semi-supervised builders
+    # Cached row-level masks for transductive builders
     cache.row_is_labeled = np.zeros(cache.n_samples, dtype=bool)
     if cache.idx_labeled is not None:
         cache.row_is_labeled[cache.idx_labeled] = True
@@ -80,13 +83,13 @@ def initialize_cache(
     return cache
 
 
-def attach_bootstrap_stats(cache, oob_mask_all, c_all=None):
+def attach_bootstrap_stats(cache, oob_mask, inbag_counts=None):
     """
     Attach OOB and optional multiplicity information to an existing cache.
     """
-    cache.oob_mask_all = oob_mask_all.astype(np.int8, copy=False)
-    if c_all is not None:
-        cache.c_all = c_all.astype(np.float32, copy=False)
+    cache.oob_mask = oob_mask.astype(np.int8, copy=False)
+    if inbag_counts is not None:
+        cache.inbag_counts = inbag_counts.astype(np.float32, copy=False)
     return cache
 
 
@@ -102,14 +105,16 @@ def attach_inv_sqrt_leaf_mass(cache):
     """
     Attach inverse square-root unit leaf-mass statistics used by KeRF.
 
-    In semi-supervised mode, only labeled sample-tree incidences contribute
-    to the leaf mass. This matches the old transductive heuristic.
+    In transductive mode, only labeled sample-tree incidences contribute
+    to the leaf mass.
     """
+    # In the current main API, idx_labeled should always be defined.
+    # We keep the fallback branch for low-level robustness.
     if cache.idx_labeled is None:
-        flat_cols = cache.flat_cols_all
+        flat_cols = cache.flat_cols
     else:
         labeled_incidence_mask = cache.flat_is_labeled
-        flat_cols = cache.flat_cols_all[labeled_incidence_mask]
+        flat_cols = cache.flat_cols[labeled_incidence_mask]
 
     leaf_mass = np.bincount(
         flat_cols,
@@ -127,16 +132,18 @@ def attach_inv_inbag_leaf_mass(cache):
     """
     Attach inverse multiplicity leaf-mass statistics used by GAP.
 
-    In semi-supervised mode, only labeled sample-tree incidences contribute
-    to the denominator leaf mass, even though c_all may be defined on all
+    In transductive mode, only labeled sample-tree incidences contribute
+    to the denominator leaf mass, even though inbag_counts may be defined on all
     reference points.
     """
-    if cache.c_all is None:
-        raise ValueError("cache.c_all is required to compute multiplicity leaf mass.")
+    if cache.inbag_counts is None:
+        raise ValueError("cache.inbag_counts is required to compute multiplicity leaf mass.")
 
-    c_all = cache.c_all.astype(np.float32, copy=False)
-    c_flat = c_all.flatten()
+    inbag_counts = cache.inbag_counts.astype(np.float32, copy=False)
+    c_flat = inbag_counts.flatten()
 
+    # In the current main API, idx_labeled should always be defined.
+    # We keep the fallback branch for low-level robustness.
     if cache.idx_labeled is None:
         weights = c_flat
     else:
@@ -144,7 +151,7 @@ def attach_inv_inbag_leaf_mass(cache):
         weights[~cache.flat_is_labeled] = 0.0
 
     inbag_leaf_mass = np.bincount(
-        cache.flat_cols_all,
+        cache.flat_cols,
         weights=weights,
         minlength=cache.total_unique_nodes,
     ).astype(np.float32)
@@ -159,7 +166,7 @@ def attach_inv_inbag_leaf_mass(cache):
 def attach_unlabeled_multiplicity_surrogates(cache):
     """
     Precompute empirical treewise multiplicity surrogates for unlabeled
-    phantom targets in semi-supervised GAP.
+    phantom targets in transductive GAP.
 
     The following surrogates are stored:
 
@@ -172,23 +179,23 @@ def attach_unlabeled_multiplicity_surrogates(cache):
       used only for the unlabeled diagonal adjustment when
       force_nonzero_diag=True
     """
-    if cache.c_all is None:
+    if cache.inbag_counts is None:
         raise ValueError(
-            "cache.c_all is required to compute unlabeled multiplicity surrogates."
+            "cache.inbag_counts is required to compute unlabeled multiplicity surrogates."
         )
 
-    if not cache.is_semi_supervised:
+    if not cache.is_transductive:
         raise ValueError(
-            "Unlabeled multiplicity surrogates are only defined in semi-supervised GAP."
+            "Unlabeled multiplicity surrogates are only defined in transductive GAP."
         )
 
     if cache.idx_labeled is None or len(cache.idx_labeled) == 0:
         raise ValueError(
-            "Semi-supervised GAP requires at least one labeled sample to compute "
+            "Transductive GAP requires at least one labeled sample to compute "
             "empirical unlabeled multiplicity surrogates."
         )
 
-    c_labeled = cache.c_all[cache.idx_labeled].astype(np.float32, copy=False)
+    c_labeled = cache.inbag_counts[cache.idx_labeled].astype(np.float32, copy=False)
 
     # Ordinary unlabeled target surrogate
     cache.empirical_mult_all_by_tree = c_labeled.mean(axis=0).astype(np.float32)
@@ -236,8 +243,8 @@ def build_W_matrix(cache, kernel_method, force_nonzero_diag=False):
 
     # Reuse the cached flattened structure of the reference/training set.
     # This avoids recomputing global leaves and flattened indices.
-    flat_rows = cache.flat_rows_all
-    flat_cols = cache.flat_cols_all
+    flat_rows = cache.flat_rows
+    flat_cols = cache.flat_cols
 
     # Base number of columns for sparse W building (before optional virtual diagonal).
     total_cols = cache.total_unique_nodes
@@ -300,16 +307,16 @@ def build_W_matrix(cache, kernel_method, force_nonzero_diag=False):
     #   This is done by adding N virtual columns after the real leaf columns.
     # ---------------------------------------------------------
     elif kernel_method == "oob":
-        if cache.oob_mask_all is None:
-            raise ValueError("cache.oob_mask_all is required for kernel_method='oob'.")
+        if cache.oob_mask is None:
+            raise ValueError("cache.oob_mask is required for kernel_method='oob'.")
 
         # Apply OOB scope on the reference side: keep only OOB trees for each j.
-        mask = cache.oob_mask_all.flatten() == 1
+        mask = cache.oob_mask.flatten() == 1
         flat_rows = flat_rows[mask]
         flat_cols = flat_cols[mask]
 
         # M_j = number of OOB trees for sample j
-        M = cache.oob_mask_all.sum(axis=1).astype(np.float32)
+        M = cache.oob_mask.sum(axis=1).astype(np.float32)
         M[M == 0] = 1.0  # safety
 
         # Reference-side weights: sqrt(T) / M_j
@@ -348,7 +355,7 @@ def build_W_matrix(cache, kernel_method, force_nonzero_diag=False):
     #
     #   - for labeled rows, the private coordinate restores the intended
     #     training diagonal based on the labeled target-side GAP term
-    #   - for unlabeled rows in semi-supervised GAP, the private coordinate
+    #   - for unlabeled rows in transductive GAP, the private coordinate
     #     contributes only the missing correction beyond the ordinary leaf
     #     contribution already present in the unlabeled diagonal
     #
@@ -356,23 +363,23 @@ def build_W_matrix(cache, kernel_method, force_nonzero_diag=False):
     #   out-of-sample queries keep the corresponding columns in Q, but with
     #   zero values.
     #
-    #   - Semi-supervised GAP with force_nonzero_diag=False is currently
+    #   - Transductive GAP with force_nonzero_diag=False is currently
     #     not supported at the API level.
     # ---------------------------------------------------------
     elif kernel_method == "gap":
-        if cache.c_all is None:
-            raise ValueError("cache.c_all is required for kernel_method='gap'.")
+        if cache.inbag_counts is None:
+            raise ValueError("cache.inbag_counts is required for kernel_method='gap'.")
         if cache.inv_inbag_leaf_mass is None:
             raise ValueError("cache.inv_inbag_leaf_mass is required for kernel_method='gap'.")
-        if cache.is_semi_supervised and not force_nonzero_diag:
+        if cache.is_transductive and not force_nonzero_diag:
             raise ValueError(
-                "Semi-supervised GAP with force_nonzero_diag=False is not supported."
+                "Transductive GAP with force_nonzero_diag=False is not supported."
             )
 
-        has_unlabeled = cache.is_semi_supervised
+        has_unlabeled = cache.is_transductive
 
         # ----- Ordinary target-side term -----
-        c_j_t = cache.c_all.flatten().astype(np.float32, copy=True)
+        c_j_t = cache.inbag_counts.flatten().astype(np.float32, copy=True)
         if has_unlabeled:
             c_j_t[cache.flat_is_unlabeled] = cache.empirical_mult_all_by_tree[
                 cache.flat_tree_ids[cache.flat_is_unlabeled]
@@ -386,9 +393,9 @@ def build_W_matrix(cache, kernel_method, force_nonzero_diag=False):
 
             # Labeled target diagonal
             row_sums = np.bincount(flat_rows, weights=weights, minlength=N).astype(np.float32)
-            inbag_counts = (cache.c_all > 0).sum(axis=1).astype(np.float32)
-            inbag_counts[inbag_counts == 0] = 1.0
-            labeled_target_diag = row_sums / inbag_counts
+            inbag_counts_per_row = (cache.inbag_counts > 0).sum(axis=1).astype(np.float32)
+            inbag_counts_per_row[inbag_counts_per_row == 0] = 1.0
+            labeled_target_diag = row_sums / inbag_counts_per_row
 
             if has_unlabeled:
                 unl = cache.idx_unlabeled.astype(np.int64, copy=False)
@@ -404,15 +411,15 @@ def build_W_matrix(cache, kernel_method, force_nonzero_diag=False):
 
                 # Ordinary unlabeled diagonal contributed by the non-private leaf part:
                 #   (1 / |S_i|) * sum_{t in S_i} empirical_mult_all_by_tree[t] / M_i(t)
-                if cache.oob_mask_all is None:
-                    raise ValueError("cache.oob_mask_all is required for training-time kernel_method='gap'.")
+                if cache.oob_mask is None:
+                    raise ValueError("cache.oob_mask is required for training-time kernel_method='gap'.")
 
-                q_mask = cache.oob_mask_all.flatten() == 1
-                q_rows = cache.flat_rows_all[q_mask]
-                q_cols = cache.flat_cols_all[q_mask]
+                q_mask = cache.oob_mask.flatten() == 1
+                q_rows = cache.flat_rows[q_mask]
+                q_cols = cache.flat_cols[q_mask]
                 q_tree_ids = cache.flat_tree_ids[q_mask]
 
-                S_i_counts = cache.oob_mask_all.sum(axis=1).astype(np.float32)
+                S_i_counts = cache.oob_mask.sum(axis=1).astype(np.float32)
                 S_i_counts[S_i_counts == 0] = 1.0
                 q_vals = (1.0 / S_i_counts[q_rows]).astype(np.float32)
 
@@ -468,11 +475,11 @@ def build_Q_matrix(
 
     Parameters
     ----------
-    cache : ProximityCache
+    cache : KernelCache
     kernel_method : str
         One of {'original', 'oob', 'gap', 'kerf', 'gbt'}
     leaves : ndarray of shape (N_query, T), optional
-        Query leaf matrix. If None, uses cache.leaf_matrix_all.
+        Query leaf matrix. If None, uses cache.leaf_matrix.
     is_training : bool, default=True
         Whether the query points are the same as the fitted reference points.
         Relevant for OOB and GAP.
@@ -484,7 +491,7 @@ def build_Q_matrix(
     scipy.sparse.csr_matrix
     """
     if leaves is None:
-        leaves = cache.leaf_matrix_all
+        leaves = cache.leaf_matrix
 
     N, T = leaves.shape
     global_leaves = to_global_leaves(leaves, cache.leaf_offsets)
@@ -549,16 +556,16 @@ def build_Q_matrix(
     # ---------------------------------------------------------
     elif kernel_method == "oob":
         if is_training:
-            if cache.oob_mask_all is None:
-                raise ValueError("cache.oob_mask_all is required for training-time kernel_method='oob'.")
+            if cache.oob_mask is None:
+                raise ValueError("cache.oob_mask is required for training-time kernel_method='oob'.")
 
             # Apply OOB scope on the query side: keep only OOB trees for each i.
-            mask = cache.oob_mask_all.flatten() == 1
+            mask = cache.oob_mask.flatten() == 1
             flat_rows = flat_rows[mask]
             flat_cols = flat_cols[mask]
 
             # |S_i| = number of OOB trees for sample i
-            S_i_counts = cache.oob_mask_all.sum(axis=1).astype(np.float32)
+            S_i_counts = cache.oob_mask.sum(axis=1).astype(np.float32)
             S_i_counts[S_i_counts == 0] = 1.0
 
             # Query-side weights: sqrt(T) / |S_i|
@@ -597,7 +604,7 @@ def build_Q_matrix(
     # Private diagonal term:
     #   These private coordinates must match the extra columns created in W.
     #
-    #   - Semi-supervised GAP with force_nonzero_diag=False is currently
+    #   - Transductive GAP with force_nonzero_diag=False is currently
     #     not supported at the API level.
     #
     #   - If force_nonzero_diag=True, Q places value 1 on all private
@@ -609,21 +616,21 @@ def build_Q_matrix(
     #     OOS queries do not activate them.
     # ---------------------------------------------------------
     elif kernel_method == "gap":
-        if cache.is_semi_supervised and not force_nonzero_diag:
+        if cache.is_transductive and not force_nonzero_diag:
             raise ValueError(
-                "Semi-supervised GAP with force_nonzero_diag=False is not supported."
+                "Transductive GAP with force_nonzero_diag=False is not supported."
             )
     
         # ----- Ordinary query-side term -----
         if is_training:
-            if cache.oob_mask_all is None:
-                raise ValueError("cache.oob_mask_all is required for training-time kernel_method='gap'.")
+            if cache.oob_mask is None:
+                raise ValueError("cache.oob_mask is required for training-time kernel_method='gap'.")
     
-            mask = cache.oob_mask_all.flatten() == 1
+            mask = cache.oob_mask.flatten() == 1
             flat_rows = flat_rows[mask]
             flat_cols = flat_cols[mask]
     
-            S_i_counts = cache.oob_mask_all.sum(axis=1).astype(np.float32)
+            S_i_counts = cache.oob_mask.sum(axis=1).astype(np.float32)
             S_i_counts[S_i_counts == 0] = 1.0
             vals = (1.0 / S_i_counts[flat_rows]).astype(np.float32)
     

@@ -1,7 +1,5 @@
 import numpy as np
 
-from sklearn.utils.validation import check_is_fitted
-
 from .extras import GAPExtrasMixin
 from .config import (
     infer_prediction_type,
@@ -10,6 +8,7 @@ from .config import (
     validate_model_kwargs,
 )
 from .adapters import make_adapter
+from .fit_utils import prepare_reference_split
 from .kernel import (
     initialize_cache,
     attach_bootstrap_stats,
@@ -21,8 +20,10 @@ from .kernel import (
     build_Q_matrix,
     csr_row_scale_inplace,
     block_symmetrize,
+    row_normalize_kernel_block,
+    kernel_predict_regression,
+    kernel_predict_classification,
 )
-from .fit_utils import prepare_fit_inputs
 
 
 def ForestKernel(
@@ -34,7 +35,6 @@ def ForestKernel(
     force_symmetric=None,
     normalize_diagonal=False,
     model_type="rf",
-    allow_semi_supervised=False,
     **kwargs,
 ):
     """
@@ -74,10 +74,9 @@ def ForestKernel(
             force_nonzero_diag=force_nonzero_diag,
             force_symmetric=force_symmetric,
             normalize_diagonal=normalize_diagonal,
-            allow_semi_supervised=allow_semi_supervised,
-            **kwargs,
+            **model_kwargs,
         ):
-            super(ForestKernel, self).__init__(**kwargs)
+            super(ForestKernel, self).__init__(**model_kwargs)
 
             self.kernel_method = kernel_method
             self.matrix_type = matrix_type
@@ -86,46 +85,50 @@ def ForestKernel(
             self.force_symmetric = force_symmetric
             self.normalize_diagonal = normalize_diagonal
             self.model_type = model_type
-            self.allow_semi_supervised = allow_semi_supervised
 
             # Kernel internals
             self.cache = None
             self._adapter = None
             self.y = None
 
+        def _check_fitted(self):
+            if self._adapter is None or self.cache is None:
+                raise AttributeError(
+                    "This ForestKernel instance is not fitted yet. Call 'fit' first."
+                )
 
-        def fit_forest(self, X, y, **fit_kwargs):
+        def _check_forest_fitted(self):
+            if self._adapter is None:
+                raise AttributeError(
+                    "The underlying forest is not fitted yet. Call 'fit' first."
+                )
+
+        def fit_forest(self, X, y, idx_unlabeled=None, **fit_kwargs):
             """
             Fit only the underlying ensemble, without building kernel metadata.
 
             Useful for benchmarking forest fitting separately from kernel
             preprocessing.
             """
-            fit_data = prepare_fit_inputs(
+            fit_data = prepare_reference_split(
                 X=X,
                 y=y,
-                fit_kwargs=fit_kwargs,
-                prediction_type=self.prediction_type,
+                idx_unlabeled=idx_unlabeled,
             )
-            if fit_data["has_unlabeled"]:
-                if not self.allow_semi_supervised:
-                    raise ValueError(
-                        "Unlabeled targets were detected in y, but semi-supervised mode is disabled. "
-                        "Set allow_semi_supervised=True to enable the transductive kernel heuristic."
-                    )
-                if self.kernel_method == "gap" and not self.force_nonzero_diag:
-                    raise ValueError(
-                        "Semi-supervised GAP currently requires force_nonzero_diag=True. "
-                        "The zero-diagonal semi-supervised GAP variant is not supported "
-                        "because it relies on signed private correction coordinates."
-                    )
-                
+
+            if fit_data["has_unlabeled"] and self.kernel_method == "gap" and not self.force_nonzero_diag:
+                raise ValueError(
+                    "Transductive GAP currently requires force_nonzero_diag=True. "
+                    "The zero-diagonal transductive GAP variant is not supported "
+                    "because it relies on signed private correction coordinates."
+                )
+
             self.y = fit_data["y"]
 
-            super().fit(
+            super(ForestKernel, self).fit(
                 fit_data["X_train"],
                 fit_data["y_train"],
-                **fit_data["fit_kwargs_train"],
+                **fit_kwargs,
             )
             self._adapter = make_adapter(self, self.model_type)
 
@@ -151,16 +154,16 @@ def ForestKernel(
             Useful for benchmarking kernel preprocessing separately from
             forest fitting.
             """
-            check_is_fitted(self)
+            self._check_forest_fitted()
 
             # ---------------------------------------------------------
             # STEP 1: initialize cache from leaf structure on ALL points
             # ---------------------------------------------------------
-            leaf_matrix_all = self._adapter.get_leaf_matrix(X)
+            leaf_matrix = self._adapter.get_leaf_matrix(X)
             n_nodes_per_tree = self._adapter.get_n_nodes_per_tree()
 
             self.cache = initialize_cache(
-                leaf_matrix_all=leaf_matrix_all,
+                leaf_matrix=leaf_matrix,
                 n_nodes_per_tree=n_nodes_per_tree,
                 n_samples=X.shape[0],
                 idx_labeled=idx_labeled,
@@ -177,22 +180,23 @@ def ForestKernel(
                 if has_unlabeled:
                     T = self.cache.n_trees
 
-                    # Unlabeled rows are treated as OOB in every tree, so the OOB mask is initialized with ones and then labeled rows are filled in.
-                    oob_mask_all = np.ones((self.cache.n_samples, T), dtype=np.int8)
-                    oob_mask_all[idx_labeled, :] = oob_labeled.astype(np.int8)
+                    # Unlabeled rows are treated as OOB in every tree, so the OOB
+                    # mask is initialized with ones and then labeled rows are filled in.
+                    oob_mask = np.ones((self.cache.n_samples, T), dtype=np.int8)
+                    oob_mask[idx_labeled, :] = oob_labeled.astype(np.int8)
 
                     if self.kernel_method == "gap":
                         # Unlabeled rows are initialized with placeholder zeros.
                         # The GAP builders later replace these target-side values using
                         # the cached treewise surrogates.
-                        c_labeled = self._adapter.get_in_bag_counts(X_train).astype(np.float32)
-                        c_all = np.zeros((self.cache.n_samples, T), dtype=np.float32)
-                        c_all[idx_labeled, :] = c_labeled
+                        inbag_counts_labeled = self._adapter.get_in_bag_counts(X_train).astype(np.float32)
+                        inbag_counts = np.zeros((self.cache.n_samples, T), dtype=np.float32)
+                        inbag_counts[idx_labeled, :] = inbag_counts_labeled
                     else:
-                        c_all = None
+                        inbag_counts = None
                 else:
-                    oob_mask_all = oob_labeled.astype(np.int8)
-                    c_all = (
+                    oob_mask = oob_labeled.astype(np.int8)
+                    inbag_counts = (
                         self._adapter.get_in_bag_counts(X_train).astype(np.float32)
                         if self.kernel_method == "gap"
                         else None
@@ -200,8 +204,8 @@ def ForestKernel(
 
                 attach_bootstrap_stats(
                     self.cache,
-                    oob_mask_all=oob_mask_all,
-                    c_all=c_all,
+                    oob_mask=oob_mask,
+                    inbag_counts=inbag_counts,
                 )
 
             # ---------------------------------------------------------
@@ -234,20 +238,24 @@ def ForestKernel(
 
             return self
 
-        def fit(self, X, y, **fit_kwargs):
+        def fit(self, X, y, idx_unlabeled=None, **fit_kwargs):
             """
             Fit the ensemble and precompute the reference-side leaf map W.
 
-            In semi-supervised mode, unlabeled samples are excluded from the
+            In transductive mode, unlabeled samples are excluded from the
             ensemble fit, but retained in the reference set used for kernel
             construction through the transductive heuristic implemented in
             builders.py.
 
             Additional keyword arguments are forwarded to the underlying base
-            estimator fit() method. In semi-supervised mode, sample-aligned
-            fit kwargs are restricted to labeled rows.
+            estimator fit() method.
             """
-            fit_context = self.fit_forest(X, y, **fit_kwargs)
+            fit_context = self.fit_forest(
+                X,
+                y,
+                idx_unlabeled=idx_unlabeled,
+                **fit_kwargs,
+            )
             self.build_kernel_cache(**fit_context)
             return self
 
@@ -255,19 +263,19 @@ def ForestKernel(
             """
             Return the fitted reference-side leaf feature map W.
             """
-            check_is_fitted(self)
+            self._check_fitted()
             return self.cache.W_mat
 
         def get_train_query_map(self):
             """
             Return the query-side leaf feature map Q on the fitted reference set.
             """
-            check_is_fitted(self)
+            self._check_fitted()
 
             Q_train = build_Q_matrix(
                 self.cache,
                 kernel_method=self.kernel_method,
-                leaves=self.cache.leaf_matrix_all,
+                leaves=self.cache.leaf_matrix,
                 is_training=True,
                 force_nonzero_diag=self.force_nonzero_diag,
             )
@@ -286,7 +294,7 @@ def ForestKernel(
             """
             Return the out-of-sample query-side leaf feature map Q(X_new).
             """
-            check_is_fitted(self)
+            self._check_fitted()
 
             leaves_new = self._adapter.get_leaf_matrix(X_new)
 
@@ -302,7 +310,7 @@ def ForestKernel(
             """
             Form a kernel block K = Q W^T from a query-side map Q.
             """
-            check_is_fitted(self)
+            self._check_fitted()
             K = Q.dot(self.cache.W_mat.T)
             return K.toarray() if self.matrix_type == "dense" else K
 
@@ -310,7 +318,7 @@ def ForestKernel(
             """
             Return the fitted kernel matrix on the reference set.
             """
-            check_is_fitted(self)
+            self._check_fitted()
 
             Q_train = self.get_train_query_map()
 
@@ -328,9 +336,38 @@ def ForestKernel(
             """
             Return the kernel block between X_new and the fitted reference set.
             """
-            check_is_fitted(self)
+            self._check_fitted()
             Q_new = self.get_query_map(X_new)
             return self.get_kernel_from_query_map(Q_new)
+
+        def kernel_predict(self, X_new):
+            """
+            Proximity-weighted prediction on new samples using the fitted
+            labeled reference subset only.
+
+            In transductive mode, unlabeled reference points still influence
+            the geometry through the cache construction, but do not directly
+            vote in the prediction step.
+            """
+            self._check_fitted()
+
+            Q_new = self.get_query_map(X_new)
+            K_ext = self.get_kernel_from_query_map(Q_new)
+
+            idx_labeled = self.cache.idx_labeled
+            if idx_labeled is None:
+                idx_labeled = np.arange(K_ext.shape[1], dtype=np.int64)
+
+            K_ext_labeled = K_ext[:, idx_labeled]
+            y_labeled = np.asarray(self.y[idx_labeled]).ravel()
+
+            K_ext_labeled = row_normalize_kernel_block(K_ext_labeled, self.kernel_method)
+
+            if self.prediction_type == "regression":
+                return kernel_predict_regression(K_ext_labeled, y_labeled)
+
+            return kernel_predict_classification(K_ext_labeled, y_labeled)
+        
 
     return ForestKernel(
         kernel_method=kernel_method,
@@ -338,6 +375,5 @@ def ForestKernel(
         force_nonzero_diag=force_nonzero_diag,
         force_symmetric=force_symmetric,
         normalize_diagonal=normalize_diagonal,
-        allow_semi_supervised=allow_semi_supervised,
         **kwargs,
     )
