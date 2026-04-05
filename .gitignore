@@ -6,8 +6,8 @@ __pycache__/
 # C extensions
 *.so
 
-# Experiments
-experiments/
+# Data and results
+experiments/results/
 datasets/
 nohup.out
 
