@@ -130,24 +130,42 @@ class LightGBMAdapter(EnsembleAdapter):
     def get_tree_weights(self, X_ref):
         """
         Compute tree-specific weights for boosted-tree proximities.
-
-        We mimic the GradientBoosting adapter idea:
-            w_t ∝ || h_t(X_ref) ||_2^2
-
-        where h_t is the per-tree shrunken raw contribution on X_ref.
+    
+        Following the boosted-tree proximity definition of Tan et al. (2020),
+        each tree is weighted by the variance of its contribution over the
+        reference set. If h_t(s) denotes the shrunken output of tree t for
+        sample s, then the weight is taken proportional to
+    
+            w_t ∝ Var({h_t(s) : s in X_ref}).
+    
+        Since `_predict_tree_outputs(X_ref)` already returns the per-tree
+        shrunken contributions, this amounts to computing the empirical
+        variance of each tree's output across the reference samples.
+    
+        Notes
+        -----
+        - This differs from using the squared L2 norm of the tree outputs.
+          The two coincide only when the tree outputs are centered.
+        - For multiclass LightGBM, the flattened tree list contains
+          class-specific trees from successive boosting rounds, so these
+          weights should be interpreted as per-flattened-tree variance
+          weights.
         """
         contribs = self._predict_tree_outputs(X_ref)
-        weights = np.sum(contribs ** 2, axis=0).astype(np.float32)
-
+    
+        # Empirical variance of each tree contribution over the reference set
+        centered = contribs - contribs.mean(axis=0, keepdims=True)
+        weights = np.mean(centered ** 2, axis=0).astype(np.float32)
+    
         if weights.size == 0:
             raise RuntimeError("No trees found in fitted LightGBM model.")
-
+    
         total_weight = weights.sum()
         if total_weight <= 0:
             weights[:] = 1.0 / len(weights)
         else:
             weights /= total_weight
-
+    
         return weights.astype(np.float32)
 
     def supports_tree_weights(self):
