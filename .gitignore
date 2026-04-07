@@ -6,6 +6,12 @@ __pycache__/
 # C extensions
 *.so
 
+# vscode
+.vscode/
+
+# conda
+.condaenv/
+
 # Data and results
 experiments/results/
 datasets/
