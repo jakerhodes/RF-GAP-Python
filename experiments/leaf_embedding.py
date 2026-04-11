@@ -6,8 +6,8 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
-from scipy import sparse
 from sklearn.decomposition import PCA, TruncatedSVD
+from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import accuracy_score
 from sklearn.neighbors import KNeighborsClassifier
 from umap import UMAP
@@ -54,13 +54,26 @@ PROGRESS_LOG = RUN_DIR / "embedding_progress.log"
 SEEDS = [44, 578, 9, 912, 345]
 
 LABEL_COL_IDX = 0
-SCALE = "standardize"
-GLOBAL_TRANSFORM = False
 DROP_MISSING_Y = True
 VERBOSE_DATAPREP = False
 
+# Image datasets: global normalize
+IMAGE_DATASETS = {
+    "pathmnist_28",
+    "sign_mnist",
+    "tissuemnist_28",
+}
+DEFAULT_SCALE = "standardize"
+DEFAULT_GLOBAL_TRANSFORM = False
+IMAGE_SCALE = "normalize"
+IMAGE_GLOBAL_TRANSFORM = True
+
+# Keep only the first 10 SignMNIST letters
+# SignMNIST skips J, so this is the first 10 available letters A..K without J
+SIGN_MNIST_ALLOWED_LETTERS = ["A", "B", "C", "D", "E", "F", "G", "H", "I", "K"]
+
 # Fixed forest setup for leaf-space methods
-KERNEL_METHOD = "gap"
+KERNEL_METHOD = "kerf"  # do not set to gap which is asymmetric
 MODEL_TYPE = "rf"
 FOREST_KWARGS = {
     "bootstrap": True,
@@ -70,17 +83,19 @@ FOREST_KWARGS = {
 # Embedding methods
 RUN_RAW_PCA = True
 RUN_LEAF_PCA = True
-RUN_RAW_SVD30_UMAP = True
-RUN_LEAF_SVD30_UMAP = True
+RUN_RAW_SVD_UMAP = True
+RUN_LEAF_SVD_UMAP = True
 
 SVD_N_COMPONENTS = 30
 UMAP_N_COMPONENTS = 2
 UMAP_KWARGS = {
     "n_components": UMAP_N_COMPONENTS,
-    "random_state": None,  # keep same behavior as your notebook
+    "random_state": None,
 }
 
-KNN_N_NEIGHBORS = 5
+# Scaled k-NN neighborhoods as fractions of train size
+KNN_FRACTIONS = [0.001, 0.002, 0.005, 0.01]
+LOGREG_MAX_ITER = 5000
 
 
 # ---------------------------------------------------------------------
@@ -116,34 +131,111 @@ def make_dataset_seed_dir(dataset_name: str, seed: int) -> Path:
 
 def save_embedding(
     out_path: Path,
+    row_ids: np.ndarray,
     y_raw: np.ndarray,
     emb_2d: np.ndarray,
 ) -> None:
-    df = pd.DataFrame({
-        "label": np.asarray(y_raw),
-        "x1": emb_2d[:, 0],
-        "x2": emb_2d[:, 1],
-    })
+    df = pd.DataFrame(
+        {
+            "row_id": np.asarray(row_ids),
+            "label": np.asarray(y_raw),
+            "x1": emb_2d[:, 0],
+            "x2": emb_2d[:, 1],
+        }
+    )
     df.to_csv(out_path, index=False)
 
 
-def knn_test_accuracy(
+def get_dataprep_kwargs(dataset_name: str) -> dict[str, object]:
+    if dataset_name in IMAGE_DATASETS:
+        return {
+            "scale": IMAGE_SCALE,
+            "global_transform": IMAGE_GLOBAL_TRANSFORM,
+        }
+    return {
+        "scale": DEFAULT_SCALE,
+        "global_transform": DEFAULT_GLOBAL_TRANSFORM,
+    }
+
+
+def crop_sign_mnist(
+    X_train,
+    X_test,
+    y_train,
+    y_test,
+    y_train_raw,
+    y_test_raw,
+    id_train_raw,
+    id_test_raw,
+):
+    mask_train = np.isin(np.asarray(y_train_raw), SIGN_MNIST_ALLOWED_LETTERS)
+    mask_test = np.isin(np.asarray(y_test_raw), SIGN_MNIST_ALLOWED_LETTERS)
+
+    X_train = X_train[mask_train]
+    X_test = X_test[mask_test]
+    y_train = np.asarray(y_train)[mask_train]
+    y_test = np.asarray(y_test)[mask_test]
+    y_train_raw = np.asarray(y_train_raw)[mask_train]
+    y_test_raw = np.asarray(y_test_raw)[mask_test]
+    id_train_raw = np.asarray(id_train_raw)[mask_train]
+    id_test_raw = np.asarray(id_test_raw)[mask_test]
+
+    return (
+        X_train,
+        X_test,
+        y_train,
+        y_test,
+        y_train_raw,
+        y_test_raw,
+        id_train_raw,
+        id_test_raw,
+    )
+
+
+def get_knn_neighborhoods(n_train: int) -> list[int]:
+    k_values = sorted(
+        {
+            max(3, min(int(round(n_train * frac)), n_train - 1))
+            for frac in KNN_FRACTIONS
+        }
+    )
+    return k_values
+
+
+def knn_test_accuracy_multi(
     x_train_2d: np.ndarray,
     x_test_2d: np.ndarray,
     y_train: np.ndarray,
     y_test: np.ndarray,
-    n_neighbors: int = KNN_N_NEIGHBORS,
+) -> tuple[float, list[int], dict[int, float]]:
+    k_values = get_knn_neighborhoods(len(y_train))
+    scores: dict[int, float] = {}
+
+    for k in k_values:
+        clf = KNeighborsClassifier(n_neighbors=k)
+        clf.fit(x_train_2d, y_train)
+        y_pred = clf.predict(x_test_2d)
+        scores[k] = float(accuracy_score(y_test, y_pred))
+
+    avg_score = float(np.mean(list(scores.values())))
+    return avg_score, k_values, scores
+
+
+def logistic_test_accuracy(
+    x_train_2d: np.ndarray,
+    x_test_2d: np.ndarray,
+    y_train: np.ndarray,
+    y_test: np.ndarray,
+    seed: int,
 ) -> float:
-    clf = KNeighborsClassifier(n_neighbors=n_neighbors)
+    clf = LogisticRegression(
+        max_iter=LOGREG_MAX_ITER,
+        n_jobs=-1,
+        random_state=seed,
+    )
     clf.fit(x_train_2d, y_train)
     y_pred = clf.predict(x_test_2d)
-    return accuracy_score(y_test, y_pred)
-
-
-def to_dense_if_needed(X):
-    if sparse.issparse(X):
-        return X.toarray()
-    return X
+    return float(accuracy_score(y_test, y_pred))
 
 
 # ---------------------------------------------------------------------
@@ -156,27 +248,23 @@ def run_raw_pca(
     y_test,
     y_train_raw,
     y_test_raw,
+    id_train_raw,
+    id_test_raw,
     seed: int,
     out_dir: Path,
 ) -> dict:
-    # Train side
     pca = PCA(n_components=2, random_state=seed)
 
-    x_train_2d, fit_time, fit_mem = timed_call(
-        pca.fit_transform,
-        to_dense_if_needed(X_train),
+    x_train_2d, fit_time, fit_mem = timed_call(pca.fit_transform, X_train)
+    x_test_2d, test_time, test_mem = timed_call(pca.transform, X_test)
+
+    knn_acc, knn_k_values, knn_scores = knn_test_accuracy_multi(
+        x_train_2d, x_test_2d, y_train, y_test
     )
+    lin_acc = logistic_test_accuracy(x_train_2d, x_test_2d, y_train, y_test, seed)
 
-    # Test side
-    x_test_2d, test_time, test_mem = timed_call(
-        pca.transform,
-        to_dense_if_needed(X_test),
-    )
-
-    acc = knn_test_accuracy(x_train_2d, x_test_2d, y_train, y_test)
-
-    save_embedding(out_dir / "raw_pca_train.csv", y_train_raw, x_train_2d)
-    save_embedding(out_dir / "raw_pca_test.csv", y_test_raw, x_test_2d)
+    save_embedding(out_dir / "raw_pca_train.csv", id_train_raw, y_train_raw, x_train_2d)
+    save_embedding(out_dir / "raw_pca_test.csv", id_test_raw, y_test_raw, x_test_2d)
 
     return {
         "method_name": "raw_pca",
@@ -204,7 +292,10 @@ def run_raw_pca(
         "train_total_peak_mb": fit_mem,
         "test_total_time_s": test_time,
         "test_total_peak_mb": test_mem,
-        "knn_test_acc": acc,
+        "knn_test_acc_avg": knn_acc,
+        "knn_k_values": str(knn_k_values),
+        "knn_test_acc_by_k": str(knn_scores),
+        "linear_test_acc": lin_acc,
         "train_embedding_file": str(out_dir / "raw_pca_train.csv"),
         "test_embedding_file": str(out_dir / "raw_pca_test.csv"),
         "status": "ok",
@@ -220,40 +311,31 @@ def run_leaf_pca(
     y_test,
     y_train_raw,
     y_test_raw,
+    id_train_raw,
+    id_test_raw,
     seed: int,
     out_dir: Path,
 ) -> dict:
-    # Shared leaf pipeline
-    _, forest_fit_time, forest_fit_mem = timed_call(
-        fk.fit_forest,
-        X_train,
-        y_train,
-    )
-
+    _, forest_fit_time, forest_fit_mem = timed_call(fk.fit_forest, X_train, y_train)
     _, cache_time, cache_mem = timed_call(
         fk.build_kernel_cache,
         kernel_method=KERNEL_METHOD,
     )
-
     leaf_train, ref_time, ref_mem = timed_call(fk.get_reference_map)
     leaf_test, query_time, query_mem = timed_call(fk.get_query_map, X_test)
 
     pca = PCA(n_components=2, random_state=seed)
 
-    x_train_2d, pca_fit_time, pca_fit_mem = timed_call(
-        pca.fit_transform,
-        to_dense_if_needed(leaf_train),
+    x_train_2d, pca_fit_time, pca_fit_mem = timed_call(pca.fit_transform, leaf_train)
+    x_test_2d, pca_test_time, pca_test_mem = timed_call(pca.transform, leaf_test)
+
+    knn_acc, knn_k_values, knn_scores = knn_test_accuracy_multi(
+        x_train_2d, x_test_2d, y_train, y_test
     )
+    lin_acc = logistic_test_accuracy(x_train_2d, x_test_2d, y_train, y_test, seed)
 
-    x_test_2d, pca_test_time, pca_test_mem = timed_call(
-        pca.transform,
-        to_dense_if_needed(leaf_test),
-    )
-
-    acc = knn_test_accuracy(x_train_2d, x_test_2d, y_train, y_test)
-
-    save_embedding(out_dir / "leaf_pca_train.csv", y_train_raw, x_train_2d)
-    save_embedding(out_dir / "leaf_pca_test.csv", y_test_raw, x_test_2d)
+    save_embedding(out_dir / "leaf_pca_train.csv", id_train_raw, y_train_raw, x_train_2d)
+    save_embedding(out_dir / "leaf_pca_test.csv", id_test_raw, y_test_raw, x_test_2d)
 
     train_total_time = forest_fit_time + cache_time + ref_time + pca_fit_time
     train_total_peak = forest_fit_mem + cache_mem + ref_mem + pca_fit_mem
@@ -286,7 +368,10 @@ def run_leaf_pca(
         "train_total_peak_mb": train_total_peak,
         "test_total_time_s": test_total_time,
         "test_total_peak_mb": test_total_peak,
-        "knn_test_acc": acc,
+        "knn_test_acc_avg": knn_acc,
+        "knn_k_values": str(knn_k_values),
+        "knn_test_acc_by_k": str(knn_scores),
+        "linear_test_acc": lin_acc,
         "train_embedding_file": str(out_dir / "leaf_pca_train.csv"),
         "test_embedding_file": str(out_dir / "leaf_pca_test.csv"),
         "status": "ok",
@@ -294,27 +379,22 @@ def run_leaf_pca(
     }
 
 
-def run_raw_svd30_umap(
+def run_raw_svd_umap(
     X_train,
     X_test,
     y_train,
     y_test,
     y_train_raw,
     y_test_raw,
+    id_train_raw,
+    id_test_raw,
     seed: int,
     out_dir: Path,
 ) -> dict:
     svd = TruncatedSVD(n_components=SVD_N_COMPONENTS, random_state=seed)
 
-    x_svd_train, svd_fit_time, svd_fit_mem = timed_call(
-        svd.fit_transform,
-        X_train,
-    )
-
-    x_svd_test, svd_test_time, svd_test_mem = timed_call(
-        svd.transform,
-        X_test,
-    )
+    x_svd_train, svd_fit_time, svd_fit_mem = timed_call(svd.fit_transform, X_train)
+    x_svd_test, svd_test_time, svd_test_mem = timed_call(svd.transform, X_test)
 
     umap = UMAP(**UMAP_KWARGS)
 
@@ -322,16 +402,28 @@ def run_raw_svd30_umap(
         umap.fit_transform,
         x_svd_train,
     )
-
     x_test_2d, umap_test_time, umap_test_mem = timed_call(
         umap.transform,
         x_svd_test,
     )
 
-    acc = knn_test_accuracy(x_train_2d, x_test_2d, y_train, y_test)
+    knn_acc, knn_k_values, knn_scores = knn_test_accuracy_multi(
+        x_train_2d, x_test_2d, y_train, y_test
+    )
+    lin_acc = logistic_test_accuracy(x_train_2d, x_test_2d, y_train, y_test, seed)
 
-    save_embedding(out_dir / "raw_svd30_umap_train.csv", y_train_raw, x_train_2d)
-    save_embedding(out_dir / "raw_svd30_umap_test.csv", y_test_raw, x_test_2d)
+    save_embedding(
+        out_dir / f"raw_svd{SVD_N_COMPONENTS}_umap_train.csv",
+        id_train_raw,
+        y_train_raw,
+        x_train_2d,
+    )
+    save_embedding(
+        out_dir / f"raw_svd{SVD_N_COMPONENTS}_umap_test.csv",
+        id_test_raw,
+        y_test_raw,
+        x_test_2d,
+    )
 
     train_total_time = svd_fit_time + umap_fit_time
     train_total_peak = svd_fit_mem + umap_fit_mem
@@ -339,7 +431,7 @@ def run_raw_svd30_umap(
     test_total_peak = svd_test_mem + umap_test_mem
 
     return {
-        "method_name": "raw_svd30_umap",
+        "method_name": f"raw_svd{SVD_N_COMPONENTS}_umap",
         "forest_fit_time_s": np.nan,
         "forest_fit_peak_mb": np.nan,
         "cache_build_time_s": np.nan,
@@ -364,15 +456,18 @@ def run_raw_svd30_umap(
         "train_total_peak_mb": train_total_peak,
         "test_total_time_s": test_total_time,
         "test_total_peak_mb": test_total_peak,
-        "knn_test_acc": acc,
-        "train_embedding_file": str(out_dir / "raw_svd30_umap_train.csv"),
-        "test_embedding_file": str(out_dir / "raw_svd30_umap_test.csv"),
+        "knn_test_acc_avg": knn_acc,
+        "knn_k_values": str(knn_k_values),
+        "knn_test_acc_by_k": str(knn_scores),
+        "linear_test_acc": lin_acc,
+        "train_embedding_file": str(out_dir / f"raw_svd{SVD_N_COMPONENTS}_umap_train.csv"),
+        "test_embedding_file": str(out_dir / f"raw_svd{SVD_N_COMPONENTS}_umap_test.csv"),
         "status": "ok",
         "error": "",
     }
 
 
-def run_leaf_svd30_umap(
+def run_leaf_svd_umap(
     fk: ForestKernel,
     X_train,
     X_test,
@@ -380,34 +475,23 @@ def run_leaf_svd30_umap(
     y_test,
     y_train_raw,
     y_test_raw,
+    id_train_raw,
+    id_test_raw,
     seed: int,
     out_dir: Path,
 ) -> dict:
-    _, forest_fit_time, forest_fit_mem = timed_call(
-        fk.fit_forest,
-        X_train,
-        y_train,
-    )
-
+    _, forest_fit_time, forest_fit_mem = timed_call(fk.fit_forest, X_train, y_train)
     _, cache_time, cache_mem = timed_call(
         fk.build_kernel_cache,
         kernel_method=KERNEL_METHOD,
     )
-
     leaf_train, ref_time, ref_mem = timed_call(fk.get_reference_map)
     leaf_test, query_time, query_mem = timed_call(fk.get_query_map, X_test)
 
     svd = TruncatedSVD(n_components=SVD_N_COMPONENTS, random_state=seed)
 
-    x_svd_train, svd_fit_time, svd_fit_mem = timed_call(
-        svd.fit_transform,
-        leaf_train,
-    )
-
-    x_svd_test, svd_test_time, svd_test_mem = timed_call(
-        svd.transform,
-        leaf_test,
-    )
+    x_svd_train, svd_fit_time, svd_fit_mem = timed_call(svd.fit_transform, leaf_train)
+    x_svd_test, svd_test_time, svd_test_mem = timed_call(svd.transform, leaf_test)
 
     umap = UMAP(**UMAP_KWARGS)
 
@@ -415,16 +499,28 @@ def run_leaf_svd30_umap(
         umap.fit_transform,
         x_svd_train,
     )
-
     x_test_2d, umap_test_time, umap_test_mem = timed_call(
         umap.transform,
         x_svd_test,
     )
 
-    acc = knn_test_accuracy(x_train_2d, x_test_2d, y_train, y_test)
+    knn_acc, knn_k_values, knn_scores = knn_test_accuracy_multi(
+        x_train_2d, x_test_2d, y_train, y_test
+    )
+    lin_acc = logistic_test_accuracy(x_train_2d, x_test_2d, y_train, y_test, seed)
 
-    save_embedding(out_dir / "leaf_svd30_umap_train.csv", y_train_raw, x_train_2d)
-    save_embedding(out_dir / "leaf_svd30_umap_test.csv", y_test_raw, x_test_2d)
+    save_embedding(
+        out_dir / f"leaf_svd{SVD_N_COMPONENTS}_umap_train.csv",
+        id_train_raw,
+        y_train_raw,
+        x_train_2d,
+    )
+    save_embedding(
+        out_dir / f"leaf_svd{SVD_N_COMPONENTS}_umap_test.csv",
+        id_test_raw,
+        y_test_raw,
+        x_test_2d,
+    )
 
     train_total_time = forest_fit_time + cache_time + ref_time + svd_fit_time + umap_fit_time
     train_total_peak = forest_fit_mem + cache_mem + ref_mem + svd_fit_mem + umap_fit_mem
@@ -432,7 +528,7 @@ def run_leaf_svd30_umap(
     test_total_peak = query_mem + svd_test_mem + umap_test_mem
 
     return {
-        "method_name": "leaf_svd30_umap",
+        "method_name": f"leaf_svd{SVD_N_COMPONENTS}_umap",
         "forest_fit_time_s": forest_fit_time,
         "forest_fit_peak_mb": forest_fit_mem,
         "cache_build_time_s": cache_time,
@@ -457,9 +553,12 @@ def run_leaf_svd30_umap(
         "train_total_peak_mb": train_total_peak,
         "test_total_time_s": test_total_time,
         "test_total_peak_mb": test_total_peak,
-        "knn_test_acc": acc,
-        "train_embedding_file": str(out_dir / "leaf_svd30_umap_train.csv"),
-        "test_embedding_file": str(out_dir / "leaf_svd30_umap_test.csv"),
+        "knn_test_acc_avg": knn_acc,
+        "knn_k_values": str(knn_k_values),
+        "knn_test_acc_by_k": str(knn_scores),
+        "linear_test_acc": lin_acc,
+        "train_embedding_file": str(out_dir / f"leaf_svd{SVD_N_COMPONENTS}_umap_train.csv"),
+        "test_embedding_file": str(out_dir / f"leaf_svd{SVD_N_COMPONENTS}_umap_test.csv"),
         "status": "ok",
         "error": "",
     }
@@ -482,24 +581,67 @@ def main() -> None:
     log_progress(f"Forest kwargs: {FOREST_KWARGS}", PROGRESS_LOG)
     log_progress(f"SVD components: {SVD_N_COMPONENTS}", PROGRESS_LOG)
     log_progress(f"UMAP kwargs: {UMAP_KWARGS}", PROGRESS_LOG)
-    log_progress(f"kNN neighbors: {KNN_N_NEIGHBORS}", PROGRESS_LOG)
+    log_progress(f"kNN fractions: {KNN_FRACTIONS}", PROGRESS_LOG)
+    log_progress(f"Image datasets: {sorted(IMAGE_DATASETS)}", PROGRESS_LOG)
+    log_progress(f"SignMNIST kept letters: {SIGN_MNIST_ALLOWED_LETTERS}", PROGRESS_LOG)
 
     for dataset_name, dataset_paths in dataset_groups.items():
         log_progress(f"=== DATASET: {dataset_name} ===", PROGRESS_LOG)
 
+        dataprep_kwargs = get_dataprep_kwargs(dataset_name)
+        scale = dataprep_kwargs["scale"]
+        global_transform = dataprep_kwargs["global_transform"]
+
+        log_progress(
+            f"Dataprep scheme | dataset={dataset_name} | "
+            f"scale={scale} | global_transform={global_transform}",
+            PROGRESS_LOG,
+        )
+
         for seed in SEEDS:
             log_progress(f">>> SEED: {seed}", PROGRESS_LOG)
 
-            X_train, X_test, y_train, y_test, y_train_raw, y_test_raw, meta = load_dataset_pair_with_raw_labels(
+            (
+                X_train,
+                X_test,
+                y_train,
+                y_test,
+                y_train_raw,
+                y_test_raw,
+                id_train_raw,
+                id_test_raw,
+                meta,
+            ) = load_dataset_pair_with_raw_labels(
                 dataset_name=dataset_name,
                 paths=dataset_paths,
                 seed=seed,
                 label_col_idx=LABEL_COL_IDX,
-                scale=SCALE,
-                global_transform=GLOBAL_TRANSFORM,
+                scale=scale,
+                global_transform=global_transform,
                 drop_missing_y=DROP_MISSING_Y,
                 verbose_dataprep=VERBOSE_DATAPREP,
             )
+
+            if dataset_name == "sign_mnist":
+                (
+                    X_train,
+                    X_test,
+                    y_train,
+                    y_test,
+                    y_train_raw,
+                    y_test_raw,
+                    id_train_raw,
+                    id_test_raw,
+                ) = crop_sign_mnist(
+                    X_train,
+                    X_test,
+                    y_train,
+                    y_test,
+                    y_train_raw,
+                    y_test_raw,
+                    id_train_raw,
+                    id_test_raw,
+                )
 
             log_progress(
                 f"Loaded {dataset_name}: "
@@ -518,6 +660,8 @@ def main() -> None:
                     y_test=y_test,
                     y_train_raw=y_train_raw,
                     y_test_raw=y_test_raw,
+                    id_train_raw=id_train_raw,
+                    id_test_raw=id_test_raw,
                     seed=seed,
                     out_dir=out_dir,
                 )
@@ -526,6 +670,8 @@ def main() -> None:
                     "dataset": dataset_name,
                     "seed": seed,
                     "predefined_split": meta["predefined_split"],
+                    "scale": scale,
+                    "global_transform": global_transform,
                     "n_train": len(y_train),
                     "n_test": len(y_test),
                     "kernel_method": KERNEL_METHOD,
@@ -535,7 +681,9 @@ def main() -> None:
                 append_and_flush(rows, row)
                 log_progress(
                     f"Done raw_pca | dataset={dataset_name} | seed={seed} | "
-                    f"acc={result['knn_test_acc']:.4f}",
+                    f"knn_acc={result['knn_test_acc_avg']:.4f} | "
+                    f"lin_acc={result['linear_test_acc']:.4f} | "
+                    f"k={result['knn_k_values']}",
                     PROGRESS_LOG,
                 )
 
@@ -550,6 +698,8 @@ def main() -> None:
                     y_test=y_test,
                     y_train_raw=y_train_raw,
                     y_test_raw=y_test_raw,
+                    id_train_raw=id_train_raw,
+                    id_test_raw=id_test_raw,
                     seed=seed,
                     out_dir=out_dir,
                 )
@@ -558,6 +708,8 @@ def main() -> None:
                     "dataset": dataset_name,
                     "seed": seed,
                     "predefined_split": meta["predefined_split"],
+                    "scale": scale,
+                    "global_transform": global_transform,
                     "n_train": len(y_train),
                     "n_test": len(y_test),
                     "kernel_method": KERNEL_METHOD,
@@ -567,19 +719,23 @@ def main() -> None:
                 append_and_flush(rows, row)
                 log_progress(
                     f"Done leaf_pca | dataset={dataset_name} | seed={seed} | "
-                    f"acc={result['knn_test_acc']:.4f}",
+                    f"knn_acc={result['knn_test_acc_avg']:.4f} | "
+                    f"lin_acc={result['linear_test_acc']:.4f} | "
+                    f"k={result['knn_k_values']}",
                     PROGRESS_LOG,
                 )
 
-            if RUN_RAW_SVD30_UMAP:
-                log_progress("Method: raw_svd30_umap", PROGRESS_LOG)
-                result = run_raw_svd30_umap(
+            if RUN_RAW_SVD_UMAP:
+                log_progress(f"Method: raw_svd{SVD_N_COMPONENTS}_umap", PROGRESS_LOG)
+                result = run_raw_svd_umap(
                     X_train=X_train,
                     X_test=X_test,
                     y_train=y_train,
                     y_test=y_test,
                     y_train_raw=y_train_raw,
                     y_test_raw=y_test_raw,
+                    id_train_raw=id_train_raw,
+                    id_test_raw=id_test_raw,
                     seed=seed,
                     out_dir=out_dir,
                 )
@@ -588,6 +744,8 @@ def main() -> None:
                     "dataset": dataset_name,
                     "seed": seed,
                     "predefined_split": meta["predefined_split"],
+                    "scale": scale,
+                    "global_transform": global_transform,
                     "n_train": len(y_train),
                     "n_test": len(y_test),
                     "kernel_method": KERNEL_METHOD,
@@ -596,15 +754,17 @@ def main() -> None:
                 }
                 append_and_flush(rows, row)
                 log_progress(
-                    f"Done raw_svd30_umap | dataset={dataset_name} | seed={seed} | "
-                    f"acc={result['knn_test_acc']:.4f}",
+                    f"Done raw_svd{SVD_N_COMPONENTS}_umap | dataset={dataset_name} | seed={seed} | "
+                    f"knn_acc={result['knn_test_acc_avg']:.4f} | "
+                    f"lin_acc={result['linear_test_acc']:.4f} | "
+                    f"k={result['knn_k_values']}",
                     PROGRESS_LOG,
                 )
 
-            if RUN_LEAF_SVD30_UMAP:
-                log_progress("Method: leaf_svd30_umap", PROGRESS_LOG)
+            if RUN_LEAF_SVD_UMAP:
+                log_progress(f"Method: leaf_svd{SVD_N_COMPONENTS}_umap", PROGRESS_LOG)
                 fk = instantiate_fk(seed)
-                result = run_leaf_svd30_umap(
+                result = run_leaf_svd_umap(
                     fk=fk,
                     X_train=X_train,
                     X_test=X_test,
@@ -612,6 +772,8 @@ def main() -> None:
                     y_test=y_test,
                     y_train_raw=y_train_raw,
                     y_test_raw=y_test_raw,
+                    id_train_raw=id_train_raw,
+                    id_test_raw=id_test_raw,
                     seed=seed,
                     out_dir=out_dir,
                 )
@@ -620,6 +782,8 @@ def main() -> None:
                     "dataset": dataset_name,
                     "seed": seed,
                     "predefined_split": meta["predefined_split"],
+                    "scale": scale,
+                    "global_transform": global_transform,
                     "n_train": len(y_train),
                     "n_test": len(y_test),
                     "kernel_method": KERNEL_METHOD,
@@ -628,8 +792,10 @@ def main() -> None:
                 }
                 append_and_flush(rows, row)
                 log_progress(
-                    f"Done leaf_svd30_umap | dataset={dataset_name} | seed={seed} | "
-                    f"acc={result['knn_test_acc']:.4f}",
+                    f"Done leaf_svd{SVD_N_COMPONENTS}_umap | dataset={dataset_name} | seed={seed} | "
+                    f"knn_acc={result['knn_test_acc_avg']:.4f} | "
+                    f"lin_acc={result['linear_test_acc']:.4f} | "
+                    f"k={result['knn_k_values']}",
                     PROGRESS_LOG,
                 )
 
