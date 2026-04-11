@@ -178,17 +178,82 @@ def RFGAP(
         def fit_forest(self, X, y, **fit_kwargs):
             """
             Fit only the underlying sklearn random forest.
-
+        
             This is the part that should count as forest training time when
             benchmarking against ForestKernel.
             """
+            if self._adapter_ready:
+                # Forest already injected through set_forest(...)
+                if y is not None:
+                    self.y = np.asarray(y)
+                    self.n = len(y)
+                return {"X": X}
+        
             super().fit(X, y, **fit_kwargs)
-
+        
             self.y = y
             self.n = len(y)
             self._adapter_ready = True
-
+        
             return {"X": X}
+        
+        def set_forest(self, fitted_forest, y=None):
+            """
+            Reuse an already fitted sklearn random forest instead of fitting again.
+        
+            Parameters
+            ----------
+            fitted_forest : fitted RandomForestClassifier or RandomForestRegressor
+                Forest to reuse.
+        
+            y : array-like or None, default=None
+                Optional labels corresponding to the training samples. Stored only
+                for consistency with the legacy API.
+            """
+            check_is_fitted(fitted_forest)
+        
+            # Preserve wrapper-specific configuration
+            prox_method = self.prox_method
+            matrix_type = self.matrix_type
+            triangular = self.triangular
+            prediction_type = self.prediction_type
+            non_zero_diagonal = self.non_zero_diagonal
+            force_symmetric = self.force_symmetric
+        
+            # Preserve legacy cache fields
+            leaf_matrix = self.leaf_matrix
+            leaf_matrix_test = self.leaf_matrix_test
+            oob_indices = self.oob_indices
+            in_bag_counts = self.in_bag_counts
+            in_bag_indices = self.in_bag_indices
+            in_bag_leaves = self.in_bag_leaves
+            oob_leaves = self.oob_leaves
+        
+            # Copy fitted sklearn forest state into self
+            self.__dict__.update(fitted_forest.__dict__)
+        
+            # Restore wrapper-specific configuration
+            self.prox_method = prox_method
+            self.matrix_type = matrix_type
+            self.triangular = triangular
+            self.prediction_type = prediction_type
+            self.non_zero_diagonal = non_zero_diagonal
+            self.force_symmetric = force_symmetric
+        
+            # Restore legacy cache fields
+            self.leaf_matrix = leaf_matrix
+            self.leaf_matrix_test = leaf_matrix_test
+            self.oob_indices = oob_indices
+            self.in_bag_counts = in_bag_counts
+            self.in_bag_indices = in_bag_indices
+            self.in_bag_leaves = in_bag_leaves
+            self.oob_leaves = oob_leaves
+        
+            self.y = None if y is None else np.asarray(y)
+            self.n = None if y is None else len(y)
+            self._adapter_ready = True
+        
+            return self
 
         def build_proximity_cache(self, X, x_test=None):
             """
@@ -256,6 +321,7 @@ def RFGAP(
         def get_proximity_vector(self, ind):
             """
             Produce one row of the legacy proximity matrix.
+            Returns only (data, cols), which is enough for CSR row-wise construction.
             """
             n, num_trees = self.leaf_matrix.shape
 
@@ -278,7 +344,6 @@ def RFGAP(
                     prox_vec = np.divide(prox_counts, tree_counts)
 
                     cols = np.where(prox_vec != 0)[0] + ind
-                    rows = np.ones(len(cols), dtype=int) * ind
                     data = prox_vec[cols - ind]
                 else:
                     ind_oob_leaves = np.nonzero(self.oob_leaves[ind, :])[0]
@@ -298,7 +363,6 @@ def RFGAP(
                     prox_vec = np.divide(prox_counts, tree_counts)
 
                     cols = np.nonzero(prox_vec)[0]
-                    rows = np.ones(len(cols), dtype=int) * ind
                     data = prox_vec[cols]
 
             elif self.prox_method == "original":
@@ -307,14 +371,12 @@ def RFGAP(
                     prox_vec = np.sum(tree_inds == self.leaf_matrix[ind:, :], axis=1)
 
                     cols = np.where(prox_vec != 0)[0] + ind
-                    rows = np.ones(len(cols), dtype=int) * ind
                     data = prox_vec[cols - ind] / num_trees
                 else:
                     tree_inds = self.leaf_matrix[ind, :]
                     prox_vec = np.sum(tree_inds == self.leaf_matrix, axis=1)
 
                     cols = np.nonzero(prox_vec)[0]
-                    rows = np.ones(len(cols), dtype=int) * ind
                     data = prox_vec[cols] / num_trees
 
             elif self.prox_method == "rfgap":
@@ -355,19 +417,19 @@ def RFGAP(
                     prox_vec[ind] = 1
 
                 cols = np.nonzero(prox_vec)[0]
-                rows = np.ones(len(cols), dtype=int) * ind
                 data = prox_vec[cols]
 
             else:
                 raise ValueError(f"Unknown prox_method='{self.prox_method}'")
 
-            return data.tolist(), rows.tolist(), cols.tolist()
+            return np.asarray(data), np.asarray(cols, dtype=np.int64)
 
         def get_proximities(self):
             """
             Materialize the legacy proximity matrix.
 
-            This is the part that should count as proximity materialization time.
+            This version avoids giant Python triplet lists and instead builds
+            the CSR structure row by row.
             """
             check_is_fitted(self)
 
@@ -379,30 +441,31 @@ def RFGAP(
 
             n, _ = self.leaf_matrix.shape
 
-            prox_vals = []
-            rows = []
-            cols = []
+            data_parts = []
+            indices_parts = []
+            indptr = np.zeros(n + 1, dtype=np.int64)
 
             for i in range(n):
-                prox_val_temp, rows_temp, cols_temp = self.get_proximity_vector(i)
-                prox_vals.extend(prox_val_temp)
-                rows.extend(rows_temp)
-                cols.extend(cols_temp)
+                data_i, cols_i = self.get_proximity_vector(i)
+                data_parts.append(data_i)
+                indices_parts.append(cols_i)
+                indptr[i + 1] = indptr[i] + cols_i.size
+
+            if len(data_parts) > 0:
+                data = np.concatenate(data_parts)
+                indices = np.concatenate(indices_parts)
+            else:
+                data = np.array([], dtype=np.float32)
+                indices = np.array([], dtype=np.int64)
+
+            prox_sparse = sparse.csr_matrix(
+                (data, indices, indptr),
+                shape=(n, n),
+            )
 
             if self.triangular and self.prox_method != "rfgap":
-                prox_sparse = sparse.csr_matrix(
-                    (
-                        np.array(prox_vals + prox_vals),
-                        (np.array(rows + cols), np.array(cols + rows)),
-                    ),
-                    shape=(n, n),
-                )
+                prox_sparse = prox_sparse + prox_sparse.transpose()
                 prox_sparse.setdiag(1)
-            else:
-                prox_sparse = sparse.csr_matrix(
-                    (np.array(prox_vals), (np.array(rows), np.array(cols))),
-                    shape=(n, n),
-                )
 
             if self.force_symmetric:
                 prox_sparse = (prox_sparse + prox_sparse.transpose()) / 2
@@ -427,48 +490,45 @@ def RFGAP(
             extended_leaf_matrix = self.apply(data)
             n_ext, _ = extended_leaf_matrix.shape
 
-            prox_vals = []
-            rows = []
-            cols = []
+            data_parts = []
+            indices_parts = []
+            indptr = np.zeros(n_ext + 1, dtype=np.int64)
 
             if self.prox_method == "oob":
-                for ind in range(n):
-                    ind_oob_leaves = np.nonzero(self.oob_leaves[ind, :])[0]
+                for ind in range(n_ext):
+                    ind_oob_leaves = np.nonzero(self.oob_leaves[:, :])[1]  # unused placeholder to keep structure similar
 
+                    # Compute proximities from test row ind to all train rows
                     tree_counts = np.sum(
-                        self.oob_indices[ind, ind_oob_leaves]
-                        == np.ones_like(extended_leaf_matrix[:, ind_oob_leaves]),
+                        self.oob_indices[:, :] == np.ones_like(self.oob_indices[:, :]),
                         axis=1,
                     )
                     tree_counts[tree_counts == 0] = 1
 
                     prox_counts = np.sum(
-                        self.oob_leaves[ind, ind_oob_leaves]
-                        == extended_leaf_matrix[:, ind_oob_leaves],
+                        self.oob_leaves == extended_leaf_matrix[ind, :],
                         axis=1,
                     )
                     prox_vec = np.divide(prox_counts, tree_counts)
 
-                    cols_temp = np.nonzero(prox_vec)[0]
-                    rows_temp = np.ones(len(cols_temp), dtype=int) * ind
-                    prox_temp = prox_vec[cols_temp]
+                    cols_i = np.nonzero(prox_vec)[0]
+                    data_i = prox_vec[cols_i]
 
-                    cols.extend(cols_temp)
-                    rows.extend(rows_temp)
-                    prox_vals.extend(prox_temp)
+                    data_parts.append(np.asarray(data_i))
+                    indices_parts.append(np.asarray(cols_i, dtype=np.int64))
+                    indptr[ind + 1] = indptr[ind] + len(cols_i)
 
             elif self.prox_method == "original":
-                for ind in range(n):
-                    tree_inds = self.leaf_matrix[ind, :]
-                    prox_vec = np.sum(tree_inds == extended_leaf_matrix, axis=1)
+                for ind in range(n_ext):
+                    tree_inds = extended_leaf_matrix[ind, :]
+                    prox_vec = np.sum(tree_inds == self.leaf_matrix, axis=1)
 
-                    cols_temp = np.nonzero(prox_vec)[0]
-                    rows_temp = np.ones(len(cols_temp), dtype=int) * ind
-                    prox_temp = prox_vec[cols_temp] / num_trees
+                    cols_i = np.nonzero(prox_vec)[0]
+                    data_i = prox_vec[cols_i] / num_trees
 
-                    cols.extend(cols_temp)
-                    rows.extend(rows_temp)
-                    prox_vals.extend(prox_temp)
+                    data_parts.append(np.asarray(data_i))
+                    indices_parts.append(np.asarray(cols_i, dtype=np.int64))
+                    indptr[ind + 1] = indptr[ind] + len(cols_i)
 
             elif self.prox_method == "rfgap":
                 for ind in range(n_ext):
@@ -481,19 +541,25 @@ def RFGAP(
 
                     prox_vec = np.sum(np.divide(matched_counts, ks), axis=1) / num_trees
 
-                    cols_temp = np.nonzero(prox_vec)[0]
-                    rows_temp = np.ones(len(cols_temp), dtype=int) * ind
-                    prox_temp = prox_vec[cols_temp]
+                    cols_i = np.nonzero(prox_vec)[0]
+                    data_i = prox_vec[cols_i]
 
-                    cols.extend(rows_temp)
-                    rows.extend(cols_temp)
-                    prox_vals.extend(prox_temp)
+                    data_parts.append(np.asarray(data_i))
+                    indices_parts.append(np.asarray(cols_i, dtype=np.int64))
+                    indptr[ind + 1] = indptr[ind] + len(cols_i)
 
             else:
                 raise ValueError(f"Unknown prox_method='{self.prox_method}'")
 
+            if len(data_parts) > 0:
+                data_arr = np.concatenate(data_parts)
+                indices_arr = np.concatenate(indices_parts)
+            else:
+                data_arr = np.array([], dtype=np.float32)
+                indices_arr = np.array([], dtype=np.int64)
+
             prox_sparse = sparse.csr_matrix(
-                (np.array(prox_vals), (np.array(cols), np.array(rows))),
+                (data_arr, indices_arr, indptr),
                 shape=(n_ext, n),
             )
 
