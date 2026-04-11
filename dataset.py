@@ -1,16 +1,26 @@
 import pandas as pd
 import numpy as np
 
+
 def dataprep(
     data,
     label_col_idx=0,
-    scale='standardize',
+    scale="standardize",
     global_transform=False,
     drop_missing_y=False,
     verbose=True,
 ):
     """
     Prepare a dataset for ML models.
+
+    Behavior
+    --------
+    - Extracts the label column if provided.
+    - Drops rows with missing labels if requested.
+    - Factorizes categorical/string labels into integer codes.
+    - One-hot encodes categorical feature columns.
+    - Applies scaling only to continuous numeric feature columns.
+    - Leaves binary / dummy columns unchanged.
 
     Parameters
     ----------
@@ -19,10 +29,10 @@ def dataprep(
     label_col_idx : int or None, default=0
         Index of the label column. Set to None if there is no label column.
     scale : {'normalize', 'standardize', None}, default='standardize'
-        Scaling to apply to features.
+        Scaling to apply to continuous numeric features only.
     global_transform : bool, default=False
-        If True, apply normalization/standardization globally over all feature
-        values. If False, apply it column-wise.
+        If True, apply scaling globally over all continuous feature values.
+        If False, apply it column-wise.
     drop_missing_y : bool, default=False
         If True, remove rows whose label is missing before processing labels.
     verbose : bool, default=True
@@ -34,7 +44,6 @@ def dataprep(
         Feature matrix.
     y : ndarray of shape (n_samples,), optional
         Label vector, returned only if label_col_idx is not None.
-        Categorical/string labels are factorized into integer codes.
     """
     df = data.copy()
 
@@ -92,67 +101,137 @@ def dataprep(
             print("No label column used.")
 
     # ---------------------------------------------------------
-    # 2. Handle categorical feature columns
+    # 2. Split feature columns by type
     # ---------------------------------------------------------
-    obj_cols = list(df.select_dtypes(include=['object', 'string', 'category']).columns)
-    if len(obj_cols) > 0:
-        for col in obj_cols:
-            df[col], _ = pd.factorize(df[col])
+    categorical_cols = list(
+        df.select_dtypes(include=["object", "string", "category"]).columns
+    )
+
+    numeric_cols = list(df.select_dtypes(include=[np.number, "bool"]).columns)
+
+    # Among numeric columns, identify binary columns and continuous columns.
+    # Binary columns are left unchanged. Continuous columns may be scaled.
+    binary_numeric_cols = []
+    continuous_numeric_cols = []
+
+    for col in numeric_cols:
+        non_na = df[col].dropna()
+        unique_vals = pd.unique(non_na)
+
+        if len(unique_vals) <= 2:
+            binary_numeric_cols.append(col)
+        else:
+            continuous_numeric_cols.append(col)
+
+    if verbose:
+        print(f"Categorical feature columns: {categorical_cols if categorical_cols else 'none'}")
+        print(f"Continuous numeric feature columns: {continuous_numeric_cols if continuous_numeric_cols else 'none'}")
+        print(f"Binary / indicator feature columns: {binary_numeric_cols if binary_numeric_cols else 'none'}")
+
+    # ---------------------------------------------------------
+    # 3. One-hot encode categorical features
+    # ---------------------------------------------------------
+    if len(categorical_cols) > 0:
+        df = pd.get_dummies(df, columns=categorical_cols, dummy_na=False)
         if verbose:
-            print(f"Factorized {len(obj_cols)} categorical feature column(s): {obj_cols}")
+            print(
+                f"Feature handling: one-hot encoded {len(categorical_cols)} "
+                f"categorical feature column(s)."
+            )
     else:
         if verbose:
-            print("No categorical feature columns to factorize.")
+            print("Feature handling: no categorical feature columns to one-hot encode.")
+
+    # Recompute continuous columns after one-hot encoding
+    # Keep only original continuous numeric columns that still exist
+    continuous_numeric_cols = [c for c in continuous_numeric_cols if c in df.columns]
 
     # ---------------------------------------------------------
-    # 3. Scaling
+    # 4. Cast to float32
     # ---------------------------------------------------------
-    X = df.astype('float32')
+    df = df.astype(np.float32)
 
-    if scale == 'standardize':
-        if global_transform:
-            x_np = X.to_numpy()
-            mean_val = x_np.mean()
-            std_val = x_np.std()
-            if std_val == 0:
-                std_val = 1.0
-            X = (X - mean_val) / std_val
-            if verbose:
-                print("Scaling: globally standardized all feature values using Z-score.")
+    # ---------------------------------------------------------
+    # 5. Scale only continuous numeric columns
+    # ---------------------------------------------------------
+    if scale == "standardize":
+        if len(continuous_numeric_cols) > 0:
+            if global_transform:
+                vals = df[continuous_numeric_cols].to_numpy()
+                mean_val = vals.mean()
+                std_val = vals.std()
+                if std_val == 0:
+                    std_val = 1.0
+                df.loc[:, continuous_numeric_cols] = (
+                    df[continuous_numeric_cols] - mean_val
+                ) / std_val
+                if verbose:
+                    print(
+                        "Scaling: globally standardized continuous numeric "
+                        "feature values using Z-score."
+                    )
+            else:
+                means = df[continuous_numeric_cols].mean()
+                stds = df[continuous_numeric_cols].std().replace(0, 1)
+                df.loc[:, continuous_numeric_cols] = (
+                    df[continuous_numeric_cols] - means
+                ) / stds
+                if verbose:
+                    print(
+                        "Scaling: standardized continuous numeric feature "
+                        "columns using Z-score."
+                    )
         else:
-            X = (X - X.mean()) / X.std().replace(0, 1)
             if verbose:
-                print("Scaling: standardized columns using Z-score.")
+                print("Scaling: skipped standardization because no continuous numeric features were found.")
 
-    elif scale == 'normalize':
-        if global_transform:
-            x_np = X.to_numpy()
-            min_val = x_np.min()
-            max_val = x_np.max()
-            range_val = max_val - min_val
-            if range_val == 0:
-                range_val = 1.0
-            X = (X - min_val) / range_val
-            if verbose:
-                print("Scaling: globally normalized all feature values to [0, 1].")
+    elif scale == "normalize":
+        if len(continuous_numeric_cols) > 0:
+            if global_transform:
+                vals = df[continuous_numeric_cols].to_numpy()
+                min_val = vals.min()
+                max_val = vals.max()
+                range_val = max_val - min_val
+                if range_val == 0:
+                    range_val = 1.0
+                df.loc[:, continuous_numeric_cols] = (
+                    df[continuous_numeric_cols] - min_val
+                ) / range_val
+                if verbose:
+                    print(
+                        "Scaling: globally normalized continuous numeric "
+                        "feature values to [0, 1]."
+                    )
+            else:
+                mins = df[continuous_numeric_cols].min()
+                ranges = (df[continuous_numeric_cols].max() - mins).replace(0, 1)
+                df.loc[:, continuous_numeric_cols] = (
+                    df[continuous_numeric_cols] - mins
+                ) / ranges
+                if verbose:
+                    print(
+                        "Scaling: normalized continuous numeric feature "
+                        "columns to [0, 1]."
+                    )
         else:
-            X = (X - X.min()) / (X.max() - X.min()).replace(0, 1)
             if verbose:
-                print("Scaling: normalized columns to [0, 1].")
+                print("Scaling: skipped normalization because no continuous numeric features were found.")
 
     elif scale is None:
         if verbose:
             print("Scaling: none.")
+
     else:
         raise ValueError("scale must be one of {'normalize', 'standardize', None}.")
 
     if verbose:
-        print(f"Final feature shape: {X.shape}")
+        print(f"Final feature shape: {df.shape}")
 
     # ---------------------------------------------------------
-    # 4. Return NumPy arrays
+    # 6. Return NumPy arrays
     # ---------------------------------------------------------
+    X = df.to_numpy(dtype=np.float32)
+
     if y is not None:
-        return X.to_numpy(), y
-    else:
-        return X.to_numpy()
+        return X, y
+    return X
