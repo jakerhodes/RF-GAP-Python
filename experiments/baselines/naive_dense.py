@@ -1,3 +1,6 @@
+# ported from https://github.com/neurodata/hyppo/blob/main/hyppo/independence/_utils.py
+
+
 import numpy as np
 
 
@@ -20,12 +23,12 @@ def original_proximity_dense_from_leaves(leaf_matrix):
         Dense original proximity matrix.
     """
     leaf_matrix = np.asarray(leaf_matrix)
-    n_samples, n_trees = leaf_matrix.shape
+    _, n_trees = leaf_matrix.shape
 
-    prox = np.zeros((n_samples, n_samples), dtype=np.float32)
+    prox = np.zeros((leaf_matrix.shape[0], leaf_matrix.shape[0]), dtype=np.float32)
 
     for t in range(n_trees):
-        prox += (leaf_matrix[:, t][:, None] == leaf_matrix[:, t][None, :])
+        prox += np.equal.outer(leaf_matrix[:, t], leaf_matrix[:, t])
 
     prox /= np.float32(n_trees)
     return prox
@@ -52,18 +55,18 @@ def original_proximity_block_dense_from_leaves(leaf_matrix_ref, leaf_matrix_quer
     leaf_matrix_ref = np.asarray(leaf_matrix_ref)
     leaf_matrix_query = np.asarray(leaf_matrix_query)
 
-    n_query, n_trees = leaf_matrix_query.shape
-    n_ref = leaf_matrix_ref.shape[0]
+    n_ref, n_trees_ref = leaf_matrix_ref.shape
+    n_query, n_trees_query = leaf_matrix_query.shape
 
-    if leaf_matrix_ref.shape[1] != n_trees:
+    if n_trees_ref != n_trees_query:
         raise ValueError("Reference and query leaf matrices must have the same number of trees.")
 
     prox = np.zeros((n_query, n_ref), dtype=np.float32)
 
-    for t in range(n_trees):
-        prox += (leaf_matrix_query[:, t][:, None] == leaf_matrix_ref[None, :, t])
+    for t in range(n_trees_ref):
+        prox += np.equal.outer(leaf_matrix_query[:, t], leaf_matrix_ref[:, t])
 
-    prox /= np.float32(n_trees)
+    prox /= np.float32(n_trees_ref)
     return prox
 
 
