@@ -177,15 +177,7 @@ def load_dataset_pair_with_raw_labels(
     global_transform: bool = False,
     drop_missing_y: bool = True,
     verbose_dataprep: bool = False,
-) -> Tuple[
-    np.ndarray,
-    np.ndarray,
-    np.ndarray,
-    np.ndarray,
-    np.ndarray,
-    np.ndarray,
-    Dict[str, object],
-]:
+):
     meta = {
         "dataset": dataset_name,
         "predefined_split": False,
@@ -194,36 +186,27 @@ def load_dataset_pair_with_raw_labels(
         "single_path": None,
     }
 
-    if label_col_idx is None:
-        raise ValueError("load_dataset_pair_with_raw_labels requires label_col_idx to be set.")
-
-    # ---------------------------------------------------------
-    # Case 1: predefined train/test files
-    # Apply dataprep once on the concatenated full dataset,
-    # then split back to preserve a consistent transform.
-    # Also preserve raw labels from the original parquet files.
-    # ---------------------------------------------------------
     if paths["train"] is not None and paths["test"] is not None:
         meta["predefined_split"] = True
         meta["train_path"] = str(paths["train"])
         meta["test_path"] = str(paths["test"])
 
-        df_train = pd.read_parquet(paths["train"])
-        df_test = pd.read_parquet(paths["test"])
+        df_train = pd.read_parquet(paths["train"]).reset_index(drop=True)
+        df_test = pd.read_parquet(paths["test"]).reset_index(drop=True)
+
+        y_train_raw = df_train.iloc[:, label_col_idx].to_numpy()
+        y_test_raw = df_test.iloc[:, label_col_idx].to_numpy()
+
+        id_train_raw = np.arange(len(df_train))
+        id_test_raw = np.arange(len(df_test))
 
         if list(df_train.columns) != list(df_test.columns):
             raise ValueError(
                 f"Train/test columns differ for dataset '{dataset_name}'."
             )
 
-        train_label_col = df_train.columns[label_col_idx]
-        test_label_col = df_test.columns[label_col_idx]
-
-        y_train_raw = df_train.iloc[:, label_col_idx].to_numpy()
-        y_test_raw = df_test.iloc[:, label_col_idx].to_numpy()
-
-        n_train_raw = len(df_train)
-        n_test_raw = len(df_test)
+        n_train = len(df_train)
+        n_test = len(df_test)
 
         df_full = pd.concat([df_train, df_test], axis=0, ignore_index=True)
 
@@ -239,38 +222,30 @@ def load_dataset_pair_with_raw_labels(
         X_full = np.asarray(X_full)
         y_full = np.asarray(y_full).reshape(-1)
 
-        if len(y_full) != len(df_full):
-            raise ValueError(
-                f"After dataprep, row count changed for predefined split dataset "
-                f"'{dataset_name}'. This makes splitting back ambiguous. "
-                f"Make sure labels are not missing in train/test files."
-            )
-
-        X_train = X_full[:n_train_raw]
-        X_test = X_full[n_train_raw:n_train_raw + n_test_raw]
-        y_train = y_full[:n_train_raw]
-        y_test = y_full[n_train_raw:n_train_raw + n_test_raw]
+        X_train = X_full[:n_train]
+        X_test = X_full[n_train:n_train + n_test]
+        y_train = y_full[:n_train]
+        y_test = y_full[n_train:n_train + n_test]
 
         return (
             X_train,
             X_test,
             y_train,
             y_test,
-            np.asarray(y_train_raw),
-            np.asarray(y_test_raw),
+            y_train_raw,
+            y_test_raw,
+            id_train_raw,
+            id_test_raw,
             meta,
         )
 
-    # ---------------------------------------------------------
-    # Case 2: single file
-    # Apply dataprep once, then split.
-    # Preserve raw labels and split them with the same indices.
-    # ---------------------------------------------------------
     if paths["single"] is not None:
         meta["single_path"] = str(paths["single"])
 
-        df = pd.read_parquet(paths["single"])
+        df = pd.read_parquet(paths["single"]).reset_index(drop=True)
+
         y_raw = df.iloc[:, label_col_idx].to_numpy()
+        row_ids = np.arange(len(df))
 
         X, y = dataprep(
             df,
@@ -283,16 +258,8 @@ def load_dataset_pair_with_raw_labels(
 
         X = np.asarray(X)
         y = np.asarray(y).reshape(-1)
-        y_raw = np.asarray(y_raw)
 
-        if len(y) != len(y_raw):
-            raise ValueError(
-                f"After dataprep, row count changed for dataset '{dataset_name}'. "
-                f"Cannot align encoded labels with raw labels. "
-                f"Make sure labels are not missing."
-            )
-
-        idx = np.arange(len(y))
+        idx = np.arange(len(df))
         idx_train, idx_test = train_test_split(
             idx,
             test_size=0.1,
@@ -304,8 +271,11 @@ def load_dataset_pair_with_raw_labels(
         X_test = X[idx_test]
         y_train = y[idx_train]
         y_test = y[idx_test]
+
         y_train_raw = y_raw[idx_train]
         y_test_raw = y_raw[idx_test]
+        id_train_raw = row_ids[idx_train]
+        id_test_raw = row_ids[idx_test]
 
         return (
             X_train,
@@ -314,11 +284,12 @@ def load_dataset_pair_with_raw_labels(
             y_test,
             y_train_raw,
             y_test_raw,
+            id_train_raw,
+            id_test_raw,
             meta,
         )
 
     raise ValueError(f"Dataset '{dataset_name}' has no usable parquet file.")
-
 
 def stratified_subset(
     X: np.ndarray,
