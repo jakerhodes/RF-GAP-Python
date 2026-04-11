@@ -12,6 +12,7 @@ from sklearn.ensemble import (
 )
 
 from lightgbm import LGBMClassifier, LGBMRegressor
+from xgboost import XGBClassifier, XGBRegressor
 
 from .wrappers.bagged_rotation_forest import BaggedRotationForest
 
@@ -59,7 +60,7 @@ def validate_model_configuration(model_type, kernel_method, prediction_type, kwa
     Parameters
     ----------
     model_type : str
-        One of {'rf', 'et', 'gbt', 'lgbm', 'rotf'}.
+        One of {'rf', 'et', 'gbt', 'lgbm', 'xgb', 'rotf'}.
     kernel_method : str
         One of {'original', 'oob', 'gap', 'kerf', 'boosted'}.
     prediction_type : str
@@ -68,9 +69,9 @@ def validate_model_configuration(model_type, kernel_method, prediction_type, kwa
         Estimator kwargs supplied by the user. These are not modified here,
         only checked when needed for kernel-specific requirements.
     """
-    if model_type not in {"rf", "et", "gbt", "lgbm", "rotf"}:
+    if model_type not in {"rf", "et", "gbt", "lgbm", "xgb", "rotf"}:
         raise ValueError(
-            "model_type must be one of {'rf', 'et', 'gbt', 'lgbm', 'rotf'}"
+            "model_type must be one of {'rf', 'et', 'gbt', 'lgbm', 'xgb', 'rotf'}"
         )
 
     if kernel_method not in {"original", "oob", "gap", "kerf", "boosted"}:
@@ -100,7 +101,7 @@ def validate_model_configuration(model_type, kernel_method, prediction_type, kwa
     # Boosted-tree models:
     # allow leaf-based kernels that do not require OOB / in-bag structure
     # ---------------------------------------------------------
-    if model_type in {"gbt", "lgbm"}:
+    if model_type in {"gbt", "lgbm", "xgb"}:
         if kernel_method in {"oob", "gap"}:
             raise ValueError(
                 f"kernel_method='{kernel_method}' is not supported for "
@@ -140,6 +141,13 @@ def get_base_model(model_type, prediction_type):
             LGBMClassifier
             if prediction_type == "classification"
             else LGBMRegressor
+        )
+
+    if model_type == "xgb":
+        return (
+            XGBClassifier
+            if prediction_type == "classification"
+            else XGBRegressor
         )
 
     if model_type == "rotf":

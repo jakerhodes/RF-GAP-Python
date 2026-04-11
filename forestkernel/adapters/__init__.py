@@ -2,6 +2,8 @@ from .rf_et import RFETAdapter
 from .gbt import GBTAdapter
 from .rotf import ROTFAdapter
 from .lgbm import LightGBMAdapter
+from .xgb import XGBoostAdapter
+
 
 
 def make_adapter(estimator, model_type):
@@ -16,5 +18,7 @@ def make_adapter(estimator, model_type):
         return ROTFAdapter(estimator)
     if model_type == "lgbm":
         return LightGBMAdapter(estimator)
-
-    raise ValueError(f"Unsupported model_type='{model_type}'")
+    if model_type == "xgb":
+        return XGBoostAdapter(estimator)
+    
+    raise ValueError(f"Unsupported model_type: {model_type}")
