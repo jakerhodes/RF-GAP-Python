@@ -34,9 +34,10 @@ DATA_DIR = PROJECT_ROOT / "data"
 
 # Used only for dataset ablation
 DATASET_ABLATION_DATASET_NAMES = [
+    "airlines",
     "celegans",
     "covertype",
-    "nsl_kdd+",
+    # "nsl_kdd+",
     "pathmnist_28",
     "pbmc",
     "sign_mnist",
@@ -62,26 +63,15 @@ SEEDS = [44, 578, 9, 912, 345]
 
 LABEL_COL_IDX = 0
 DROP_MISSING_Y = True
-VERBOSE_DATAPREP = False
-
-# Default dataprep fallback
-DEFAULT_SCALE = "standardize"
-DEFAULT_GLOBAL_TRANSFORM = False
+VERBOSE_DATAPREP = True
 
 # ---------------------------------------------------------
-# Per-dataset dataprep scheme
+# Train subset sizes used for scaling curves.
+# Sizes are generated per dataset from N_MIN to full size using
+# a geometric grid.
 # ---------------------------------------------------------
-DATASET_DATAPREP = {
-    "pathmnist_28": {"scale": "normalize", "global_transform": True},
-    "sign_mnist": {"scale": "normalize", "global_transform": True},
-    "tissuemnist_28": {"scale": "normalize", "global_transform": True},
-}
-
-# ---------------------------------------------------------
-# Train fractions used for subset scaling curves.
-# Each dataset uses fractions of its own available train set.
-# ---------------------------------------------------------
-TRAIN_FRACTIONS = [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0]
+N_MIN = 5000
+N_GRID = 11
 
 RUN_DATASET_ABLATION = True
 RUN_KERNEL_METHOD_ABLATION = True
@@ -214,18 +204,35 @@ def append_and_flush(rows: list[dict], row: dict, out_csv: Path, out_parquet: Pa
     flush_results(rows, out_csv, out_parquet)
 
 
-def sample_train_subset_fraction(
+def make_train_size_grid(
+    n_max: int,
+    n_min: int = N_MIN,
+    n_grid: int = N_GRID,
+) -> list[int]:
+    if n_max <= n_min:
+        return [n_max]
+
+    sizes = np.geomspace(n_min, n_max, num=n_grid)
+    sizes = np.unique(np.round(sizes).astype(int)).tolist()
+
+    if sizes[-1] != n_max:
+        sizes.append(n_max)
+
+    return sizes
+
+
+def sample_train_subset_size(
     X: np.ndarray,
     y: np.ndarray,
-    frac: float,
+    train_size: int,
     seed: int,
 ) -> tuple[np.ndarray, np.ndarray]:
-    if frac >= 1.0:
+    if train_size >= len(y):
         return X, y
 
     splitter = StratifiedShuffleSplit(
         n_splits=1,
-        train_size=frac,
+        train_size=train_size,
         random_state=seed,
     )
     idx, _ = next(splitter.split(X, y))
@@ -256,14 +263,6 @@ def instantiate_fk(
     )
 
 
-def get_dataprep_kwargs(dataset_name: str) -> dict[str, object]:
-    cfg = DATASET_DATAPREP.get(dataset_name, {})
-    return {
-        "scale": cfg.get("scale", DEFAULT_SCALE),
-        "global_transform": cfg.get("global_transform", DEFAULT_GLOBAL_TRANSFORM),
-    }
-
-
 # ---------------------------------------------------------------------
 # Core runner
 # ---------------------------------------------------------------------
@@ -271,7 +270,6 @@ def run_one_ablation_mode(
     mode_name: str,
     settings: list[dict[str, object]],
     dataset_groups: dict[str, dict[str, Path | None]],
-    train_fractions: list[float],
 ) -> None:
     paths = make_output_paths(mode_name)
     rows: list[dict] = []
@@ -280,11 +278,11 @@ def run_one_ablation_mode(
     log_progress(f"Mode: {mode_name}", paths["log"])
     log_progress(f"Run directory: {paths['dir']}", paths["log"])
     log_progress(f"Resolved datasets: {sorted(dataset_groups.keys())}", paths["log"])
-    log_progress(f"Train fractions: {train_fractions}", paths["log"])
+    log_progress(f"N_MIN: {N_MIN}", paths["log"])
+    log_progress(f"N_GRID: {N_GRID}", paths["log"])
     log_progress(f"Seeds: {SEEDS}", paths["log"])
-    log_progress(f"Default scale: {DEFAULT_SCALE}", paths["log"])
-    log_progress(f"Default global_transform: {DEFAULT_GLOBAL_TRANSFORM}", paths["log"])
-    log_progress(f"Per-dataset dataprep: {DATASET_DATAPREP}", paths["log"])
+    log_progress(f"Scale: None", paths["log"])
+    log_progress(f"Global transform: False", paths["log"])
     log_progress(f"Number of settings: {len(settings)}", paths["log"])
     log_progress(f"CSV output: {paths['csv']}", paths["log"])
     log_progress(f"Parquet output: {paths['parquet']}", paths["log"])
@@ -300,14 +298,8 @@ def run_one_ablation_mode(
 
     for dataset_name, dataset_paths in dataset_groups.items():
         log_progress(f"=== DATASET: {dataset_name} ===", paths["log"])
-
-        dataprep_kwargs = get_dataprep_kwargs(dataset_name)
-        scale = dataprep_kwargs["scale"]
-        global_transform = dataprep_kwargs["global_transform"]
-
         log_progress(
-            f"Dataprep scheme | dataset={dataset_name} | "
-            f"scale={scale} | global_transform={global_transform}",
+            f"Dataprep scheme | dataset={dataset_name} | scale=None | global_transform=False",
             paths["log"],
         )
 
@@ -320,8 +312,8 @@ def run_one_ablation_mode(
                     paths=dataset_paths,
                     seed=seed,
                     label_col_idx=LABEL_COL_IDX,
-                    scale=scale,
-                    global_transform=global_transform,
+                    scale=None,
+                    global_transform=False,
                     drop_missing_y=DROP_MISSING_Y,
                     verbose_dataprep=VERBOSE_DATAPREP,
                 )
@@ -333,6 +325,11 @@ def run_one_ablation_mode(
                 continue
 
             available_train_size = len(y_train_pool)
+            train_sizes = make_train_size_grid(
+                n_max=available_train_size,
+                n_min=N_MIN,
+                n_grid=N_GRID,
+            )
 
             log_progress(
                 f"Loaded {dataset_name}: train_pool={X_train_pool.shape}, "
@@ -340,19 +337,20 @@ def run_one_ablation_mode(
                 f"available_train_size={available_train_size}",
                 paths["log"],
             )
+            log_progress(f"Train sizes: {train_sizes}", paths["log"])
 
-            for frac_id, train_fraction in enumerate(train_fractions, start=1):
+            for size_id, train_size in enumerate(train_sizes, start=1):
                 log_progress(
-                    f"--- fraction {frac_id}/{len(train_fractions)} | "
-                    f"train_fraction={train_fraction:.2f} | seed={seed} ---",
+                    f"--- size {size_id}/{len(train_sizes)} | "
+                    f"train_size={train_size} | seed={seed} ---",
                     paths["log"],
                 )
 
-                subset_seed = seed + frac_id
-                X_sub, y_sub = sample_train_subset_fraction(
+                subset_seed = seed + size_id
+                X_sub, y_sub = sample_train_subset_size(
                     X_train_pool,
                     y_train_pool,
-                    frac=train_fraction,
+                    train_size=train_size,
                     seed=subset_seed,
                 )
 
@@ -423,16 +421,16 @@ def run_one_ablation_mode(
                         "dataset": dataset_name,
                         "seed": seed,
                         "predefined_split": meta["predefined_split"],
-                        "scale": scale,
-                        "global_transform": global_transform,
+                        "scale": None,
+                        "global_transform": False,
                         "model_type": model_type,
                         "kernel_method": kernel_method,
                         "ablation_id": ablation_id,
                         "ablation_name": ablation_name,
                         "ablation_cfg": str(ablation_cfg),
                         "available_train_size": available_train_size,
-                        "frac_id": frac_id,
-                        "train_fraction": train_fraction,
+                        "size_id": size_id,
+                        "requested_train_size": train_size,
                         "n_train_subset": n_sub,
                         "n_test": len(y_test),
                         "forest_fit_time_s": forest_fit_time,
@@ -457,7 +455,7 @@ def run_one_ablation_mode(
 
                     log_progress(
                         f"Done | dataset={dataset_name} | seed={seed} | "
-                        f"train_fraction={train_fraction:.2f} | n_train={n_sub} | "
+                        f"train_size={train_size} | n_train={n_sub} | "
                         f"model_type={model_type} | kernel_method={kernel_method} | "
                         f"ablation={ablation_name} | fit={forest_fit_time:.3f}s | "
                         f"cache={cache_time:.3f}s | q={q_time:.3f}s | "
@@ -492,7 +490,6 @@ def main() -> None:
             mode_name="dataset",
             settings=DATASET_ABLATION_SETTINGS,
             dataset_groups=dataset_ablation_groups,
-            train_fractions=TRAIN_FRACTIONS,
         )
 
     if RUN_KERNEL_METHOD_ABLATION:
@@ -500,7 +497,6 @@ def main() -> None:
             mode_name="kernel_method",
             settings=KERNEL_METHOD_SETTINGS,
             dataset_groups=fixed_ablation_groups,
-            train_fractions=TRAIN_FRACTIONS,
         )
 
     if RUN_MODEL_TYPE_ABLATION:
@@ -508,7 +504,6 @@ def main() -> None:
             mode_name="model_type",
             settings=MODEL_TYPE_SETTINGS,
             dataset_groups=fixed_ablation_groups,
-            train_fractions=TRAIN_FRACTIONS,
         )
 
     if RUN_MAX_DEPTH_ABLATION:
@@ -516,7 +511,6 @@ def main() -> None:
             mode_name="max_depth",
             settings=MAX_DEPTH_SETTINGS,
             dataset_groups=fixed_ablation_groups,
-            train_fractions=TRAIN_FRACTIONS,
         )
 
     if RUN_MIN_SAMPLES_LEAF_ABLATION:
@@ -524,7 +518,6 @@ def main() -> None:
             mode_name="min_samples_leaf",
             settings=MIN_SAMPLES_LEAF_SETTINGS,
             dataset_groups=fixed_ablation_groups,
-            train_fractions=TRAIN_FRACTIONS,
         )
 
 
