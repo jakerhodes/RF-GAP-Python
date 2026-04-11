@@ -13,6 +13,7 @@ from .builders import (
 from .sparse_utils import (
     csr_row_scale_inplace,
     block_symmetrize,
+    format_output_matrix
 )
 
 from .prediction import (

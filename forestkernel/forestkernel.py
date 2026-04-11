@@ -20,6 +20,7 @@ from .kernel import (
     build_Q_matrix,
     csr_row_scale_inplace,
     block_symmetrize,
+    format_output_matrix,
     row_normalize_kernel_block,
     kernel_predict_regression,
     kernel_predict_classification,
@@ -30,10 +31,7 @@ def ForestKernel(
     prediction_type=None,
     y=None,
     kernel_method="gap",
-    matrix_type="sparse",
     force_nonzero_diag=False,
-    force_symmetric=None,
-    normalize_diagonal=False,
     model_type="rf",
     **kwargs,
 ):
@@ -70,18 +68,12 @@ def ForestKernel(
         def __init__(
             self,
             kernel_method=kernel_method,
-            matrix_type=matrix_type,
             force_nonzero_diag=force_nonzero_diag,
-            force_symmetric=force_symmetric,
-            normalize_diagonal=normalize_diagonal,
             **model_kwargs,
         ):
             self.kernel_method = kernel_method
-            self.matrix_type = matrix_type
             self.prediction_type = prediction_type
             self.force_nonzero_diag = force_nonzero_diag
-            self.force_symmetric = force_symmetric
-            self.normalize_diagonal = normalize_diagonal
             self.model_type = model_type
 
             # Underlying model kwargs
@@ -89,6 +81,7 @@ def ForestKernel(
 
             # Kernel internals
             self.cache = None
+            self.fit_forest_context_ = None
             self._adapter = None
             self.y = None
 
@@ -107,6 +100,36 @@ def ForestKernel(
                     "The underlying forest is not fitted yet. Call 'fit' first."
                 )
 
+        def set_kernel_config(
+            self,
+            kernel_method=None,
+            force_nonzero_diag=None,
+        ):
+            """
+            Update the active kernel construction configuration without refitting
+            the forest.
+
+            This is useful when one wants to rebuild the kernel cache for a
+            different kernel method using the same fitted ensemble and the same
+            reference set.
+            """
+            next_kernel_method = self.kernel_method if kernel_method is None else kernel_method
+            next_force_nonzero_diag = (
+                self.force_nonzero_diag if force_nonzero_diag is None else force_nonzero_diag
+            )
+
+            validate_model_configuration(
+                model_type=self.model_type,
+                kernel_method=next_kernel_method,
+                prediction_type=self.prediction_type,
+                kwargs=self.model_kwargs,
+            )
+
+            self.kernel_method = next_kernel_method
+            self.force_nonzero_diag = next_force_nonzero_diag
+
+            return self
+
         def fit_forest(self, X, y, idx_unlabeled=None, **fit_kwargs):
             """
             Fit only the underlying ensemble, without building kernel metadata.
@@ -120,13 +143,6 @@ def ForestKernel(
                 idx_unlabeled=idx_unlabeled,
             )
 
-            if fit_data["has_unlabeled"] and self.kernel_method == "gap" and not self.force_nonzero_diag:
-                raise ValueError(
-                    "Transductive GAP currently requires force_nonzero_diag=True. "
-                    "The zero-diagonal transductive GAP variant is not supported "
-                    "because it relies on signed private correction coordinates."
-                )
-
             self.y = fit_data["y"]
 
             self.forest_.fit(
@@ -135,6 +151,17 @@ def ForestKernel(
                 **fit_kwargs,
             )
             self._adapter = make_adapter(self.forest_, self.model_type)
+
+            self.fit_forest_context_ = {
+                "X": fit_data["X"],
+                "X_train": fit_data["X_train"],
+                "idx_labeled": fit_data["idx_labeled"],
+                "idx_unlabeled": fit_data["idx_unlabeled"],
+                "has_unlabeled": fit_data["has_unlabeled"],
+            }
+
+            # Any old cache becomes invalid after refitting the forest.
+            self.cache = None
 
             return {
                 "X": fit_data["X"],
@@ -146,19 +173,45 @@ def ForestKernel(
 
         def build_kernel_cache(
             self,
-            X,
-            X_train,
-            idx_labeled,
-            idx_unlabeled,
-            has_unlabeled,
+            kernel_method=None,
+            force_nonzero_diag=None,
         ):
             """
             Build all post-fit kernel metadata and the reference-side leaf map W.
 
             Useful for benchmarking kernel preprocessing separately from
             forest fitting.
+
+            The reference-set information is taken from the stored fit context
+            created during fit_forest(...). This makes it possible to switch
+            kernel methods and rebuild the kernel cache without refitting the
+            underlying forest.
             """
             self._check_forest_fitted()
+
+            self.set_kernel_config(
+                kernel_method=kernel_method,
+                force_nonzero_diag=force_nonzero_diag,
+            )
+
+            if self.fit_forest_context_ is None:
+                raise ValueError(
+                    "No stored fit context available. "
+                    "Call fit(...) or fit_forest(...) first."
+                )
+
+            X = self.fit_forest_context_["X"]
+            X_train = self.fit_forest_context_["X_train"]
+            idx_labeled = self.fit_forest_context_["idx_labeled"]
+            idx_unlabeled = self.fit_forest_context_["idx_unlabeled"]
+            has_unlabeled = self.fit_forest_context_["has_unlabeled"]
+
+            if has_unlabeled and self.kernel_method == "gap" and not self.force_nonzero_diag:
+                raise ValueError(
+                    "Transductive GAP currently requires force_nonzero_diag=True. "
+                    "The zero-diagonal transductive GAP variant is not supported "
+                    "because it relies on signed private correction coordinates."
+                )
 
             # ---------------------------------------------------------
             # STEP 1: initialize cache from leaf structure on ALL points
@@ -254,23 +307,23 @@ def ForestKernel(
             Additional keyword arguments are forwarded to the underlying base
             estimator fit() method.
             """
-            fit_context = self.fit_forest(
+            self.fit_forest(
                 X,
                 y,
                 idx_unlabeled=idx_unlabeled,
                 **fit_kwargs,
             )
-            self.build_kernel_cache(**fit_context)
+            self.build_kernel_cache()
             return self
 
-        def get_reference_map(self):
+        def get_reference_map(self, return_dense=False):
             """
             Return the fitted reference-side leaf feature map W.
             """
             self._check_fitted()
-            return self.cache.W_mat
+            return format_output_matrix(self.cache.W_mat, return_dense=return_dense)
 
-        def get_train_query_map(self):
+        def get_train_query_map(self, normalize_diagonal=False, return_dense=False):
             """
             Return the query-side leaf feature map Q on the fitted reference set.
             """
@@ -284,17 +337,18 @@ def ForestKernel(
                 force_nonzero_diag=self.force_nonzero_diag,
             )
 
-            if self.normalize_diagonal and (
+            if normalize_diagonal and (
                 (self.kernel_method == "gap" and self.force_nonzero_diag)
                 or self.kernel_method == "kerf"
             ):
+                # Hadamard trick to get the diagonal of Q W^T without forming the full kernel matrix.
                 diagonal = Q_train.multiply(self.cache.W_mat).sum(axis=1).A.ravel()
                 diagonal[diagonal == 0] = 1.0
                 csr_row_scale_inplace(Q_train, 1.0 / diagonal)
 
-            return Q_train
+            return format_output_matrix(Q_train, return_dense=return_dense)
 
-        def get_query_map(self, X_new):
+        def get_query_map(self, X_new, return_dense=False):
             """
             Return the out-of-sample query-side leaf feature map Q(X_new).
             """
@@ -302,7 +356,7 @@ def ForestKernel(
 
             leaves_new = self._adapter.get_leaf_matrix(X_new)
 
-            return build_Q_matrix(
+            Q_new = build_Q_matrix(
                 self.cache,
                 kernel_method=self.kernel_method,
                 leaves=leaves_new,
@@ -310,39 +364,43 @@ def ForestKernel(
                 force_nonzero_diag=self.force_nonzero_diag,
             )
 
-        def get_kernel_from_query_map(self, Q):
+            return format_output_matrix(Q_new, return_dense=return_dense)
+
+        def get_kernel_from_query_map(self, Q, return_dense=False):
             """
             Form a kernel block K = Q W^T from a query-side map Q.
             """
             self._check_fitted()
             K = Q.dot(self.cache.W_mat.T)
-            return K.toarray() if self.matrix_type == "dense" else K
+            return format_output_matrix(K, return_dense=return_dense)
 
-        def get_kernel(self):
+        def get_kernel(self, force_symmetric=False, normalize_diagonal=False, return_dense=False):
             """
             Return the fitted kernel matrix on the reference set.
             """
             self._check_fitted()
 
-            Q_train = self.get_train_query_map()
+            Q_train = self.get_train_query_map(
+                normalize_diagonal=normalize_diagonal
+            )
 
-            if self.force_symmetric and (
+            if force_symmetric and (
                 self.kernel_method == "gap"
-                or (self.kernel_method == "kerf" and self.normalize_diagonal)
+                or (self.kernel_method == "kerf" and normalize_diagonal)
             ):
                 K = block_symmetrize(Q_train, self.cache.W_mat)
             else:
                 K = Q_train.dot(self.cache.W_mat.T)
 
-            return K.toarray() if self.matrix_type == "dense" else K
+            return format_output_matrix(K, return_dense=return_dense)
 
-        def kernel_extend(self, X_new):
+        def kernel_extend(self, X_new, return_dense=False):
             """
             Return the kernel block between X_new and the fitted reference set.
             """
             self._check_fitted()
             Q_new = self.get_query_map(X_new)
-            return self.get_kernel_from_query_map(Q_new)
+            return self.get_kernel_from_query_map(Q_new, return_dense=return_dense)
 
         def kernel_predict(self, X_new):
             """
@@ -397,19 +455,13 @@ def ForestKernel(
             """
             return {
                 "kernel_method": self.kernel_method,
-                "matrix_type": self.matrix_type,
                 "force_nonzero_diag": self.force_nonzero_diag,
-                "force_symmetric": self.force_symmetric,
-                "normalize_diagonal": self.normalize_diagonal,
                 "model_type": self.model_type,
                 **self.model_kwargs,
             }
 
     return ForestKernel(
         kernel_method=kernel_method,
-        matrix_type=matrix_type,
         force_nonzero_diag=force_nonzero_diag,
-        force_symmetric=force_symmetric,
-        normalize_diagonal=normalize_diagonal,
         **kwargs,
     )

@@ -30,3 +30,12 @@ def block_symmetrize(Q, W):
     P = 0.5 * left_block.dot(right_block_T)
     del left_block, right_block_T
     return P
+
+
+def format_output_matrix(M, return_dense=False):
+    """
+    Format matrix-like outputs as sparse by default, or dense on demand.
+    """
+    if return_dense and hasattr(M, "toarray"):
+        return M.toarray()
+    return M
