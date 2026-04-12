@@ -34,6 +34,7 @@ DATA_DIR = PROJECT_ROOT / "data"
 
 # Used only for dataset ablation
 DATASET_ABLATION_DATASET_NAMES = [
+    "epsilon",
     "airlines",
     "celegans",
     "covertype",
@@ -63,15 +64,15 @@ SEEDS = [44, 578, 9, 912, 345]
 
 LABEL_COL_IDX = 0
 DROP_MISSING_Y = True
-VERBOSE_DATAPREP = True
+VERBOSE_DATAPREP = False
 
 # ---------------------------------------------------------
 # Train subset sizes used for scaling curves.
-# Sizes are generated per dataset from P_MIN * full train size
-# to full train size using a geometric grid.
+# Sizes are generated per dataset from a global minimum power
+# of two, then doubled until the largest power of two below
+# full size. The exact full size is appended if needed.
 # ---------------------------------------------------------
-P_MIN = 0.2
-N_GRID = 11
+MIN_POW = 13   # 2**13 = 8192
 
 RUN_DATASET_ABLATION = True
 RUN_KERNEL_METHOD_ABLATION = True
@@ -204,26 +205,45 @@ def append_and_flush(rows: list[dict], row: dict, out_csv: Path, out_parquet: Pa
     flush_results(rows, out_csv, out_parquet)
 
 
+def is_power_of_two(n: int) -> bool:
+    return n > 0 and (n & (n - 1)) == 0
+
+
+def ceil_log2_int(n: int) -> int:
+    if n <= 1:
+        return 0
+    return int(np.ceil(np.log2(n)))
+
+
+def floor_log2_int(n: int) -> int:
+    if n <= 0:
+        raise ValueError("n must be positive.")
+    return int(np.floor(np.log2(n)))
+
+
 def make_train_size_grid(
     n_max: int,
-    p_min: float = P_MIN,
-    n_grid: int = N_GRID,
-) -> list[int]:
-    if not (0 < p_min <= 1):
-        raise ValueError("p_min must be in (0, 1].")
+    min_pow: int = MIN_POW,
+) -> tuple[list[int], int | None, int | None]:
+    """
+    Build a per-dataset power-of-two grid from 2**min_pow upward.
+    Append n_max if it is not already a power of two.
+    """
+    if n_max <= 0:
+        raise ValueError("n_max must be positive.")
 
-    n_min = int(np.ceil(p_min * n_max))
+    k_max = floor_log2_int(n_max)
 
-    if n_max <= n_min:
-        return [n_max]
+    if min_pow > k_max:
+        return [n_max], None, None
 
-    sizes = np.geomspace(n_min, n_max, num=n_grid)
-    sizes = np.unique(np.round(sizes).astype(int)).tolist()
+    sizes = [2 ** k for k in range(min_pow, k_max + 1)]
 
     if sizes[-1] != n_max:
         sizes.append(n_max)
 
-    return sizes
+    sizes = sorted(set(sizes))
+    return sizes, min_pow, k_max
 
 
 def sample_train_subset_size(
@@ -283,11 +303,11 @@ def run_one_ablation_mode(
     log_progress(f"Mode: {mode_name}", paths["log"])
     log_progress(f"Run directory: {paths['dir']}", paths["log"])
     log_progress(f"Resolved datasets: {sorted(dataset_groups.keys())}", paths["log"])
-    log_progress(f"P_MIN: {P_MIN}", paths["log"])
-    log_progress(f"N_GRID: {N_GRID}", paths["log"])
+    log_progress(f"MIN_POW: {MIN_POW}", paths["log"])
+    log_progress("Grid type: powers_of_two_plus_full_size", paths["log"])
     log_progress(f"Seeds: {SEEDS}", paths["log"])
-    log_progress(f"Scale: None", paths["log"])
-    log_progress(f"Global transform: False", paths["log"])
+    log_progress("Scale: None", paths["log"])
+    log_progress("Global transform: False", paths["log"])
     log_progress(f"Number of settings: {len(settings)}", paths["log"])
     log_progress(f"CSV output: {paths['csv']}", paths["log"])
     log_progress(f"Parquet output: {paths['parquet']}", paths["log"])
@@ -330,12 +350,10 @@ def run_one_ablation_mode(
                 continue
 
             available_train_size = len(y_train_pool)
-            train_sizes = make_train_size_grid(
+            train_sizes, k_min, k_max = make_train_size_grid(
                 n_max=available_train_size,
-                p_min=P_MIN,
-                n_grid=N_GRID,
+                min_pow=MIN_POW,
             )
-            n_min_dataset = int(np.ceil(P_MIN * available_train_size))
 
             log_progress(
                 f"Loaded {dataset_name}: train_pool={X_train_pool.shape}, "
@@ -343,7 +361,8 @@ def run_one_ablation_mode(
                 f"available_train_size={available_train_size}",
                 paths["log"],
             )
-            log_progress(f"Dataset-specific n_min: {n_min_dataset}", paths["log"])
+            log_progress(f"Dataset-specific k_min: {k_min}", paths["log"])
+            log_progress(f"Dataset-specific k_max: {k_max}", paths["log"])
             log_progress(f"Train sizes: {train_sizes}", paths["log"])
 
             for size_id, train_size in enumerate(train_sizes, start=1):
@@ -436,10 +455,13 @@ def run_one_ablation_mode(
                         "ablation_name": ablation_name,
                         "ablation_cfg": str(ablation_cfg),
                         "available_train_size": available_train_size,
-                        "p_min": P_MIN,
-                        "dataset_n_min": n_min_dataset,
+                        "min_pow": MIN_POW,
+                        "dataset_k_min": k_min,
+                        "dataset_k_max": k_max,
                         "size_id": size_id,
                         "requested_train_size": train_size,
+                        "is_power_of_two_size": is_power_of_two(train_size),
+                        "log2_requested_train_size": np.log2(train_size),
                         "n_train_subset": n_sub,
                         "n_test": len(y_test),
                         "forest_fit_time_s": forest_fit_time,
