@@ -34,6 +34,8 @@ DATA_DIR = PROJECT_ROOT / "data"
 
 # Used only for dataset ablation
 DATASET_ABLATION_DATASET_NAMES = [
+    "higgs",
+    "susy",
     "epsilon",
     "airlines",
     "celegans",
@@ -49,8 +51,10 @@ DATASET_ABLATION_DATASET_NAMES = [
 
 # Used for all non-dataset ablations
 FIXED_ABLATION_DATASET_NAMES = [
-    "pathmnist_28",
-    "tv_news_combined",
+    "airlines",
+    # "pathmnist_28",
+    # "tv_news_combined",
+    "covertype",
 ]
 
 RESULTS_DIR = PROJECT_ROOT / "experiments" / "results"
@@ -72,7 +76,7 @@ VERBOSE_DATAPREP = False
 # of two, then doubled until the largest power of two below
 # full size. The exact full size is appended if needed.
 # ---------------------------------------------------------
-MIN_POW = 13   # 2**13 = 8192
+MIN_POW = 14   # 2**14 = 16384
 
 RUN_DATASET_ABLATION = True
 RUN_KERNEL_METHOD_ABLATION = True
