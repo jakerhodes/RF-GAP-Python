@@ -67,10 +67,10 @@ VERBOSE_DATAPREP = True
 
 # ---------------------------------------------------------
 # Train subset sizes used for scaling curves.
-# Sizes are generated per dataset from N_MIN to full size using
-# a geometric grid.
+# Sizes are generated per dataset from P_MIN * full train size
+# to full train size using a geometric grid.
 # ---------------------------------------------------------
-N_MIN = 5000
+P_MIN = 0.2
 N_GRID = 11
 
 RUN_DATASET_ABLATION = True
@@ -206,9 +206,14 @@ def append_and_flush(rows: list[dict], row: dict, out_csv: Path, out_parquet: Pa
 
 def make_train_size_grid(
     n_max: int,
-    n_min: int = N_MIN,
+    p_min: float = P_MIN,
     n_grid: int = N_GRID,
 ) -> list[int]:
+    if not (0 < p_min <= 1):
+        raise ValueError("p_min must be in (0, 1].")
+
+    n_min = int(np.ceil(p_min * n_max))
+
     if n_max <= n_min:
         return [n_max]
 
@@ -278,7 +283,7 @@ def run_one_ablation_mode(
     log_progress(f"Mode: {mode_name}", paths["log"])
     log_progress(f"Run directory: {paths['dir']}", paths["log"])
     log_progress(f"Resolved datasets: {sorted(dataset_groups.keys())}", paths["log"])
-    log_progress(f"N_MIN: {N_MIN}", paths["log"])
+    log_progress(f"P_MIN: {P_MIN}", paths["log"])
     log_progress(f"N_GRID: {N_GRID}", paths["log"])
     log_progress(f"Seeds: {SEEDS}", paths["log"])
     log_progress(f"Scale: None", paths["log"])
@@ -327,9 +332,10 @@ def run_one_ablation_mode(
             available_train_size = len(y_train_pool)
             train_sizes = make_train_size_grid(
                 n_max=available_train_size,
-                n_min=N_MIN,
+                p_min=P_MIN,
                 n_grid=N_GRID,
             )
+            n_min_dataset = int(np.ceil(P_MIN * available_train_size))
 
             log_progress(
                 f"Loaded {dataset_name}: train_pool={X_train_pool.shape}, "
@@ -337,6 +343,7 @@ def run_one_ablation_mode(
                 f"available_train_size={available_train_size}",
                 paths["log"],
             )
+            log_progress(f"Dataset-specific n_min: {n_min_dataset}", paths["log"])
             log_progress(f"Train sizes: {train_sizes}", paths["log"])
 
             for size_id, train_size in enumerate(train_sizes, start=1):
@@ -429,6 +436,8 @@ def run_one_ablation_mode(
                         "ablation_name": ablation_name,
                         "ablation_cfg": str(ablation_cfg),
                         "available_train_size": available_train_size,
+                        "p_min": P_MIN,
+                        "dataset_n_min": n_min_dataset,
                         "size_id": size_id,
                         "requested_train_size": train_size,
                         "n_train_subset": n_sub,
