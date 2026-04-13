@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import json
 import sys
 import time
+import tempfile
+import subprocess
 from pathlib import Path
 
 import numpy as np
@@ -22,7 +25,6 @@ from experiments.runtime_utils import (
     load_dataset_pair,
     log_progress,
     resolve_dataset_paths_from_base_names,
-    safe_timed_call,
 )
 
 
@@ -33,8 +35,7 @@ DATA_DIR = PROJECT_ROOT / "data"
 
 # Used only for dataset ablation
 DATASET_ABLATION_DATASET_NAMES = [
-    "higgs",
-    "susy",
+
     "epsilon",
     "airlines",
     "celegans",
@@ -46,6 +47,9 @@ DATASET_ABLATION_DATASET_NAMES = [
     "tissuemnist_28",
     "tv_news_combined",
     "zilionis",
+
+    "higgs",
+    "susy",
 ]
 
 # Used for all non-dataset ablations
@@ -142,12 +146,6 @@ MODEL_TYPE_SETTINGS = [
         "ablation_name": "model_type=et",
         "ablation_cfg": {"bootstrap": True},
     },
-    # {
-    #     "model_type": "xgb",
-    #     "kernel_method": "original",
-    #     "ablation_name": "model_type=xgb",
-    #     "ablation_cfg": {"max_depth": 0},
-    # },
 ]
 
 # 4) max depth ablation
@@ -212,12 +210,6 @@ def is_power_of_two(n: int) -> bool:
     return n > 0 and (n & (n - 1)) == 0
 
 
-def ceil_log2_int(n: int) -> int:
-    if n <= 1:
-        return 0
-    return int(np.ceil(np.log2(n)))
-
-
 def floor_log2_int(n: int) -> int:
     if n <= 0:
         raise ValueError("n must be positive.")
@@ -228,10 +220,6 @@ def make_train_size_grid(
     n_max: int,
     min_pow: int = MIN_POW,
 ) -> tuple[list[int], int | None, int | None]:
-    """
-    Build a per-dataset power-of-two grid from 2**min_pow upward.
-    Append n_max if it is not already a power of two.
-    """
     if n_max <= 0:
         raise ValueError("n_max must be positive.")
 
@@ -343,6 +331,248 @@ def run_fk_full_pipeline(
     }
 
 
+def _write_subprocess_payload(
+    payload_path: Path,
+    *,
+    dataset_name: str,
+    dataset_paths: dict[str, str | None],
+    seed: int,
+    train_size: int,
+    subset_seed: int,
+    label_col_idx: int,
+    drop_missing_y: bool,
+    verbose_dataprep: bool,
+    model_type: str,
+    kernel_method: str,
+    ablation_cfg: dict[str, object],
+    run_full_kernel: bool,
+):
+    payload = {
+        "dataset_name": dataset_name,
+        "dataset_paths": dataset_paths,
+        "seed": seed,
+        "train_size": train_size,
+        "subset_seed": subset_seed,
+        "label_col_idx": label_col_idx,
+        "drop_missing_y": drop_missing_y,
+        "verbose_dataprep": verbose_dataprep,
+        "model_type": model_type,
+        "kernel_method": kernel_method,
+        "ablation_cfg": ablation_cfg,
+        "run_full_kernel": run_full_kernel,
+        "project_root": str(PROJECT_ROOT),
+    }
+    payload_path.write_text(json.dumps(payload), encoding="utf-8")
+
+
+def _subprocess_worker_code() -> str:
+    return r"""
+import json
+import sys
+import time
+from pathlib import Path
+import gc
+
+import numpy as np
+from sklearn.metrics import accuracy_score
+from sklearn.model_selection import StratifiedShuffleSplit
+
+project_root = Path(sys.argv[1])
+payload_path = Path(sys.argv[2])
+
+if str(project_root) not in sys.path:
+    sys.path.insert(0, str(project_root))
+
+from forestkernel import ForestKernel
+from experiments.runtime_utils import (
+    MemoryMonitor,
+    kernel_percent_nnz,
+    load_dataset_pair,
+)
+
+payload = json.loads(payload_path.read_text(encoding="utf-8"))
+
+def sample_train_subset_size(X, y, train_size, seed):
+    if train_size >= len(y):
+        return X, y
+    splitter = StratifiedShuffleSplit(
+        n_splits=1,
+        train_size=train_size,
+        random_state=seed,
+    )
+    idx, _ = next(splitter.split(X, y))
+    return X[idx], y[idx]
+
+def instantiate_fk(model_type, kernel_method, seed, model_kwargs):
+    kwargs = dict(model_kwargs)
+    if model_type in {"rf", "et"}:
+        kwargs.setdefault("n_jobs", -1)
+    elif model_type == "xgb":
+        kwargs.setdefault("n_jobs", -1)
+        kwargs.setdefault("device", "cuda")
+    kwargs["random_state"] = seed
+    return ForestKernel(
+        prediction_type="classification",
+        kernel_method=kernel_method,
+        model_type=model_type,
+        **kwargs,
+    )
+
+paths = payload["dataset_paths"]
+X_train_pool, X_test, y_train_pool, y_test, meta = load_dataset_pair(
+    dataset_name=payload["dataset_name"],
+    paths=paths,
+    seed=payload["seed"],
+    label_col_idx=payload["label_col_idx"],
+    scale=None,
+    global_transform=False,
+    drop_missing_y=payload["drop_missing_y"],
+    verbose_dataprep=payload["verbose_dataprep"],
+)
+
+X_sub, y_sub = sample_train_subset_size(
+    X_train_pool,
+    y_train_pool,
+    train_size=payload["train_size"],
+    seed=payload["subset_seed"],
+)
+
+del X_train_pool, y_train_pool
+gc.collect()
+
+fk = instantiate_fk(
+    model_type=payload["model_type"],
+    kernel_method=payload["kernel_method"],
+    seed=payload["seed"],
+    model_kwargs=payload["ablation_cfg"],
+)
+
+run_full_kernel = payload["run_full_kernel"]
+
+# -------------------------------------------------
+# Unmeasured: forest fit
+# -------------------------------------------------
+t0 = time.perf_counter()
+fk.fit_forest(X_sub, y_sub)
+forest_fit_time = time.perf_counter() - t0
+
+# Optional forest prediction time/acc, also unmeasured for memory
+t0 = time.perf_counter()
+y_pred_forest = fk.predict_forest(X_test)
+forest_pred_time = time.perf_counter() - t0
+forest_acc = accuracy_score(y_test, y_pred_forest)
+
+gc.collect()
+
+# -------------------------------------------------
+# Measured: cache + query map + full kernel only
+# -------------------------------------------------
+with MemoryMonitor(poll_seconds=0.005) as mm:
+    t0 = time.perf_counter()
+    fk.build_kernel_cache(kernel_method=payload["kernel_method"])
+    cache_time = time.perf_counter() - t0
+
+    t0 = time.perf_counter()
+    fk.get_train_query_map()
+    q_time = time.perf_counter() - t0
+
+    if run_full_kernel:
+        t0 = time.perf_counter()
+        K_fk = fk.get_kernel()
+        k_time = time.perf_counter() - t0
+        k_percent_nnz = kernel_percent_nnz(K_fk)
+    else:
+        k_time = float("nan")
+        k_percent_nnz = float("nan")
+
+kernel_build_peak_mb = mm.peak_delta_mb
+
+# -------------------------------------------------
+# Unmeasured: kernel prediction
+# -------------------------------------------------
+t0 = time.perf_counter()
+y_pred_kp = fk.kernel_predict(X_test)
+kp_time = time.perf_counter() - t0
+kp_acc = accuracy_score(y_test, y_pred_kp)
+
+result = {
+    "forest_fit_time_s": forest_fit_time,
+    "forest_test_predict_time_s": forest_pred_time,
+    "forest_test_acc": forest_acc,
+    "cache_build_time_s": cache_time,
+    "q_build_time_s": q_time,
+    "full_kernel_time_s": k_time,
+    "kernel_percent_nnz": k_percent_nnz,
+    "kernel_predict_time_s": kp_time,
+    "kernel_predict_test_acc": kp_acc,
+    "kernel_build_peak_mb": kernel_build_peak_mb,
+    "status": "ok",
+    "error": "",
+}
+print(json.dumps(result))
+"""
+
+
+def run_fk_full_pipeline_subprocess(
+    *,
+    dataset_name: str,
+    dataset_paths: dict[str, Path | None],
+    seed: int,
+    train_size: int,
+    subset_seed: int,
+    model_type: str,
+    kernel_method: str,
+    ablation_cfg: dict[str, object],
+):
+    serializable_paths = {
+        "train": str(dataset_paths["train"]) if dataset_paths["train"] is not None else None,
+        "test": str(dataset_paths["test"]) if dataset_paths["test"] is not None else None,
+        "single": str(dataset_paths["single"]) if dataset_paths["single"] is not None else None,
+    }
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        tmpdir = Path(tmpdir)
+        payload_path = tmpdir / "payload.json"
+        worker_path = tmpdir / "worker.py"
+
+        _write_subprocess_payload(
+            payload_path,
+            dataset_name=dataset_name,
+            dataset_paths=serializable_paths,
+            seed=seed,
+            train_size=train_size,
+            subset_seed=subset_seed,
+            label_col_idx=LABEL_COL_IDX,
+            drop_missing_y=DROP_MISSING_Y,
+            verbose_dataprep=VERBOSE_DATAPREP,
+            model_type=model_type,
+            kernel_method=kernel_method,
+            ablation_cfg=ablation_cfg,
+            run_full_kernel=RUN_FULL_KERNEL,
+        )
+        worker_path.write_text(_subprocess_worker_code(), encoding="utf-8")
+
+        t0 = time.perf_counter()
+        proc = subprocess.run(
+            [sys.executable, str(worker_path), str(PROJECT_ROOT), str(payload_path)],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        wall_time = time.perf_counter() - t0
+
+        if proc.returncode != 0:
+            err = proc.stderr.strip() or proc.stdout.strip() or f"Subprocess failed with code {proc.returncode}"
+            return None, wall_time, np.nan, "failed", err
+
+        try:
+            result = json.loads(proc.stdout.strip())
+        except Exception as e:
+            return None, wall_time, np.nan, "failed", f"Failed to parse subprocess output: {e}\nSTDOUT:\n{proc.stdout}\nSTDERR:\n{proc.stderr}"
+
+        return result, wall_time, result.get("kernel_build_peak_mb", np.nan), result.get("status", "ok"), result.get("error", "")
+
+
 # ---------------------------------------------------------------------
 # Core runner
 # ---------------------------------------------------------------------
@@ -367,6 +597,7 @@ def run_one_ablation_mode(
     log_progress(f"CSV output: {paths['csv']}", paths["log"])
     log_progress(f"Parquet output: {paths['parquet']}", paths["log"])
     log_progress(f"Progress log: {paths['log']}", paths["log"])
+    log_progress("Memory measurement mode: fresh subprocess peak RSS per run", paths["log"])
 
     for setting in settings:
         log_progress(
@@ -378,47 +609,44 @@ def run_one_ablation_mode(
 
     for dataset_name, dataset_paths in dataset_groups.items():
         log_progress(f"=== DATASET: {dataset_name} ===", paths["log"])
+
+        # parent-side load only to determine train-size grid
+        try:
+            X_train_pool, X_test, y_train_pool, y_test, meta = load_dataset_pair(
+                dataset_name=dataset_name,
+                paths=dataset_paths,
+                seed=SEEDS[0],
+                label_col_idx=LABEL_COL_IDX,
+                scale=None,
+                global_transform=False,
+                drop_missing_y=DROP_MISSING_Y,
+                verbose_dataprep=VERBOSE_DATAPREP,
+            )
+        except Exception as e:
+            log_progress(
+                f"Failed to load dataset {dataset_name} for grid construction: {e}",
+                paths["log"],
+            )
+            continue
+
+        available_train_size = len(y_train_pool)
+        train_sizes, k_min, k_max = make_train_size_grid(
+            n_max=available_train_size,
+            min_pow=MIN_POW,
+        )
+
         log_progress(
-            f"Dataprep scheme | dataset={dataset_name} | scale=None | global_transform=False",
+            f"Loaded {dataset_name}: train_pool={X_train_pool.shape}, "
+            f"test={X_test.shape}, predefined_split={meta['predefined_split']}, "
+            f"available_train_size={available_train_size}",
             paths["log"],
         )
+        log_progress(f"Dataset-specific k_min: {k_min}", paths["log"])
+        log_progress(f"Dataset-specific k_max: {k_max}", paths["log"])
+        log_progress(f"Train sizes: {train_sizes}", paths["log"])
 
         for seed in SEEDS:
             log_progress(f">>> SEED: {seed}", paths["log"])
-
-            try:
-                X_train_pool, X_test, y_train_pool, y_test, meta = load_dataset_pair(
-                    dataset_name=dataset_name,
-                    paths=dataset_paths,
-                    seed=seed,
-                    label_col_idx=LABEL_COL_IDX,
-                    scale=None,
-                    global_transform=False,
-                    drop_missing_y=DROP_MISSING_Y,
-                    verbose_dataprep=VERBOSE_DATAPREP,
-                )
-            except Exception as e:
-                log_progress(
-                    f"Failed to load dataset {dataset_name} with seed {seed}: {e}",
-                    paths["log"],
-                )
-                continue
-
-            available_train_size = len(y_train_pool)
-            train_sizes, k_min, k_max = make_train_size_grid(
-                n_max=available_train_size,
-                min_pow=MIN_POW,
-            )
-
-            log_progress(
-                f"Loaded {dataset_name}: train_pool={X_train_pool.shape}, "
-                f"test={X_test.shape}, predefined_split={meta['predefined_split']}, "
-                f"available_train_size={available_train_size}",
-                paths["log"],
-            )
-            log_progress(f"Dataset-specific k_min: {k_min}", paths["log"])
-            log_progress(f"Dataset-specific k_max: {k_max}", paths["log"])
-            log_progress(f"Train sizes: {train_sizes}", paths["log"])
 
             for size_id, train_size in enumerate(train_sizes, start=1):
                 log_progress(
@@ -428,15 +656,6 @@ def run_one_ablation_mode(
                 )
 
                 subset_seed = seed + size_id
-                X_sub, y_sub = sample_train_subset_size(
-                    X_train_pool,
-                    y_train_pool,
-                    train_size=train_size,
-                    seed=subset_seed,
-                )
-
-                n_sub = len(y_sub)
-                log_progress(f"Subset shape: {X_sub.shape}", paths["log"])
 
                 for ablation_id, setting in enumerate(settings, start=1):
                     model_type = setting["model_type"]
@@ -451,21 +670,15 @@ def run_one_ablation_mode(
                         paths["log"],
                     )
 
-                    fk = instantiate_fk(
+                    pipeline_out, pipeline_wall_time, kernel_build_peak_mb, pipeline_status, pipeline_error = run_fk_full_pipeline_subprocess(
+                        dataset_name=dataset_name,
+                        dataset_paths=dataset_paths,
+                        seed=seed,
+                        train_size=train_size,
+                        subset_seed=subset_seed,
                         model_type=model_type,
                         kernel_method=kernel_method,
-                        seed=seed,
-                        model_kwargs=ablation_cfg,
-                    )
-
-                    pipeline_out, pipeline_time, pipeline_peak_mb, pipeline_status, pipeline_error = safe_timed_call(
-                        run_fk_full_pipeline,
-                        fk,
-                        X_sub,
-                        y_sub,
-                        X_test,
-                        y_test,
-                        kernel_method,
+                        ablation_cfg=ablation_cfg,
                     )
 
                     if pipeline_status == "ok":
@@ -510,7 +723,7 @@ def run_one_ablation_mode(
                         "requested_train_size": train_size,
                         "is_power_of_two_size": is_power_of_two(train_size),
                         "log2_requested_train_size": np.log2(train_size),
-                        "n_train_subset": n_sub,
+                        "n_train_subset": train_size,
                         "n_test": len(y_test),
                         "forest_fit_time_s": forest_fit_time,
                         "forest_test_predict_time_s": forest_pred_time,
@@ -521,7 +734,8 @@ def run_one_ablation_mode(
                         "kernel_percent_nnz": k_percent_nnz,
                         "kernel_predict_time_s": kp_time,
                         "kernel_predict_test_acc": kp_acc,
-                        "pipeline_peak_mb": pipeline_peak_mb,
+                        "kernel_build_peak_mb": kernel_build_peak_mb,
+                        "pipeline_wall_time_s": pipeline_wall_time,
                         "status": pipeline_status,
                         "error": pipeline_error,
                     }
@@ -529,7 +743,7 @@ def run_one_ablation_mode(
 
                     log_progress(
                         f"Done | dataset={dataset_name} | seed={seed} | "
-                        f"train_size={train_size} | n_train={n_sub} | "
+                        f"train_size={train_size} | n_train={train_size} | "
                         f"model_type={model_type} | kernel_method={kernel_method} | "
                         f"ablation={ablation_name} | "
                         f"fit={forest_fit_time if not np.isnan(forest_fit_time) else 'nan'}s | "
@@ -537,7 +751,7 @@ def run_one_ablation_mode(
                         f"q={q_time if not np.isnan(q_time) else 'nan'}s | "
                         f"kernel={k_time if not np.isnan(k_time) else 'nan'}s | "
                         f"kp={kp_time if not np.isnan(kp_time) else 'nan'}s | "
-                        f"peak_mb={pipeline_peak_mb if not np.isnan(pipeline_peak_mb) else 'nan'} | "
+                        f"kernel_build_peak_mb={kernel_build_peak_mb if not np.isnan(kernel_build_peak_mb) else 'nan'} | "
                         f"%nnz={k_percent_nnz if not np.isnan(k_percent_nnz) else 'nan'} | "
                         f"forest_acc={forest_acc if not np.isnan(forest_acc) else 'nan'} | "
                         f"kp_acc={kp_acc if not np.isnan(kp_acc) else 'nan'} | "
