@@ -6,7 +6,7 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
-from sklearn.decomposition import PCA, TruncatedSVD
+from sklearn.decomposition import PCA
 from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import accuracy_score
 from sklearn.neighbors import KNeighborsClassifier
@@ -55,7 +55,7 @@ SEEDS = [44, 578, 9, 912, 345]
 
 LABEL_COL_IDX = 0
 DROP_MISSING_Y = True
-VERBOSE_DATAPREP = False
+VERBOSE_DATAPREP = True
 
 # Image datasets: global normalize
 IMAGE_DATASETS = {
@@ -83,10 +83,10 @@ FOREST_KWARGS = {
 # Embedding methods
 RUN_RAW_PCA = True
 RUN_LEAF_PCA = True
-RUN_RAW_SVD_UMAP = True
-RUN_LEAF_SVD_UMAP = True
+RUN_RAW_PCA_UMAP = True
+RUN_LEAF_PCA_UMAP = True
 
-SVD_N_COMPONENTS = 30
+PCA_UMAP_N_COMPONENTS = 50
 UMAP_N_COMPONENTS = 2
 UMAP_KWARGS = {
     "n_components": UMAP_N_COMPONENTS,
@@ -94,7 +94,8 @@ UMAP_KWARGS = {
 }
 
 # Scaled k-NN neighborhoods as fractions of train size
-KNN_FRACTIONS = [0.001, 0.002, 0.005, 0.01]
+# Fixed k-NN neighborhoods
+KNN_K_VALUES = [5, 10, 20]
 LOGREG_MAX_ITER = 5000
 
 
@@ -193,13 +194,7 @@ def crop_sign_mnist(
 
 
 def get_knn_neighborhoods(n_train: int) -> list[int]:
-    k_values = sorted(
-        {
-            max(3, min(int(round(n_train * frac)), n_train - 1))
-            for frac in KNN_FRACTIONS
-        }
-    )
-    return k_values
+    return [k for k in KNN_K_VALUES if k < n_train]
 
 
 def knn_test_accuracy_multi(
@@ -286,8 +281,8 @@ def run_raw_pca(
         "cache_build_time_s": np.nan,
         "reference_map_time_s": np.nan,
         "query_map_time_s": np.nan,
-        "svd_fit_transform_time_s": np.nan,
-        "svd_transform_time_s": np.nan,
+        "pca_reducer_fit_transform_time_s": np.nan,
+        "pca_reducer_transform_time_s": np.nan,
         "pca_fit_transform_time_s": pca_fit_time,
         "pca_transform_time_s": pca_test_time,
         "umap_fit_transform_time_s": np.nan,
@@ -377,8 +372,8 @@ def run_leaf_pca(
         "cache_build_time_s": cache_time,
         "reference_map_time_s": ref_time,
         "query_map_time_s": query_time,
-        "svd_fit_transform_time_s": np.nan,
-        "svd_transform_time_s": np.nan,
+        "pca_reducer_fit_transform_time_s": np.nan,
+        "pca_reducer_transform_time_s": np.nan,
         "pca_fit_transform_time_s": pca_fit_time,
         "pca_transform_time_s": pca_test_time,
         "umap_fit_transform_time_s": np.nan,
@@ -398,7 +393,7 @@ def run_leaf_pca(
     }
 
 
-def run_raw_svd_umap(
+def run_raw_pca_umap(
     X_train,
     X_test,
     y_train,
@@ -411,67 +406,60 @@ def run_raw_svd_umap(
     out_dir: Path,
 ) -> dict:
     def train_pipeline():
-        svd = TruncatedSVD(n_components=SVD_N_COMPONENTS, random_state=seed)
+        pca_reducer = PCA(n_components=PCA_UMAP_N_COMPONENTS, random_state=seed)
 
         t0 = time.perf_counter()
-        x_svd_train = svd.fit_transform(X_train)
-        svd_fit_time = time.perf_counter() - t0
+        x_pca_train = pca_reducer.fit_transform(X_train)
+        pca_reducer_fit_time = time.perf_counter() - t0
 
         umap = UMAP(**UMAP_KWARGS)
 
         t0 = time.perf_counter()
-        x_train_2d = umap.fit_transform(x_svd_train)
+        x_train_2d = umap.fit_transform(x_pca_train)
         umap_fit_time = time.perf_counter() - t0
 
-        return svd, umap, x_train_2d, svd_fit_time, umap_fit_time
+        return pca_reducer, umap, x_train_2d, pca_reducer_fit_time, umap_fit_time
 
     (
-        svd,
+        pca_reducer,
         umap,
         x_train_2d,
-        svd_fit_time,
+        pca_reducer_fit_time,
         umap_fit_time,
     ), train_total_time, train_total_peak = timed_call(train_pipeline)
 
     def test_pipeline():
         t0 = time.perf_counter()
-        x_svd_test = svd.transform(X_test)
-        svd_test_time = time.perf_counter() - t0
+        x_pca_test = pca_reducer.transform(X_test)
+        pca_reducer_test_time = time.perf_counter() - t0
 
         t0 = time.perf_counter()
-        x_test_2d = umap.transform(x_svd_test)
+        x_test_2d = umap.transform(x_pca_test)
         umap_test_time = time.perf_counter() - t0
 
-        return x_test_2d, svd_test_time, umap_test_time
+        return x_test_2d, pca_reducer_test_time, umap_test_time
 
-    (x_test_2d, svd_test_time, umap_test_time), test_total_time, test_total_peak = timed_call(test_pipeline)
+    (x_test_2d, pca_reducer_test_time, umap_test_time), test_total_time, test_total_peak = timed_call(test_pipeline)
 
     knn_acc, knn_k_values, knn_scores = knn_test_accuracy_multi(
         x_train_2d, x_test_2d, y_train, y_test
     )
     lin_acc = logistic_test_accuracy(x_train_2d, x_test_2d, y_train, y_test, seed)
 
-    save_embedding(
-        out_dir / f"raw_svd{SVD_N_COMPONENTS}_umap_train.csv",
-        id_train_raw,
-        y_train_raw,
-        x_train_2d,
-    )
-    save_embedding(
-        out_dir / f"raw_svd{SVD_N_COMPONENTS}_umap_test.csv",
-        id_test_raw,
-        y_test_raw,
-        x_test_2d,
-    )
+    train_file = out_dir / f"raw_pca{PCA_UMAP_N_COMPONENTS}_umap_train.csv"
+    test_file = out_dir / f"raw_pca{PCA_UMAP_N_COMPONENTS}_umap_test.csv"
+
+    save_embedding(train_file, id_train_raw, y_train_raw, x_train_2d)
+    save_embedding(test_file, id_test_raw, y_test_raw, x_test_2d)
 
     return {
-        "method_name": f"raw_svd{SVD_N_COMPONENTS}_umap",
+        "method_name": f"raw_pca{PCA_UMAP_N_COMPONENTS}_umap",
         "forest_fit_time_s": np.nan,
         "cache_build_time_s": np.nan,
         "reference_map_time_s": np.nan,
         "query_map_time_s": np.nan,
-        "svd_fit_transform_time_s": svd_fit_time,
-        "svd_transform_time_s": svd_test_time,
+        "pca_reducer_fit_transform_time_s": pca_reducer_fit_time,
+        "pca_reducer_transform_time_s": pca_reducer_test_time,
         "pca_fit_transform_time_s": np.nan,
         "pca_transform_time_s": np.nan,
         "umap_fit_transform_time_s": umap_fit_time,
@@ -484,14 +472,14 @@ def run_raw_svd_umap(
         "knn_k_values": str(knn_k_values),
         "knn_test_acc_by_k": str(knn_scores),
         "linear_test_acc": lin_acc,
-        "train_embedding_file": str(out_dir / f"raw_svd{SVD_N_COMPONENTS}_umap_train.csv"),
-        "test_embedding_file": str(out_dir / f"raw_svd{SVD_N_COMPONENTS}_umap_test.csv"),
+        "train_embedding_file": str(train_file),
+        "test_embedding_file": str(test_file),
         "status": "ok",
         "error": "",
     }
 
 
-def run_leaf_svd_umap(
+def run_leaf_pca_umap(
     fk: ForestKernel,
     X_train,
     X_test,
@@ -517,37 +505,37 @@ def run_leaf_svd_umap(
         leaf_train = fk.get_reference_map()
         ref_time = time.perf_counter() - t0
 
-        svd = TruncatedSVD(n_components=SVD_N_COMPONENTS, random_state=seed)
+        pca_reducer = PCA(n_components=PCA_UMAP_N_COMPONENTS, random_state=seed)
 
         t0 = time.perf_counter()
-        x_svd_train = svd.fit_transform(leaf_train)
-        svd_fit_time = time.perf_counter() - t0
+        x_pca_train = pca_reducer.fit_transform(leaf_train)
+        pca_reducer_fit_time = time.perf_counter() - t0
 
         umap = UMAP(**UMAP_KWARGS)
 
         t0 = time.perf_counter()
-        x_train_2d = umap.fit_transform(x_svd_train)
+        x_train_2d = umap.fit_transform(x_pca_train)
         umap_fit_time = time.perf_counter() - t0
 
         return (
-            svd,
+            pca_reducer,
             umap,
             x_train_2d,
             forest_fit_time,
             cache_time,
             ref_time,
-            svd_fit_time,
+            pca_reducer_fit_time,
             umap_fit_time,
         )
 
     (
-        svd,
+        pca_reducer,
         umap,
         x_train_2d,
         forest_fit_time,
         cache_time,
         ref_time,
-        svd_fit_time,
+        pca_reducer_fit_time,
         umap_fit_time,
     ), train_total_time, train_total_peak = timed_call(train_pipeline)
 
@@ -557,19 +545,19 @@ def run_leaf_svd_umap(
         query_time = time.perf_counter() - t0
 
         t0 = time.perf_counter()
-        x_svd_test = svd.transform(leaf_test)
-        svd_test_time = time.perf_counter() - t0
+        x_pca_test = pca_reducer.transform(leaf_test)
+        pca_reducer_test_time = time.perf_counter() - t0
 
         t0 = time.perf_counter()
-        x_test_2d = umap.transform(x_svd_test)
+        x_test_2d = umap.transform(x_pca_test)
         umap_test_time = time.perf_counter() - t0
 
-        return x_test_2d, query_time, svd_test_time, umap_test_time
+        return x_test_2d, query_time, pca_reducer_test_time, umap_test_time
 
     (
         x_test_2d,
         query_time,
-        svd_test_time,
+        pca_reducer_test_time,
         umap_test_time,
     ), test_total_time, test_total_peak = timed_call(test_pipeline)
 
@@ -578,27 +566,20 @@ def run_leaf_svd_umap(
     )
     lin_acc = logistic_test_accuracy(x_train_2d, x_test_2d, y_train, y_test, seed)
 
-    save_embedding(
-        out_dir / f"leaf_svd{SVD_N_COMPONENTS}_umap_train.csv",
-        id_train_raw,
-        y_train_raw,
-        x_train_2d,
-    )
-    save_embedding(
-        out_dir / f"leaf_svd{SVD_N_COMPONENTS}_umap_test.csv",
-        id_test_raw,
-        y_test_raw,
-        x_test_2d,
-    )
+    train_file = out_dir / f"leaf_pca{PCA_UMAP_N_COMPONENTS}_umap_train.csv"
+    test_file = out_dir / f"leaf_pca{PCA_UMAP_N_COMPONENTS}_umap_test.csv"
+
+    save_embedding(train_file, id_train_raw, y_train_raw, x_train_2d)
+    save_embedding(test_file, id_test_raw, y_test_raw, x_test_2d)
 
     return {
-        "method_name": f"leaf_svd{SVD_N_COMPONENTS}_umap",
+        "method_name": f"leaf_pca{PCA_UMAP_N_COMPONENTS}_umap",
         "forest_fit_time_s": forest_fit_time,
         "cache_build_time_s": cache_time,
         "reference_map_time_s": ref_time,
         "query_map_time_s": query_time,
-        "svd_fit_transform_time_s": svd_fit_time,
-        "svd_transform_time_s": svd_test_time,
+        "pca_reducer_fit_transform_time_s": pca_reducer_fit_time,
+        "pca_reducer_transform_time_s": pca_reducer_test_time,
         "pca_fit_transform_time_s": np.nan,
         "pca_transform_time_s": np.nan,
         "umap_fit_transform_time_s": umap_fit_time,
@@ -611,8 +592,8 @@ def run_leaf_svd_umap(
         "knn_k_values": str(knn_k_values),
         "knn_test_acc_by_k": str(knn_scores),
         "linear_test_acc": lin_acc,
-        "train_embedding_file": str(out_dir / f"leaf_svd{SVD_N_COMPONENTS}_umap_train.csv"),
-        "test_embedding_file": str(out_dir / f"leaf_svd{SVD_N_COMPONENTS}_umap_test.csv"),
+        "train_embedding_file": str(train_file),
+        "test_embedding_file": str(test_file),
         "status": "ok",
         "error": "",
     }
@@ -633,9 +614,9 @@ def main() -> None:
     log_progress(f"Kernel method: {KERNEL_METHOD}", PROGRESS_LOG)
     log_progress(f"Model type: {MODEL_TYPE}", PROGRESS_LOG)
     log_progress(f"Forest kwargs: {FOREST_KWARGS}", PROGRESS_LOG)
-    log_progress(f"SVD components: {SVD_N_COMPONENTS}", PROGRESS_LOG)
+    log_progress(f"PCA->UMAP components: {PCA_UMAP_N_COMPONENTS}", PROGRESS_LOG)
     log_progress(f"UMAP kwargs: {UMAP_KWARGS}", PROGRESS_LOG)
-    log_progress(f"kNN fractions: {KNN_FRACTIONS}", PROGRESS_LOG)
+    log_progress(f"kNN k-values: {KNN_K_VALUES}", PROGRESS_LOG)
     log_progress(f"Image datasets: {sorted(IMAGE_DATASETS)}", PROGRESS_LOG)
     log_progress(f"SignMNIST kept letters: {SIGN_MNIST_ALLOWED_LETTERS}", PROGRESS_LOG)
 
@@ -779,9 +760,9 @@ def main() -> None:
                     PROGRESS_LOG,
                 )
 
-            if RUN_RAW_SVD_UMAP:
-                log_progress(f"Method: raw_svd{SVD_N_COMPONENTS}_umap", PROGRESS_LOG)
-                result = run_raw_svd_umap(
+            if RUN_RAW_PCA_UMAP:
+                log_progress(f"Method: raw_pca{PCA_UMAP_N_COMPONENTS}_umap", PROGRESS_LOG)
+                result = run_raw_pca_umap(
                     X_train=X_train,
                     X_test=X_test,
                     y_train=y_train,
@@ -808,17 +789,17 @@ def main() -> None:
                 }
                 append_and_flush(rows, row)
                 log_progress(
-                    f"Done raw_svd{SVD_N_COMPONENTS}_umap | dataset={dataset_name} | seed={seed} | "
+                    f"Done raw_pca{PCA_UMAP_N_COMPONENTS}_umap | dataset={dataset_name} | seed={seed} | "
                     f"knn_acc={result['knn_test_acc_avg']:.4f} | "
                     f"lin_acc={result['linear_test_acc']:.4f} | "
                     f"k={result['knn_k_values']}",
                     PROGRESS_LOG,
                 )
 
-            if RUN_LEAF_SVD_UMAP:
-                log_progress(f"Method: leaf_svd{SVD_N_COMPONENTS}_umap", PROGRESS_LOG)
+            if RUN_LEAF_PCA_UMAP:
+                log_progress(f"Method: leaf_pca{PCA_UMAP_N_COMPONENTS}_umap", PROGRESS_LOG)
                 fk = instantiate_fk(seed)
-                result = run_leaf_svd_umap(
+                result = run_leaf_pca_umap(
                     fk=fk,
                     X_train=X_train,
                     X_test=X_test,
@@ -846,7 +827,7 @@ def main() -> None:
                 }
                 append_and_flush(rows, row)
                 log_progress(
-                    f"Done leaf_svd{SVD_N_COMPONENTS}_umap | dataset={dataset_name} | seed={seed} | "
+                    f"Done leaf_pca{PCA_UMAP_N_COMPONENTS}_umap | dataset={dataset_name} | seed={seed} | "
                     f"knn_acc={result['knn_test_acc_avg']:.4f} | "
                     f"lin_acc={result['linear_test_acc']:.4f} | "
                     f"k={result['knn_k_values']}",
