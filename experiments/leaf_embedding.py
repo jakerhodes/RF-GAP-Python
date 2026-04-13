@@ -253,10 +253,24 @@ def run_raw_pca(
     seed: int,
     out_dir: Path,
 ) -> dict:
-    pca = PCA(n_components=2, random_state=seed)
+    def train_pipeline():
+        pca = PCA(n_components=2, random_state=seed)
 
-    x_train_2d, fit_time, fit_mem = timed_call(pca.fit_transform, X_train)
-    x_test_2d, test_time, test_mem = timed_call(pca.transform, X_test)
+        t0 = time.perf_counter()
+        x_train_2d = pca.fit_transform(X_train)
+        pca_fit_time = time.perf_counter() - t0
+
+        return pca, x_train_2d, pca_fit_time
+
+    (pca, x_train_2d, pca_fit_time), train_total_time, train_total_peak = timed_call(train_pipeline)
+
+    def test_pipeline():
+        t0 = time.perf_counter()
+        x_test_2d = pca.transform(X_test)
+        pca_test_time = time.perf_counter() - t0
+        return x_test_2d, pca_test_time
+
+    (x_test_2d, pca_test_time), test_total_time, test_total_peak = timed_call(test_pipeline)
 
     knn_acc, knn_k_values, knn_scores = knn_test_accuracy_multi(
         x_train_2d, x_test_2d, y_train, y_test
@@ -269,29 +283,19 @@ def run_raw_pca(
     return {
         "method_name": "raw_pca",
         "forest_fit_time_s": np.nan,
-        "forest_fit_peak_mb": np.nan,
         "cache_build_time_s": np.nan,
-        "cache_build_peak_mb": np.nan,
         "reference_map_time_s": np.nan,
-        "reference_map_peak_mb": np.nan,
         "query_map_time_s": np.nan,
-        "query_map_peak_mb": np.nan,
         "svd_fit_transform_time_s": np.nan,
-        "svd_fit_transform_peak_mb": np.nan,
         "svd_transform_time_s": np.nan,
-        "svd_transform_peak_mb": np.nan,
-        "pca_fit_transform_time_s": fit_time,
-        "pca_fit_transform_peak_mb": fit_mem,
-        "pca_transform_time_s": test_time,
-        "pca_transform_peak_mb": test_mem,
+        "pca_fit_transform_time_s": pca_fit_time,
+        "pca_transform_time_s": pca_test_time,
         "umap_fit_transform_time_s": np.nan,
-        "umap_fit_transform_peak_mb": np.nan,
         "umap_transform_time_s": np.nan,
-        "umap_transform_peak_mb": np.nan,
-        "train_total_time_s": fit_time,
-        "train_total_peak_mb": fit_mem,
-        "test_total_time_s": test_time,
-        "test_total_peak_mb": test_mem,
+        "train_total_time_s": train_total_time,
+        "train_total_peak_mb": train_total_peak,
+        "test_total_time_s": test_total_time,
+        "test_total_peak_mb": test_total_peak,
         "knn_test_acc_avg": knn_acc,
         "knn_k_values": str(knn_k_values),
         "knn_test_acc_by_k": str(knn_scores),
@@ -316,18 +320,48 @@ def run_leaf_pca(
     seed: int,
     out_dir: Path,
 ) -> dict:
-    _, forest_fit_time, forest_fit_mem = timed_call(fk.fit_forest, X_train, y_train)
-    _, cache_time, cache_mem = timed_call(
-        fk.build_kernel_cache,
-        kernel_method=KERNEL_METHOD,
-    )
-    leaf_train, ref_time, ref_mem = timed_call(fk.get_reference_map)
-    leaf_test, query_time, query_mem = timed_call(fk.get_query_map, X_test)
+    def train_pipeline():
+        t0 = time.perf_counter()
+        fk.fit_forest(X_train, y_train)
+        forest_fit_time = time.perf_counter() - t0
 
-    pca = PCA(n_components=2, random_state=seed)
+        t0 = time.perf_counter()
+        fk.build_kernel_cache(kernel_method=KERNEL_METHOD)
+        cache_time = time.perf_counter() - t0
 
-    x_train_2d, pca_fit_time, pca_fit_mem = timed_call(pca.fit_transform, leaf_train)
-    x_test_2d, pca_test_time, pca_test_mem = timed_call(pca.transform, leaf_test)
+        t0 = time.perf_counter()
+        leaf_train = fk.get_reference_map()
+        ref_time = time.perf_counter() - t0
+
+        pca = PCA(n_components=2, random_state=seed)
+
+        t0 = time.perf_counter()
+        x_train_2d = pca.fit_transform(leaf_train)
+        pca_fit_time = time.perf_counter() - t0
+
+        return pca, x_train_2d, forest_fit_time, cache_time, ref_time, pca_fit_time
+
+    (
+        pca,
+        x_train_2d,
+        forest_fit_time,
+        cache_time,
+        ref_time,
+        pca_fit_time,
+    ), train_total_time, train_total_peak = timed_call(train_pipeline)
+
+    def test_pipeline():
+        t0 = time.perf_counter()
+        leaf_test = fk.get_query_map(X_test)
+        query_time = time.perf_counter() - t0
+
+        t0 = time.perf_counter()
+        x_test_2d = pca.transform(leaf_test)
+        pca_test_time = time.perf_counter() - t0
+
+        return x_test_2d, query_time, pca_test_time
+
+    (x_test_2d, query_time, pca_test_time), test_total_time, test_total_peak = timed_call(test_pipeline)
 
     knn_acc, knn_k_values, knn_scores = knn_test_accuracy_multi(
         x_train_2d, x_test_2d, y_train, y_test
@@ -337,33 +371,18 @@ def run_leaf_pca(
     save_embedding(out_dir / "leaf_pca_train.csv", id_train_raw, y_train_raw, x_train_2d)
     save_embedding(out_dir / "leaf_pca_test.csv", id_test_raw, y_test_raw, x_test_2d)
 
-    train_total_time = forest_fit_time + cache_time + ref_time + pca_fit_time
-    train_total_peak = forest_fit_mem + cache_mem + ref_mem + pca_fit_mem
-    test_total_time = query_time + pca_test_time
-    test_total_peak = query_mem + pca_test_mem
-
     return {
         "method_name": "leaf_pca",
         "forest_fit_time_s": forest_fit_time,
-        "forest_fit_peak_mb": forest_fit_mem,
         "cache_build_time_s": cache_time,
-        "cache_build_peak_mb": cache_mem,
         "reference_map_time_s": ref_time,
-        "reference_map_peak_mb": ref_mem,
         "query_map_time_s": query_time,
-        "query_map_peak_mb": query_mem,
         "svd_fit_transform_time_s": np.nan,
-        "svd_fit_transform_peak_mb": np.nan,
         "svd_transform_time_s": np.nan,
-        "svd_transform_peak_mb": np.nan,
         "pca_fit_transform_time_s": pca_fit_time,
-        "pca_fit_transform_peak_mb": pca_fit_mem,
         "pca_transform_time_s": pca_test_time,
-        "pca_transform_peak_mb": pca_test_mem,
         "umap_fit_transform_time_s": np.nan,
-        "umap_fit_transform_peak_mb": np.nan,
         "umap_transform_time_s": np.nan,
-        "umap_transform_peak_mb": np.nan,
         "train_total_time_s": train_total_time,
         "train_total_peak_mb": train_total_peak,
         "test_total_time_s": test_total_time,
@@ -391,21 +410,41 @@ def run_raw_svd_umap(
     seed: int,
     out_dir: Path,
 ) -> dict:
-    svd = TruncatedSVD(n_components=SVD_N_COMPONENTS, random_state=seed)
+    def train_pipeline():
+        svd = TruncatedSVD(n_components=SVD_N_COMPONENTS, random_state=seed)
 
-    x_svd_train, svd_fit_time, svd_fit_mem = timed_call(svd.fit_transform, X_train)
-    x_svd_test, svd_test_time, svd_test_mem = timed_call(svd.transform, X_test)
+        t0 = time.perf_counter()
+        x_svd_train = svd.fit_transform(X_train)
+        svd_fit_time = time.perf_counter() - t0
 
-    umap = UMAP(**UMAP_KWARGS)
+        umap = UMAP(**UMAP_KWARGS)
 
-    x_train_2d, umap_fit_time, umap_fit_mem = timed_call(
-        umap.fit_transform,
-        x_svd_train,
-    )
-    x_test_2d, umap_test_time, umap_test_mem = timed_call(
-        umap.transform,
-        x_svd_test,
-    )
+        t0 = time.perf_counter()
+        x_train_2d = umap.fit_transform(x_svd_train)
+        umap_fit_time = time.perf_counter() - t0
+
+        return svd, umap, x_train_2d, svd_fit_time, umap_fit_time
+
+    (
+        svd,
+        umap,
+        x_train_2d,
+        svd_fit_time,
+        umap_fit_time,
+    ), train_total_time, train_total_peak = timed_call(train_pipeline)
+
+    def test_pipeline():
+        t0 = time.perf_counter()
+        x_svd_test = svd.transform(X_test)
+        svd_test_time = time.perf_counter() - t0
+
+        t0 = time.perf_counter()
+        x_test_2d = umap.transform(x_svd_test)
+        umap_test_time = time.perf_counter() - t0
+
+        return x_test_2d, svd_test_time, umap_test_time
+
+    (x_test_2d, svd_test_time, umap_test_time), test_total_time, test_total_peak = timed_call(test_pipeline)
 
     knn_acc, knn_k_values, knn_scores = knn_test_accuracy_multi(
         x_train_2d, x_test_2d, y_train, y_test
@@ -425,33 +464,18 @@ def run_raw_svd_umap(
         x_test_2d,
     )
 
-    train_total_time = svd_fit_time + umap_fit_time
-    train_total_peak = svd_fit_mem + umap_fit_mem
-    test_total_time = svd_test_time + umap_test_time
-    test_total_peak = svd_test_mem + umap_test_mem
-
     return {
         "method_name": f"raw_svd{SVD_N_COMPONENTS}_umap",
         "forest_fit_time_s": np.nan,
-        "forest_fit_peak_mb": np.nan,
         "cache_build_time_s": np.nan,
-        "cache_build_peak_mb": np.nan,
         "reference_map_time_s": np.nan,
-        "reference_map_peak_mb": np.nan,
         "query_map_time_s": np.nan,
-        "query_map_peak_mb": np.nan,
         "svd_fit_transform_time_s": svd_fit_time,
-        "svd_fit_transform_peak_mb": svd_fit_mem,
         "svd_transform_time_s": svd_test_time,
-        "svd_transform_peak_mb": svd_test_mem,
         "pca_fit_transform_time_s": np.nan,
-        "pca_fit_transform_peak_mb": np.nan,
         "pca_transform_time_s": np.nan,
-        "pca_transform_peak_mb": np.nan,
         "umap_fit_transform_time_s": umap_fit_time,
-        "umap_fit_transform_peak_mb": umap_fit_mem,
         "umap_transform_time_s": umap_test_time,
-        "umap_transform_peak_mb": umap_test_mem,
         "train_total_time_s": train_total_time,
         "train_total_peak_mb": train_total_peak,
         "test_total_time_s": test_total_time,
@@ -480,29 +504,74 @@ def run_leaf_svd_umap(
     seed: int,
     out_dir: Path,
 ) -> dict:
-    _, forest_fit_time, forest_fit_mem = timed_call(fk.fit_forest, X_train, y_train)
-    _, cache_time, cache_mem = timed_call(
-        fk.build_kernel_cache,
-        kernel_method=KERNEL_METHOD,
-    )
-    leaf_train, ref_time, ref_mem = timed_call(fk.get_reference_map)
-    leaf_test, query_time, query_mem = timed_call(fk.get_query_map, X_test)
+    def train_pipeline():
+        t0 = time.perf_counter()
+        fk.fit_forest(X_train, y_train)
+        forest_fit_time = time.perf_counter() - t0
 
-    svd = TruncatedSVD(n_components=SVD_N_COMPONENTS, random_state=seed)
+        t0 = time.perf_counter()
+        fk.build_kernel_cache(kernel_method=KERNEL_METHOD)
+        cache_time = time.perf_counter() - t0
 
-    x_svd_train, svd_fit_time, svd_fit_mem = timed_call(svd.fit_transform, leaf_train)
-    x_svd_test, svd_test_time, svd_test_mem = timed_call(svd.transform, leaf_test)
+        t0 = time.perf_counter()
+        leaf_train = fk.get_reference_map()
+        ref_time = time.perf_counter() - t0
 
-    umap = UMAP(**UMAP_KWARGS)
+        svd = TruncatedSVD(n_components=SVD_N_COMPONENTS, random_state=seed)
 
-    x_train_2d, umap_fit_time, umap_fit_mem = timed_call(
-        umap.fit_transform,
-        x_svd_train,
-    )
-    x_test_2d, umap_test_time, umap_test_mem = timed_call(
-        umap.transform,
-        x_svd_test,
-    )
+        t0 = time.perf_counter()
+        x_svd_train = svd.fit_transform(leaf_train)
+        svd_fit_time = time.perf_counter() - t0
+
+        umap = UMAP(**UMAP_KWARGS)
+
+        t0 = time.perf_counter()
+        x_train_2d = umap.fit_transform(x_svd_train)
+        umap_fit_time = time.perf_counter() - t0
+
+        return (
+            svd,
+            umap,
+            x_train_2d,
+            forest_fit_time,
+            cache_time,
+            ref_time,
+            svd_fit_time,
+            umap_fit_time,
+        )
+
+    (
+        svd,
+        umap,
+        x_train_2d,
+        forest_fit_time,
+        cache_time,
+        ref_time,
+        svd_fit_time,
+        umap_fit_time,
+    ), train_total_time, train_total_peak = timed_call(train_pipeline)
+
+    def test_pipeline():
+        t0 = time.perf_counter()
+        leaf_test = fk.get_query_map(X_test)
+        query_time = time.perf_counter() - t0
+
+        t0 = time.perf_counter()
+        x_svd_test = svd.transform(leaf_test)
+        svd_test_time = time.perf_counter() - t0
+
+        t0 = time.perf_counter()
+        x_test_2d = umap.transform(x_svd_test)
+        umap_test_time = time.perf_counter() - t0
+
+        return x_test_2d, query_time, svd_test_time, umap_test_time
+
+    (
+        x_test_2d,
+        query_time,
+        svd_test_time,
+        umap_test_time,
+    ), test_total_time, test_total_peak = timed_call(test_pipeline)
 
     knn_acc, knn_k_values, knn_scores = knn_test_accuracy_multi(
         x_train_2d, x_test_2d, y_train, y_test
@@ -522,33 +591,18 @@ def run_leaf_svd_umap(
         x_test_2d,
     )
 
-    train_total_time = forest_fit_time + cache_time + ref_time + svd_fit_time + umap_fit_time
-    train_total_peak = forest_fit_mem + cache_mem + ref_mem + svd_fit_mem + umap_fit_mem
-    test_total_time = query_time + svd_test_time + umap_test_time
-    test_total_peak = query_mem + svd_test_mem + umap_test_mem
-
     return {
         "method_name": f"leaf_svd{SVD_N_COMPONENTS}_umap",
         "forest_fit_time_s": forest_fit_time,
-        "forest_fit_peak_mb": forest_fit_mem,
         "cache_build_time_s": cache_time,
-        "cache_build_peak_mb": cache_mem,
         "reference_map_time_s": ref_time,
-        "reference_map_peak_mb": ref_mem,
         "query_map_time_s": query_time,
-        "query_map_peak_mb": query_mem,
         "svd_fit_transform_time_s": svd_fit_time,
-        "svd_fit_transform_peak_mb": svd_fit_mem,
         "svd_transform_time_s": svd_test_time,
-        "svd_transform_peak_mb": svd_test_mem,
         "pca_fit_transform_time_s": np.nan,
-        "pca_fit_transform_peak_mb": np.nan,
         "pca_transform_time_s": np.nan,
-        "pca_transform_peak_mb": np.nan,
         "umap_fit_transform_time_s": umap_fit_time,
-        "umap_fit_transform_peak_mb": umap_fit_mem,
         "umap_transform_time_s": umap_test_time,
-        "umap_transform_peak_mb": umap_test_mem,
         "train_total_time_s": train_total_time,
         "train_total_peak_mb": train_total_peak,
         "test_total_time_s": test_total_time,
