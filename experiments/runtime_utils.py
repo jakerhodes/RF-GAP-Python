@@ -379,14 +379,6 @@ class MemoryMonitor:
     def peak_mb(self) -> float:
         return self.peak_rss / (1024 ** 2)
 
-    @property
-    def start_mb(self) -> float:
-        return self.start_rss / (1024 ** 2)
-
-    @property
-    def peak_delta_mb(self) -> float:
-        return (self.peak_rss - self.start_rss) / (1024 ** 2)
-
 
 def timed_call(fn, *args, poll_seconds: float = 0.01, **kwargs):
     t0 = time.perf_counter()

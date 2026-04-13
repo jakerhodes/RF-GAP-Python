@@ -23,7 +23,6 @@ from experiments.runtime_utils import (
     log_progress,
     resolve_dataset_paths_from_base_names,
     safe_timed_call,
-    timed_call,
 )
 
 
@@ -292,6 +291,58 @@ def instantiate_fk(
     )
 
 
+def run_fk_full_pipeline(
+    fk: ForestKernel,
+    X_sub,
+    y_sub,
+    X_test,
+    y_test,
+    kernel_method: str,
+):
+    t0 = time.perf_counter()
+    fk.fit_forest(X_sub, y_sub)
+    forest_fit_time = time.perf_counter() - t0
+
+    t0 = time.perf_counter()
+    y_pred_forest = fk.predict_forest(X_test)
+    forest_pred_time = time.perf_counter() - t0
+    forest_acc = accuracy_score(y_test, y_pred_forest)
+
+    t0 = time.perf_counter()
+    fk.build_kernel_cache(kernel_method=kernel_method)
+    cache_time = time.perf_counter() - t0
+
+    t0 = time.perf_counter()
+    fk.get_train_query_map()
+    q_time = time.perf_counter() - t0
+
+    if RUN_FULL_KERNEL:
+        t0 = time.perf_counter()
+        K_fk = fk.get_kernel()
+        k_time = time.perf_counter() - t0
+        k_percent_nnz = kernel_percent_nnz(K_fk)
+    else:
+        k_time = np.nan
+        k_percent_nnz = np.nan
+
+    t0 = time.perf_counter()
+    y_pred_kp = fk.kernel_predict(X_test)
+    kp_time = time.perf_counter() - t0
+    kp_acc = accuracy_score(y_test, y_pred_kp)
+
+    return {
+        "forest_fit_time_s": forest_fit_time,
+        "forest_test_predict_time_s": forest_pred_time,
+        "forest_test_acc": forest_acc,
+        "cache_build_time_s": cache_time,
+        "q_build_time_s": q_time,
+        "full_kernel_time_s": k_time,
+        "kernel_percent_nnz": k_percent_nnz,
+        "kernel_predict_time_s": kp_time,
+        "kernel_predict_test_acc": kp_acc,
+    }
+
+
 # ---------------------------------------------------------------------
 # Core runner
 # ---------------------------------------------------------------------
@@ -407,43 +458,36 @@ def run_one_ablation_mode(
                         model_kwargs=ablation_cfg,
                     )
 
-                    _, forest_fit_time, forest_fit_mem = timed_call(
-                        fk.fit_forest,
+                    pipeline_out, pipeline_time, pipeline_peak_mb, pipeline_status, pipeline_error = safe_timed_call(
+                        run_fk_full_pipeline,
+                        fk,
                         X_sub,
                         y_sub,
-                    )
-
-                    y_pred_forest, forest_pred_time, forest_pred_mem = timed_call(
-                        fk.predict_forest,
                         X_test,
-                    )
-                    forest_acc = accuracy_score(y_test, y_pred_forest)
-
-                    _, cache_time, cache_mem = timed_call(
-                        fk.build_kernel_cache,
-                        kernel_method=kernel_method,
+                        y_test,
+                        kernel_method,
                     )
 
-                    _, q_time, q_mem = timed_call(
-                        fk.get_train_query_map
-                    )
-
-                    if RUN_FULL_KERNEL:
-                        K_fk, k_time, k_mem, k_status, k_error = safe_timed_call(
-                            fk.get_kernel
-                        )
-                        k_percent_nnz = (
-                            kernel_percent_nnz(K_fk) if k_status == "ok" else np.nan
-                        )
+                    if pipeline_status == "ok":
+                        forest_fit_time = pipeline_out["forest_fit_time_s"]
+                        forest_pred_time = pipeline_out["forest_test_predict_time_s"]
+                        forest_acc = pipeline_out["forest_test_acc"]
+                        cache_time = pipeline_out["cache_build_time_s"]
+                        q_time = pipeline_out["q_build_time_s"]
+                        k_time = pipeline_out["full_kernel_time_s"]
+                        k_percent_nnz = pipeline_out["kernel_percent_nnz"]
+                        kp_time = pipeline_out["kernel_predict_time_s"]
+                        kp_acc = pipeline_out["kernel_predict_test_acc"]
                     else:
-                        k_time, k_mem, k_status, k_error = np.nan, np.nan, "skipped", ""
+                        forest_fit_time = np.nan
+                        forest_pred_time = np.nan
+                        forest_acc = np.nan
+                        cache_time = np.nan
+                        q_time = np.nan
+                        k_time = np.nan
                         k_percent_nnz = np.nan
-
-                    y_pred_kp, kp_time, kp_mem = timed_call(
-                        fk.kernel_predict,
-                        X_test,
-                    )
-                    kp_acc = accuracy_score(y_test, y_pred_kp)
+                        kp_time = np.nan
+                        kp_acc = np.nan
 
                     row = {
                         "run_id": RUN_ID,
@@ -469,22 +513,17 @@ def run_one_ablation_mode(
                         "n_train_subset": n_sub,
                         "n_test": len(y_test),
                         "forest_fit_time_s": forest_fit_time,
-                        "forest_fit_peak_mb": forest_fit_mem,
                         "forest_test_predict_time_s": forest_pred_time,
-                        "forest_test_predict_peak_mb": forest_pred_mem,
                         "forest_test_acc": forest_acc,
                         "cache_build_time_s": cache_time,
-                        "cache_build_peak_mb": cache_mem,
                         "q_build_time_s": q_time,
-                        "q_build_peak_mb": q_mem,
                         "full_kernel_time_s": k_time,
-                        "full_kernel_peak_mb": k_mem,
                         "kernel_percent_nnz": k_percent_nnz,
                         "kernel_predict_time_s": kp_time,
-                        "kernel_predict_peak_mb": kp_mem,
                         "kernel_predict_test_acc": kp_acc,
-                        "status": k_status,
-                        "error": k_error,
+                        "pipeline_peak_mb": pipeline_peak_mb,
+                        "status": pipeline_status,
+                        "error": pipeline_error,
                     }
                     append_and_flush(rows, row, paths["csv"], paths["parquet"])
 
@@ -492,12 +531,17 @@ def run_one_ablation_mode(
                         f"Done | dataset={dataset_name} | seed={seed} | "
                         f"train_size={train_size} | n_train={n_sub} | "
                         f"model_type={model_type} | kernel_method={kernel_method} | "
-                        f"ablation={ablation_name} | fit={forest_fit_time:.3f}s | "
-                        f"cache={cache_time:.3f}s | q={q_time:.3f}s | "
-                        f"kernel={k_time if not np.isnan(k_time) else 'nan'} | "
+                        f"ablation={ablation_name} | "
+                        f"fit={forest_fit_time if not np.isnan(forest_fit_time) else 'nan'}s | "
+                        f"cache={cache_time if not np.isnan(cache_time) else 'nan'}s | "
+                        f"q={q_time if not np.isnan(q_time) else 'nan'}s | "
+                        f"kernel={k_time if not np.isnan(k_time) else 'nan'}s | "
+                        f"kp={kp_time if not np.isnan(kp_time) else 'nan'}s | "
+                        f"peak_mb={pipeline_peak_mb if not np.isnan(pipeline_peak_mb) else 'nan'} | "
                         f"%nnz={k_percent_nnz if not np.isnan(k_percent_nnz) else 'nan'} | "
-                        f"forest_acc={forest_acc:.4f} | kp_acc={kp_acc:.4f} | "
-                        f"status={k_status}",
+                        f"forest_acc={forest_acc if not np.isnan(forest_acc) else 'nan'} | "
+                        f"kp_acc={kp_acc if not np.isnan(kp_acc) else 'nan'} | "
+                        f"status={pipeline_status}",
                         paths["log"],
                     )
 
