@@ -347,7 +347,7 @@ def kernel_percent_nnz(K) -> float:
 
 
 class MemoryMonitor:
-    def __init__(self, poll_seconds: float = 0.05):
+    def __init__(self, poll_seconds: float = 0.01):
         self.poll_seconds = poll_seconds
         self.process = psutil.Process(os.getpid())
         self.start_rss = None
@@ -376,19 +376,27 @@ class MemoryMonitor:
         self._thread.join(timeout=1.0)
 
     @property
+    def peak_mb(self) -> float:
+        return self.peak_rss / (1024 ** 2)
+
+    @property
+    def start_mb(self) -> float:
+        return self.start_rss / (1024 ** 2)
+
+    @property
     def peak_delta_mb(self) -> float:
         return (self.peak_rss - self.start_rss) / (1024 ** 2)
 
 
-def timed_call(fn, *args, poll_seconds: float = 0.05, **kwargs):
+def timed_call(fn, *args, poll_seconds: float = 0.01, **kwargs):
     t0 = time.perf_counter()
     with MemoryMonitor(poll_seconds=poll_seconds) as mm:
         out = fn(*args, **kwargs)
     dt = time.perf_counter() - t0
-    return out, dt, mm.peak_delta_mb
+    return out, dt, mm.peak_mb
 
 
-def safe_timed_call(fn, *args, poll_seconds: float = 0.05, **kwargs):
+def safe_timed_call(fn, *args, poll_seconds: float = 0.01, **kwargs):
     try:
         out, dt, mem = timed_call(fn, *args, poll_seconds=poll_seconds, **kwargs)
         return out, dt, mem, "ok", ""
