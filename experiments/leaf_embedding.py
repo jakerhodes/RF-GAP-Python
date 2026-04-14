@@ -6,6 +6,7 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
+from phate import PHATE
 from sklearn.decomposition import PCA
 from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import accuracy_score
@@ -33,8 +34,11 @@ from experiments.runtime_utils import (
 DATA_DIR = PROJECT_ROOT / "data"
 
 DATASET_NAMES = [
+    # "celegans",
+    # "pbmc",
     "sign_mnist",
-    "covertype",
+    # "fashion_mnist",
+    # "covertype",
 ]
 
 RESULTS_DIR = PROJECT_ROOT / "experiments" / "results"
@@ -55,13 +59,14 @@ SEEDS = [44, 578, 9, 912, 345]
 
 LABEL_COL_IDX = 0
 DROP_MISSING_Y = True
-VERBOSE_DATAPREP = True
+VERBOSE_DATAPREP = False
 
 # Image datasets: global normalize
 IMAGE_DATASETS = {
     "pathmnist_28",
     "sign_mnist",
     "tissuemnist_28",
+    "fashion_mnist",
 }
 DEFAULT_SCALE = "standardize"
 DEFAULT_GLOBAL_TRANSFORM = False
@@ -80,23 +85,49 @@ FOREST_KWARGS = {
     "n_jobs": -1,
 }
 
-# Embedding methods
-RUN_RAW_PCA = True
-RUN_LEAF_PCA = True
-RUN_RAW_PCA_UMAP = True
-RUN_LEAF_PCA_UMAP = True
+# ---------------------------------------------------------------------
+# Method selection
+# ---------------------------------------------------------------------
+AVAILABLE_METHODS = [
+    "raw_pca",
+    "leaf_pca",
+    "raw_pca_umap",
+    "leaf_pca_umap",
+    "raw_pca_phate",
+    "leaf_pca_phate",
+]
 
-PCA_UMAP_N_COMPONENTS = 50
+METHODS_TO_RUN = [
+    "raw_pca",
+    "leaf_pca",
+    "raw_pca_umap",
+    "leaf_pca_umap",
+    "raw_pca_phate",
+    "leaf_pca_phate",
+]
+
+
+# ---------------------------------------------------------------------
+# Embedding configs
+# ---------------------------------------------------------------------
+PCA_UMAP_N_COMPONENTS = 30
 UMAP_N_COMPONENTS = 2
 UMAP_KWARGS = {
     "n_components": UMAP_N_COMPONENTS,
     "random_state": None,
 }
 
-# Scaled k-NN neighborhoods as fractions of train size
+PCA_PHATE_N_COMPONENTS = 30
+PHATE_N_COMPONENTS = 2
+PHATE_KWARGS = {
+    "n_components": PHATE_N_COMPONENTS,
+    "random_state": None,
+}
+
 # Fixed k-NN neighborhoods
 KNN_K_VALUES = [5, 10, 20]
 LOGREG_MAX_ITER = 5000
+
 
 
 # ---------------------------------------------------------------------
@@ -111,6 +142,15 @@ def flush_results(rows: list[dict]) -> None:
 def append_and_flush(rows: list[dict], row: dict) -> None:
     rows.append(row)
     flush_results(rows)
+
+
+def validate_methods_to_run(methods_to_run: list[str]) -> None:
+    unknown = sorted(set(methods_to_run) - set(AVAILABLE_METHODS))
+    if unknown:
+        raise ValueError(
+            f"Unknown methods in METHODS_TO_RUN: {unknown}. "
+            f"Available methods are: {AVAILABLE_METHODS}"
+        )
 
 
 def instantiate_fk(seed: int) -> ForestKernel:
@@ -212,7 +252,7 @@ def knn_test_accuracy_multi(
         y_pred = clf.predict(x_test_2d)
         scores[k] = float(accuracy_score(y_test, y_pred))
 
-    avg_score = float(np.mean(list(scores.values())))
+    avg_score = float(np.mean(list(scores.values()))) if scores else np.nan
     return avg_score, k_values, scores
 
 
@@ -233,6 +273,54 @@ def logistic_test_accuracy(
     return float(accuracy_score(y_test, y_pred))
 
 
+def base_result_dict() -> dict:
+    return {
+        "forest_fit_time_s": np.nan,
+        "cache_build_time_s": np.nan,
+        "reference_map_time_s": np.nan,
+        "query_map_time_s": np.nan,
+        "pca_reducer_fit_transform_time_s": np.nan,
+        "pca_reducer_transform_time_s": np.nan,
+        "pca_fit_transform_time_s": np.nan,
+        "pca_transform_time_s": np.nan,
+        "umap_fit_transform_time_s": np.nan,
+        "umap_transform_time_s": np.nan,
+        "phate_fit_transform_time_s": np.nan,
+        "phate_transform_time_s": np.nan,
+        "train_total_time_s": np.nan,
+        "train_total_peak_mb": np.nan,
+        "test_total_time_s": np.nan,
+        "test_total_peak_mb": np.nan,
+        "knn_test_acc_avg": np.nan,
+        "knn_k_values": "",
+        "knn_test_acc_by_k": "{}",
+        "linear_test_acc": np.nan,
+        "train_embedding_file": "",
+        "test_embedding_file": "",
+        "status": "ok",
+        "error": "",
+    }
+
+
+def deduplicate_embedding_input(
+    X_emb: np.ndarray,
+    y,
+    y_raw,
+    row_ids,
+):
+    X_emb = np.ascontiguousarray(X_emb)
+    _, unique_idx = np.unique(X_emb, axis=0, return_index=True)
+    unique_idx = np.sort(unique_idx)
+
+    return (
+        X_emb[unique_idx],
+        np.asarray(y)[unique_idx],
+        np.asarray(y_raw)[unique_idx],
+        np.asarray(row_ids)[unique_idx],
+        unique_idx,
+    )
+
+
 # ---------------------------------------------------------------------
 # Per-method runners
 # ---------------------------------------------------------------------
@@ -250,11 +338,9 @@ def run_raw_pca(
 ) -> dict:
     def train_pipeline():
         pca = PCA(n_components=2, random_state=seed)
-
         t0 = time.perf_counter()
         x_train_2d = pca.fit_transform(X_train)
         pca_fit_time = time.perf_counter() - t0
-
         return pca, x_train_2d, pca_fit_time
 
     (pca, x_train_2d, pca_fit_time), train_total_time, train_total_peak = timed_call(train_pipeline)
@@ -267,39 +353,33 @@ def run_raw_pca(
 
     (x_test_2d, pca_test_time), test_total_time, test_total_peak = timed_call(test_pipeline)
 
-    knn_acc, knn_k_values, knn_scores = knn_test_accuracy_multi(
-        x_train_2d, x_test_2d, y_train, y_test
-    )
+    knn_acc, knn_k_values, knn_scores = knn_test_accuracy_multi(x_train_2d, x_test_2d, y_train, y_test)
     lin_acc = logistic_test_accuracy(x_train_2d, x_test_2d, y_train, y_test, seed)
 
-    save_embedding(out_dir / "raw_pca_train.csv", id_train_raw, y_train_raw, x_train_2d)
-    save_embedding(out_dir / "raw_pca_test.csv", id_test_raw, y_test_raw, x_test_2d)
+    train_file = out_dir / "raw_pca_train.csv"
+    test_file = out_dir / "raw_pca_test.csv"
+    save_embedding(train_file, id_train_raw, y_train_raw, x_train_2d)
+    save_embedding(test_file, id_test_raw, y_test_raw, x_test_2d)
 
-    return {
-        "method_name": "raw_pca",
-        "forest_fit_time_s": np.nan,
-        "cache_build_time_s": np.nan,
-        "reference_map_time_s": np.nan,
-        "query_map_time_s": np.nan,
-        "pca_reducer_fit_transform_time_s": np.nan,
-        "pca_reducer_transform_time_s": np.nan,
-        "pca_fit_transform_time_s": pca_fit_time,
-        "pca_transform_time_s": pca_test_time,
-        "umap_fit_transform_time_s": np.nan,
-        "umap_transform_time_s": np.nan,
-        "train_total_time_s": train_total_time,
-        "train_total_peak_mb": train_total_peak,
-        "test_total_time_s": test_total_time,
-        "test_total_peak_mb": test_total_peak,
-        "knn_test_acc_avg": knn_acc,
-        "knn_k_values": str(knn_k_values),
-        "knn_test_acc_by_k": str(knn_scores),
-        "linear_test_acc": lin_acc,
-        "train_embedding_file": str(out_dir / "raw_pca_train.csv"),
-        "test_embedding_file": str(out_dir / "raw_pca_test.csv"),
-        "status": "ok",
-        "error": "",
-    }
+    result = base_result_dict()
+    result.update(
+        {
+            "method_name": "raw_pca",
+            "pca_fit_transform_time_s": pca_fit_time,
+            "pca_transform_time_s": pca_test_time,
+            "train_total_time_s": train_total_time,
+            "train_total_peak_mb": train_total_peak,
+            "test_total_time_s": test_total_time,
+            "test_total_peak_mb": test_total_peak,
+            "knn_test_acc_avg": knn_acc,
+            "knn_k_values": str(knn_k_values),
+            "knn_test_acc_by_k": str(knn_scores),
+            "linear_test_acc": lin_acc,
+            "train_embedding_file": str(train_file),
+            "test_embedding_file": str(test_file),
+        }
+    )
+    return result
 
 
 def run_leaf_pca(
@@ -329,7 +409,6 @@ def run_leaf_pca(
         ref_time = time.perf_counter() - t0
 
         pca = PCA(n_components=2, random_state=seed)
-
         t0 = time.perf_counter()
         x_train_2d = pca.fit_transform(leaf_train)
         pca_fit_time = time.perf_counter() - t0
@@ -358,39 +437,37 @@ def run_leaf_pca(
 
     (x_test_2d, query_time, pca_test_time), test_total_time, test_total_peak = timed_call(test_pipeline)
 
-    knn_acc, knn_k_values, knn_scores = knn_test_accuracy_multi(
-        x_train_2d, x_test_2d, y_train, y_test
-    )
+    knn_acc, knn_k_values, knn_scores = knn_test_accuracy_multi(x_train_2d, x_test_2d, y_train, y_test)
     lin_acc = logistic_test_accuracy(x_train_2d, x_test_2d, y_train, y_test, seed)
 
-    save_embedding(out_dir / "leaf_pca_train.csv", id_train_raw, y_train_raw, x_train_2d)
-    save_embedding(out_dir / "leaf_pca_test.csv", id_test_raw, y_test_raw, x_test_2d)
+    train_file = out_dir / "leaf_pca_train.csv"
+    test_file = out_dir / "leaf_pca_test.csv"
+    save_embedding(train_file, id_train_raw, y_train_raw, x_train_2d)
+    save_embedding(test_file, id_test_raw, y_test_raw, x_test_2d)
 
-    return {
-        "method_name": "leaf_pca",
-        "forest_fit_time_s": forest_fit_time,
-        "cache_build_time_s": cache_time,
-        "reference_map_time_s": ref_time,
-        "query_map_time_s": query_time,
-        "pca_reducer_fit_transform_time_s": np.nan,
-        "pca_reducer_transform_time_s": np.nan,
-        "pca_fit_transform_time_s": pca_fit_time,
-        "pca_transform_time_s": pca_test_time,
-        "umap_fit_transform_time_s": np.nan,
-        "umap_transform_time_s": np.nan,
-        "train_total_time_s": train_total_time,
-        "train_total_peak_mb": train_total_peak,
-        "test_total_time_s": test_total_time,
-        "test_total_peak_mb": test_total_peak,
-        "knn_test_acc_avg": knn_acc,
-        "knn_k_values": str(knn_k_values),
-        "knn_test_acc_by_k": str(knn_scores),
-        "linear_test_acc": lin_acc,
-        "train_embedding_file": str(out_dir / "leaf_pca_train.csv"),
-        "test_embedding_file": str(out_dir / "leaf_pca_test.csv"),
-        "status": "ok",
-        "error": "",
-    }
+    result = base_result_dict()
+    result.update(
+        {
+            "method_name": "leaf_pca",
+            "forest_fit_time_s": forest_fit_time,
+            "cache_build_time_s": cache_time,
+            "reference_map_time_s": ref_time,
+            "query_map_time_s": query_time,
+            "pca_fit_transform_time_s": pca_fit_time,
+            "pca_transform_time_s": pca_test_time,
+            "train_total_time_s": train_total_time,
+            "train_total_peak_mb": train_total_peak,
+            "test_total_time_s": test_total_time,
+            "test_total_peak_mb": test_total_peak,
+            "knn_test_acc_avg": knn_acc,
+            "knn_k_values": str(knn_k_values),
+            "knn_test_acc_by_k": str(knn_scores),
+            "linear_test_acc": lin_acc,
+            "train_embedding_file": str(train_file),
+            "test_embedding_file": str(test_file),
+        }
+    )
+    return result
 
 
 def run_raw_pca_umap(
@@ -441,42 +518,35 @@ def run_raw_pca_umap(
 
     (x_test_2d, pca_reducer_test_time, umap_test_time), test_total_time, test_total_peak = timed_call(test_pipeline)
 
-    knn_acc, knn_k_values, knn_scores = knn_test_accuracy_multi(
-        x_train_2d, x_test_2d, y_train, y_test
-    )
+    knn_acc, knn_k_values, knn_scores = knn_test_accuracy_multi(x_train_2d, x_test_2d, y_train, y_test)
     lin_acc = logistic_test_accuracy(x_train_2d, x_test_2d, y_train, y_test, seed)
 
     train_file = out_dir / f"raw_pca{PCA_UMAP_N_COMPONENTS}_umap_train.csv"
     test_file = out_dir / f"raw_pca{PCA_UMAP_N_COMPONENTS}_umap_test.csv"
-
     save_embedding(train_file, id_train_raw, y_train_raw, x_train_2d)
     save_embedding(test_file, id_test_raw, y_test_raw, x_test_2d)
 
-    return {
-        "method_name": f"raw_pca{PCA_UMAP_N_COMPONENTS}_umap",
-        "forest_fit_time_s": np.nan,
-        "cache_build_time_s": np.nan,
-        "reference_map_time_s": np.nan,
-        "query_map_time_s": np.nan,
-        "pca_reducer_fit_transform_time_s": pca_reducer_fit_time,
-        "pca_reducer_transform_time_s": pca_reducer_test_time,
-        "pca_fit_transform_time_s": np.nan,
-        "pca_transform_time_s": np.nan,
-        "umap_fit_transform_time_s": umap_fit_time,
-        "umap_transform_time_s": umap_test_time,
-        "train_total_time_s": train_total_time,
-        "train_total_peak_mb": train_total_peak,
-        "test_total_time_s": test_total_time,
-        "test_total_peak_mb": test_total_peak,
-        "knn_test_acc_avg": knn_acc,
-        "knn_k_values": str(knn_k_values),
-        "knn_test_acc_by_k": str(knn_scores),
-        "linear_test_acc": lin_acc,
-        "train_embedding_file": str(train_file),
-        "test_embedding_file": str(test_file),
-        "status": "ok",
-        "error": "",
-    }
+    result = base_result_dict()
+    result.update(
+        {
+            "method_name": f"raw_pca{PCA_UMAP_N_COMPONENTS}_umap",
+            "pca_reducer_fit_transform_time_s": pca_reducer_fit_time,
+            "pca_reducer_transform_time_s": pca_reducer_test_time,
+            "umap_fit_transform_time_s": umap_fit_time,
+            "umap_transform_time_s": umap_test_time,
+            "train_total_time_s": train_total_time,
+            "train_total_peak_mb": train_total_peak,
+            "test_total_time_s": test_total_time,
+            "test_total_peak_mb": test_total_peak,
+            "knn_test_acc_avg": knn_acc,
+            "knn_k_values": str(knn_k_values),
+            "knn_test_acc_by_k": str(knn_scores),
+            "linear_test_acc": lin_acc,
+            "train_embedding_file": str(train_file),
+            "test_embedding_file": str(test_file),
+        }
+    )
+    return result
 
 
 def run_leaf_pca_umap(
@@ -561,48 +631,283 @@ def run_leaf_pca_umap(
         umap_test_time,
     ), test_total_time, test_total_peak = timed_call(test_pipeline)
 
-    knn_acc, knn_k_values, knn_scores = knn_test_accuracy_multi(
-        x_train_2d, x_test_2d, y_train, y_test
-    )
+    knn_acc, knn_k_values, knn_scores = knn_test_accuracy_multi(x_train_2d, x_test_2d, y_train, y_test)
     lin_acc = logistic_test_accuracy(x_train_2d, x_test_2d, y_train, y_test, seed)
 
     train_file = out_dir / f"leaf_pca{PCA_UMAP_N_COMPONENTS}_umap_train.csv"
     test_file = out_dir / f"leaf_pca{PCA_UMAP_N_COMPONENTS}_umap_test.csv"
-
     save_embedding(train_file, id_train_raw, y_train_raw, x_train_2d)
     save_embedding(test_file, id_test_raw, y_test_raw, x_test_2d)
 
-    return {
-        "method_name": f"leaf_pca{PCA_UMAP_N_COMPONENTS}_umap",
-        "forest_fit_time_s": forest_fit_time,
-        "cache_build_time_s": cache_time,
-        "reference_map_time_s": ref_time,
-        "query_map_time_s": query_time,
-        "pca_reducer_fit_transform_time_s": pca_reducer_fit_time,
-        "pca_reducer_transform_time_s": pca_reducer_test_time,
-        "pca_fit_transform_time_s": np.nan,
-        "pca_transform_time_s": np.nan,
-        "umap_fit_transform_time_s": umap_fit_time,
-        "umap_transform_time_s": umap_test_time,
-        "train_total_time_s": train_total_time,
-        "train_total_peak_mb": train_total_peak,
-        "test_total_time_s": test_total_time,
-        "test_total_peak_mb": test_total_peak,
-        "knn_test_acc_avg": knn_acc,
-        "knn_k_values": str(knn_k_values),
-        "knn_test_acc_by_k": str(knn_scores),
-        "linear_test_acc": lin_acc,
-        "train_embedding_file": str(train_file),
-        "test_embedding_file": str(test_file),
-        "status": "ok",
-        "error": "",
-    }
+    result = base_result_dict()
+    result.update(
+        {
+            "method_name": f"leaf_pca{PCA_UMAP_N_COMPONENTS}_umap",
+            "forest_fit_time_s": forest_fit_time,
+            "cache_build_time_s": cache_time,
+            "reference_map_time_s": ref_time,
+            "query_map_time_s": query_time,
+            "pca_reducer_fit_transform_time_s": pca_reducer_fit_time,
+            "pca_reducer_transform_time_s": pca_reducer_test_time,
+            "umap_fit_transform_time_s": umap_fit_time,
+            "umap_transform_time_s": umap_test_time,
+            "train_total_time_s": train_total_time,
+            "train_total_peak_mb": train_total_peak,
+            "test_total_time_s": test_total_time,
+            "test_total_peak_mb": test_total_peak,
+            "knn_test_acc_avg": knn_acc,
+            "knn_k_values": str(knn_k_values),
+            "knn_test_acc_by_k": str(knn_scores),
+            "linear_test_acc": lin_acc,
+            "train_embedding_file": str(train_file),
+            "test_embedding_file": str(test_file),
+        }
+    )
+    return result
+
+
+def run_raw_pca_phate(
+    X_train,
+    X_test,
+    y_train,
+    y_test,
+    y_train_raw,
+    y_test_raw,
+    id_train_raw,
+    id_test_raw,
+    seed: int,
+    out_dir: Path,
+) -> dict:
+    def train_pipeline():
+        pca_reducer = PCA(n_components=PCA_PHATE_N_COMPONENTS, random_state=seed)
+
+        t0 = time.perf_counter()
+        x_pca_train = pca_reducer.fit_transform(X_train)
+        pca_reducer_fit_time = time.perf_counter() - t0
+
+        x_pca_train_unique, y_train_unique, y_train_raw_unique, id_train_raw_unique, _ = (
+            deduplicate_embedding_input(
+                x_pca_train,
+                y_train,
+                y_train_raw,
+                id_train_raw,
+            )
+        )
+
+        phate_op = PHATE(**PHATE_KWARGS)
+
+        t0 = time.perf_counter()
+        x_train_2d = phate_op.fit_transform(x_pca_train_unique)
+        phate_fit_time = time.perf_counter() - t0
+
+        return (
+            pca_reducer,
+            phate_op,
+            x_train_2d,
+            pca_reducer_fit_time,
+            phate_fit_time,
+            y_train_unique,
+            y_train_raw_unique,
+            id_train_raw_unique,
+        )
+
+    (
+        pca_reducer,
+        phate_op,
+        x_train_2d,
+        pca_reducer_fit_time,
+        phate_fit_time,
+        y_train_unique,
+        y_train_raw_unique,
+        id_train_raw_unique,
+    ), train_total_time, train_total_peak = timed_call(train_pipeline)
+
+    def test_pipeline():
+        t0 = time.perf_counter()
+        x_pca_test = pca_reducer.transform(X_test)
+        pca_reducer_test_time = time.perf_counter() - t0
+
+        t0 = time.perf_counter()
+        x_test_2d = phate_op.transform(x_pca_test)
+        phate_test_time = time.perf_counter() - t0
+
+        return x_test_2d, pca_reducer_test_time, phate_test_time
+
+    (x_test_2d, pca_reducer_test_time, phate_test_time), test_total_time, test_total_peak = timed_call(test_pipeline)
+
+    knn_acc, knn_k_values, knn_scores = knn_test_accuracy_multi(
+        x_train_2d, x_test_2d, y_train_unique, y_test
+    )
+    lin_acc = logistic_test_accuracy(x_train_2d, x_test_2d, y_train_unique, y_test, seed)
+
+    train_file = out_dir / f"raw_pca{PCA_PHATE_N_COMPONENTS}_phate_train.csv"
+    test_file = out_dir / f"raw_pca{PCA_PHATE_N_COMPONENTS}_phate_test.csv"
+    save_embedding(train_file, id_train_raw_unique, y_train_raw_unique, x_train_2d)
+    save_embedding(test_file, id_test_raw, y_test_raw, x_test_2d)
+
+    result = base_result_dict()
+    result.update(
+        {
+            "method_name": f"raw_pca{PCA_PHATE_N_COMPONENTS}_phate",
+            "pca_reducer_fit_transform_time_s": pca_reducer_fit_time,
+            "pca_reducer_transform_time_s": pca_reducer_test_time,
+            "phate_fit_transform_time_s": phate_fit_time,
+            "phate_transform_time_s": phate_test_time,
+            "train_total_time_s": train_total_time,
+            "train_total_peak_mb": train_total_peak,
+            "test_total_time_s": test_total_time,
+            "test_total_peak_mb": test_total_peak,
+            "knn_test_acc_avg": knn_acc,
+            "knn_k_values": str(knn_k_values),
+            "knn_test_acc_by_k": str(knn_scores),
+            "linear_test_acc": lin_acc,
+            "train_embedding_file": str(train_file),
+            "test_embedding_file": str(test_file),
+        }
+    )
+    return result
+
+
+def run_leaf_pca_phate(
+    fk: ForestKernel,
+    X_train,
+    X_test,
+    y_train,
+    y_test,
+    y_train_raw,
+    y_test_raw,
+    id_train_raw,
+    id_test_raw,
+    seed: int,
+    out_dir: Path,
+) -> dict:
+    def train_pipeline():
+        t0 = time.perf_counter()
+        fk.fit_forest(X_train, y_train)
+        forest_fit_time = time.perf_counter() - t0
+
+        t0 = time.perf_counter()
+        fk.build_kernel_cache(kernel_method=KERNEL_METHOD)
+        cache_time = time.perf_counter() - t0
+
+        t0 = time.perf_counter()
+        leaf_train = fk.get_reference_map()
+        ref_time = time.perf_counter() - t0
+
+        pca_reducer = PCA(n_components=PCA_PHATE_N_COMPONENTS, random_state=seed)
+
+        t0 = time.perf_counter()
+        x_pca_train = pca_reducer.fit_transform(leaf_train)
+        pca_reducer_fit_time = time.perf_counter() - t0
+
+        x_pca_train_unique, y_train_unique, y_train_raw_unique, id_train_raw_unique, _ = (
+            deduplicate_embedding_input(
+                x_pca_train,
+                y_train,
+                y_train_raw,
+                id_train_raw,
+            )
+        )
+
+        phate_op = PHATE(**PHATE_KWARGS)
+
+        t0 = time.perf_counter()
+        x_train_2d = phate_op.fit_transform(x_pca_train_unique)
+        phate_fit_time = time.perf_counter() - t0
+
+        return (
+            pca_reducer,
+            phate_op,
+            x_train_2d,
+            forest_fit_time,
+            cache_time,
+            ref_time,
+            pca_reducer_fit_time,
+            phate_fit_time,
+            y_train_unique,
+            y_train_raw_unique,
+            id_train_raw_unique,
+        )
+
+    (
+        pca_reducer,
+        phate_op,
+        x_train_2d,
+        forest_fit_time,
+        cache_time,
+        ref_time,
+        pca_reducer_fit_time,
+        phate_fit_time,
+        y_train_unique,
+        y_train_raw_unique,
+        id_train_raw_unique,
+    ), train_total_time, train_total_peak = timed_call(train_pipeline)
+
+    def test_pipeline():
+        t0 = time.perf_counter()
+        leaf_test = fk.get_query_map(X_test)
+        query_time = time.perf_counter() - t0
+
+        t0 = time.perf_counter()
+        x_pca_test = pca_reducer.transform(leaf_test)
+        pca_reducer_test_time = time.perf_counter() - t0
+
+        t0 = time.perf_counter()
+        x_test_2d = phate_op.transform(x_pca_test)
+        phate_test_time = time.perf_counter() - t0
+
+        return x_test_2d, query_time, pca_reducer_test_time, phate_test_time
+
+    (
+        x_test_2d,
+        query_time,
+        pca_reducer_test_time,
+        phate_test_time,
+    ), test_total_time, test_total_peak = timed_call(test_pipeline)
+
+    knn_acc, knn_k_values, knn_scores = knn_test_accuracy_multi(
+        x_train_2d, x_test_2d, y_train_unique, y_test
+    )
+    lin_acc = logistic_test_accuracy(x_train_2d, x_test_2d, y_train_unique, y_test, seed)
+
+    train_file = out_dir / f"leaf_pca{PCA_PHATE_N_COMPONENTS}_phate_train.csv"
+    test_file = out_dir / f"leaf_pca{PCA_PHATE_N_COMPONENTS}_phate_test.csv"
+    save_embedding(train_file, id_train_raw_unique, y_train_raw_unique, x_train_2d)
+    save_embedding(test_file, id_test_raw, y_test_raw, x_test_2d)
+
+    result = base_result_dict()
+    result.update(
+        {
+            "method_name": f"leaf_pca{PCA_PHATE_N_COMPONENTS}_phate",
+            "forest_fit_time_s": forest_fit_time,
+            "cache_build_time_s": cache_time,
+            "reference_map_time_s": ref_time,
+            "query_map_time_s": query_time,
+            "pca_reducer_fit_transform_time_s": pca_reducer_fit_time,
+            "pca_reducer_transform_time_s": pca_reducer_test_time,
+            "phate_fit_transform_time_s": phate_fit_time,
+            "phate_transform_time_s": phate_test_time,
+            "train_total_time_s": train_total_time,
+            "train_total_peak_mb": train_total_peak,
+            "test_total_time_s": test_total_time,
+            "test_total_peak_mb": test_total_peak,
+            "knn_test_acc_avg": knn_acc,
+            "knn_k_values": str(knn_k_values),
+            "knn_test_acc_by_k": str(knn_scores),
+            "linear_test_acc": lin_acc,
+            "train_embedding_file": str(train_file),
+            "test_embedding_file": str(test_file),
+        }
+    )
+    return result
 
 
 # ---------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------
 def main() -> None:
+    validate_methods_to_run(METHODS_TO_RUN)
+
     dataset_groups = resolve_dataset_paths_from_base_names(DATA_DIR, DATASET_NAMES)
     rows: list[dict] = []
 
@@ -611,14 +916,42 @@ def main() -> None:
     log_progress(f"Embedding directory: {EMB_DIR}", PROGRESS_LOG)
     log_progress(f"Datasets: {sorted(dataset_groups.keys())}", PROGRESS_LOG)
     log_progress(f"Seeds: {SEEDS}", PROGRESS_LOG)
+    log_progress(f"Methods to run: {METHODS_TO_RUN}", PROGRESS_LOG)
     log_progress(f"Kernel method: {KERNEL_METHOD}", PROGRESS_LOG)
     log_progress(f"Model type: {MODEL_TYPE}", PROGRESS_LOG)
     log_progress(f"Forest kwargs: {FOREST_KWARGS}", PROGRESS_LOG)
     log_progress(f"PCA->UMAP components: {PCA_UMAP_N_COMPONENTS}", PROGRESS_LOG)
     log_progress(f"UMAP kwargs: {UMAP_KWARGS}", PROGRESS_LOG)
+    log_progress(f"PCA->PHATE components: {PCA_PHATE_N_COMPONENTS}", PROGRESS_LOG)
+    log_progress(f"PHATE kwargs: {PHATE_KWARGS}", PROGRESS_LOG)
     log_progress(f"kNN k-values: {KNN_K_VALUES}", PROGRESS_LOG)
     log_progress(f"Image datasets: {sorted(IMAGE_DATASETS)}", PROGRESS_LOG)
     log_progress(f"SignMNIST kept letters: {SIGN_MNIST_ALLOWED_LETTERS}", PROGRESS_LOG)
+
+    def save_result_row(
+        result: dict,
+        dataset_name: str,
+        seed: int,
+        meta: dict,
+        scale,
+        global_transform,
+        n_train: int,
+        n_test: int,
+    ) -> None:
+        row = {
+            "run_id": RUN_ID,
+            "dataset": dataset_name,
+            "seed": seed,
+            "predefined_split": meta["predefined_split"],
+            "scale": scale,
+            "global_transform": global_transform,
+            "n_train": n_train,
+            "n_test": n_test,
+            "kernel_method": KERNEL_METHOD,
+            "model_type": MODEL_TYPE,
+            **result,
+        }
+        append_and_flush(rows, row)
 
     for dataset_name, dataset_paths in dataset_groups.items():
         log_progress(f"=== DATASET: {dataset_name} ===", PROGRESS_LOG)
@@ -680,13 +1013,14 @@ def main() -> None:
 
             log_progress(
                 f"Loaded {dataset_name}: "
-                f"train={X_train.shape}, test={X_test.shape}, predefined_split={meta['predefined_split']}",
+                f"train={X_train.shape}, test={X_test.shape}, "
+                f"predefined_split={meta['predefined_split']}",
                 PROGRESS_LOG,
             )
 
             out_dir = make_dataset_seed_dir(dataset_name, seed)
 
-            if RUN_RAW_PCA:
+            if "raw_pca" in METHODS_TO_RUN:
                 log_progress("Method: raw_pca", PROGRESS_LOG)
                 result = run_raw_pca(
                     X_train=X_train,
@@ -700,20 +1034,7 @@ def main() -> None:
                     seed=seed,
                     out_dir=out_dir,
                 )
-                row = {
-                    "run_id": RUN_ID,
-                    "dataset": dataset_name,
-                    "seed": seed,
-                    "predefined_split": meta["predefined_split"],
-                    "scale": scale,
-                    "global_transform": global_transform,
-                    "n_train": len(y_train),
-                    "n_test": len(y_test),
-                    "kernel_method": KERNEL_METHOD,
-                    "model_type": MODEL_TYPE,
-                    **result,
-                }
-                append_and_flush(rows, row)
+                save_result_row(result, dataset_name, seed, meta, scale, global_transform, len(y_train), len(y_test))
                 log_progress(
                     f"Done raw_pca | dataset={dataset_name} | seed={seed} | "
                     f"knn_acc={result['knn_test_acc_avg']:.4f} | "
@@ -722,7 +1043,7 @@ def main() -> None:
                     PROGRESS_LOG,
                 )
 
-            if RUN_LEAF_PCA:
+            if "leaf_pca" in METHODS_TO_RUN:
                 log_progress("Method: leaf_pca", PROGRESS_LOG)
                 fk = instantiate_fk(seed)
                 result = run_leaf_pca(
@@ -738,20 +1059,7 @@ def main() -> None:
                     seed=seed,
                     out_dir=out_dir,
                 )
-                row = {
-                    "run_id": RUN_ID,
-                    "dataset": dataset_name,
-                    "seed": seed,
-                    "predefined_split": meta["predefined_split"],
-                    "scale": scale,
-                    "global_transform": global_transform,
-                    "n_train": len(y_train),
-                    "n_test": len(y_test),
-                    "kernel_method": KERNEL_METHOD,
-                    "model_type": MODEL_TYPE,
-                    **result,
-                }
-                append_and_flush(rows, row)
+                save_result_row(result, dataset_name, seed, meta, scale, global_transform, len(y_train), len(y_test))
                 log_progress(
                     f"Done leaf_pca | dataset={dataset_name} | seed={seed} | "
                     f"knn_acc={result['knn_test_acc_avg']:.4f} | "
@@ -760,8 +1068,9 @@ def main() -> None:
                     PROGRESS_LOG,
                 )
 
-            if RUN_RAW_PCA_UMAP:
-                log_progress(f"Method: raw_pca{PCA_UMAP_N_COMPONENTS}_umap", PROGRESS_LOG)
+            if "raw_pca_umap" in METHODS_TO_RUN:
+                method_name = f"raw_pca{PCA_UMAP_N_COMPONENTS}_umap"
+                log_progress(f"Method: {method_name}", PROGRESS_LOG)
                 result = run_raw_pca_umap(
                     X_train=X_train,
                     X_test=X_test,
@@ -774,30 +1083,18 @@ def main() -> None:
                     seed=seed,
                     out_dir=out_dir,
                 )
-                row = {
-                    "run_id": RUN_ID,
-                    "dataset": dataset_name,
-                    "seed": seed,
-                    "predefined_split": meta["predefined_split"],
-                    "scale": scale,
-                    "global_transform": global_transform,
-                    "n_train": len(y_train),
-                    "n_test": len(y_test),
-                    "kernel_method": KERNEL_METHOD,
-                    "model_type": MODEL_TYPE,
-                    **result,
-                }
-                append_and_flush(rows, row)
+                save_result_row(result, dataset_name, seed, meta, scale, global_transform, len(y_train), len(y_test))
                 log_progress(
-                    f"Done raw_pca{PCA_UMAP_N_COMPONENTS}_umap | dataset={dataset_name} | seed={seed} | "
+                    f"Done {method_name} | dataset={dataset_name} | seed={seed} | "
                     f"knn_acc={result['knn_test_acc_avg']:.4f} | "
                     f"lin_acc={result['linear_test_acc']:.4f} | "
                     f"k={result['knn_k_values']}",
                     PROGRESS_LOG,
                 )
 
-            if RUN_LEAF_PCA_UMAP:
-                log_progress(f"Method: leaf_pca{PCA_UMAP_N_COMPONENTS}_umap", PROGRESS_LOG)
+            if "leaf_pca_umap" in METHODS_TO_RUN:
+                method_name = f"leaf_pca{PCA_UMAP_N_COMPONENTS}_umap"
+                log_progress(f"Method: {method_name}", PROGRESS_LOG)
                 fk = instantiate_fk(seed)
                 result = run_leaf_pca_umap(
                     fk=fk,
@@ -812,22 +1109,59 @@ def main() -> None:
                     seed=seed,
                     out_dir=out_dir,
                 )
-                row = {
-                    "run_id": RUN_ID,
-                    "dataset": dataset_name,
-                    "seed": seed,
-                    "predefined_split": meta["predefined_split"],
-                    "scale": scale,
-                    "global_transform": global_transform,
-                    "n_train": len(y_train),
-                    "n_test": len(y_test),
-                    "kernel_method": KERNEL_METHOD,
-                    "model_type": MODEL_TYPE,
-                    **result,
-                }
-                append_and_flush(rows, row)
+                save_result_row(result, dataset_name, seed, meta, scale, global_transform, len(y_train), len(y_test))
                 log_progress(
-                    f"Done leaf_pca{PCA_UMAP_N_COMPONENTS}_umap | dataset={dataset_name} | seed={seed} | "
+                    f"Done {method_name} | dataset={dataset_name} | seed={seed} | "
+                    f"knn_acc={result['knn_test_acc_avg']:.4f} | "
+                    f"lin_acc={result['linear_test_acc']:.4f} | "
+                    f"k={result['knn_k_values']}",
+                    PROGRESS_LOG,
+                )
+
+            if "raw_pca_phate" in METHODS_TO_RUN:
+                method_name = f"raw_pca{PCA_PHATE_N_COMPONENTS}_phate"
+                log_progress(f"Method: {method_name}", PROGRESS_LOG)
+                result = run_raw_pca_phate(
+                    X_train=X_train,
+                    X_test=X_test,
+                    y_train=y_train,
+                    y_test=y_test,
+                    y_train_raw=y_train_raw,
+                    y_test_raw=y_test_raw,
+                    id_train_raw=id_train_raw,
+                    id_test_raw=id_test_raw,
+                    seed=seed,
+                    out_dir=out_dir,
+                )
+                save_result_row(result, dataset_name, seed, meta, scale, global_transform, len(y_train), len(y_test))
+                log_progress(
+                    f"Done {method_name} | dataset={dataset_name} | seed={seed} | "
+                    f"knn_acc={result['knn_test_acc_avg']:.4f} | "
+                    f"lin_acc={result['linear_test_acc']:.4f} | "
+                    f"k={result['knn_k_values']}",
+                    PROGRESS_LOG,
+                )
+
+            if "leaf_pca_phate" in METHODS_TO_RUN:
+                method_name = f"leaf_pca{PCA_PHATE_N_COMPONENTS}_phate"
+                log_progress(f"Method: {method_name}", PROGRESS_LOG)
+                fk = instantiate_fk(seed)
+                result = run_leaf_pca_phate(
+                    fk=fk,
+                    X_train=X_train,
+                    X_test=X_test,
+                    y_train=y_train,
+                    y_test=y_test,
+                    y_train_raw=y_train_raw,
+                    y_test_raw=y_test_raw,
+                    id_train_raw=id_train_raw,
+                    id_test_raw=id_test_raw,
+                    seed=seed,
+                    out_dir=out_dir,
+                )
+                save_result_row(result, dataset_name, seed, meta, scale, global_transform, len(y_train), len(y_test))
+                log_progress(
+                    f"Done {method_name} | dataset={dataset_name} | seed={seed} | "
                     f"knn_acc={result['knn_test_acc_avg']:.4f} | "
                     f"lin_acc={result['linear_test_acc']:.4f} | "
                     f"k={result['knn_k_values']}",
