@@ -15,7 +15,9 @@ __pycache__/
 # Data and results
 experiments/results/
 datasets/
-experiments/notebooks/compiled_dataset_ablation_figures/
+experiments/notebooks/compiled_embedding_figure/
+experiments/notebooks/compiled_ablation_figures/
+
 
 nohup.out
 
