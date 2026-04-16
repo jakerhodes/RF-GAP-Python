@@ -6,11 +6,14 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
-from phate import PHATE
+import scipy.sparse as sp
+from baselines import PageRankPHATE
 from sklearn.decomposition import PCA
 from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import accuracy_score
 from sklearn.neighbors import KNeighborsClassifier
+from sklearn.neighbors import KDTree
+
 from umap import UMAP
 
 # ---------------------------------------------------------------------
@@ -28,6 +31,7 @@ from experiments.runtime_utils import (
     timed_call,
 )
 
+
 # ---------------------------------------------------------------------
 # CONFIG
 # ---------------------------------------------------------------------
@@ -36,9 +40,9 @@ DATA_DIR = PROJECT_ROOT / "data"
 DATASET_NAMES = [
     # "celegans",
     # "pbmc",
-    "sign_mnist",
+    # "sign_mnist",
     # "fashion_mnist",
-    # "covertype",
+    "covertype",
 ]
 
 RESULTS_DIR = PROJECT_ROOT / "experiments" / "results"
@@ -106,28 +110,35 @@ METHODS_TO_RUN = [
     "leaf_pca_phate",
 ]
 
-
 # ---------------------------------------------------------------------
 # Embedding configs
 # ---------------------------------------------------------------------
-PCA_UMAP_N_COMPONENTS = 30
+PCA_UMAP_N_COMPONENTS = 50
 UMAP_N_COMPONENTS = 2
 UMAP_KWARGS = {
     "n_components": UMAP_N_COMPONENTS,
     "random_state": None,
+    "n_neighbors": 50,
 }
 
-PCA_PHATE_N_COMPONENTS = 30
+
+PCA_PHATE_N_COMPONENTS = 50
 PHATE_N_COMPONENTS = 2
-PHATE_KWARGS = {
+RAW_PHATE_KWARGS = {
     "n_components": PHATE_N_COMPONENTS,
     "random_state": None,
+    "knn": 50,
+}
+
+LEAF_PHATE_KWARGS_RAW = {
+    "n_components": PHATE_N_COMPONENTS,
+    "random_state": None,
+    "knn": 50,
 }
 
 # Fixed k-NN neighborhoods
 KNN_K_VALUES = [5, 10, 20]
 LOGREG_MAX_ITER = 5000
-
 
 
 # ---------------------------------------------------------------------
@@ -237,6 +248,25 @@ def get_knn_neighborhoods(n_train: int) -> list[int]:
     return [k for k in KNN_K_VALUES if k < n_train]
 
 
+# def knn_test_accuracy_multi(
+#     x_train_2d: np.ndarray,
+#     x_test_2d: np.ndarray,
+#     y_train: np.ndarray,
+#     y_test: np.ndarray,
+# ) -> tuple[float, list[int], dict[int, float]]:
+#     k_values = get_knn_neighborhoods(len(y_train))
+#     scores: dict[int, float] = {}
+
+#     for k in k_values:
+#         clf = KNeighborsClassifier(n_neighbors=k)
+#         clf.fit(x_train_2d, y_train)
+#         y_pred = clf.predict(x_test_2d)
+#         scores[k] = float(accuracy_score(y_test, y_pred))
+
+#     avg_score = float(np.mean(list(scores.values()))) if scores else np.nan
+#     return avg_score, k_values, scores
+
+
 def knn_test_accuracy_multi(
     x_train_2d: np.ndarray,
     x_test_2d: np.ndarray,
@@ -244,12 +274,33 @@ def knn_test_accuracy_multi(
     y_test: np.ndarray,
 ) -> tuple[float, list[int], dict[int, float]]:
     k_values = get_knn_neighborhoods(len(y_train))
-    scores: dict[int, float] = {}
+    if not k_values:
+        return np.nan, [], {}
 
+    x_train_2d = np.asarray(x_train_2d, dtype=np.float32, order="C")
+    x_test_2d = np.asarray(x_test_2d, dtype=np.float32, order="C")
+    y_train = np.asarray(y_train)
+
+    k_max = max(k_values)
+
+    # Build tree once
+    tree = KDTree(x_train_2d, leaf_size=64, metric="euclidean")
+
+    # Query once for max K
+    nn_idx = tree.query(x_test_2d, k=k_max, return_distance=False)  # (n_test, k_max)
+
+    scores: dict[int, float] = {}
     for k in k_values:
-        clf = KNeighborsClassifier(n_neighbors=k)
-        clf.fit(x_train_2d, y_train)
-        y_pred = clf.predict(x_test_2d)
+        idx_k = nn_idx[:, :k]                  # (n_test, k)
+        neigh_labels = y_train[idx_k]          # (n_test, k)
+
+        # fast majority vote (works for integer labels)
+        # If your y_train are not int-coded, convert once outside this function.
+        y_pred = np.empty(len(y_test), dtype=y_train.dtype)
+        for i in range(len(y_test)):
+            vals, counts = np.unique(neigh_labels[i], return_counts=True)
+            y_pred[i] = vals[np.argmax(counts)]
+
         scores[k] = float(accuracy_score(y_test, y_pred))
 
     avg_score = float(np.mean(list(scores.values()))) if scores else np.nan
@@ -694,7 +745,7 @@ def run_raw_pca_phate(
             )
         )
 
-        phate_op = PHATE(**PHATE_KWARGS)
+        phate_op = PageRankPHATE(**RAW_PHATE_KWARGS)
 
         t0 = time.perf_counter()
         x_train_2d = phate_op.fit_transform(x_pca_train_unique)
@@ -809,7 +860,7 @@ def run_leaf_pca_phate(
             )
         )
 
-        phate_op = PHATE(**PHATE_KWARGS)
+        phate_op = PageRankPHATE(**LEAF_PHATE_KWARGS_RAW)
 
         t0 = time.perf_counter()
         x_train_2d = phate_op.fit_transform(x_pca_train_unique)
@@ -923,7 +974,8 @@ def main() -> None:
     log_progress(f"PCA->UMAP components: {PCA_UMAP_N_COMPONENTS}", PROGRESS_LOG)
     log_progress(f"UMAP kwargs: {UMAP_KWARGS}", PROGRESS_LOG)
     log_progress(f"PCA->PHATE components: {PCA_PHATE_N_COMPONENTS}", PROGRESS_LOG)
-    log_progress(f"PHATE kwargs: {PHATE_KWARGS}", PROGRESS_LOG)
+    log_progress(f"RAW PHATE kwargs: {RAW_PHATE_KWARGS}", PROGRESS_LOG)
+    log_progress(f"LEAF PHATE kwargs: {LEAF_PHATE_KWARGS_RAW}", PROGRESS_LOG)
     log_progress(f"kNN k-values: {KNN_K_VALUES}", PROGRESS_LOG)
     log_progress(f"Image datasets: {sorted(IMAGE_DATASETS)}", PROGRESS_LOG)
     log_progress(f"SignMNIST kept letters: {SIGN_MNIST_ALLOWED_LETTERS}", PROGRESS_LOG)
