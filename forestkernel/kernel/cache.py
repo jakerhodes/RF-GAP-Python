@@ -37,24 +37,10 @@ class KernelCache:
     flat_tree_ids: Optional[np.ndarray] = None
 
     # ------------------------------------------------------------------
-    # Optional labeled / unlabeled bookkeeping masks
-    # ------------------------------------------------------------------
-    row_is_labeled: Optional[np.ndarray] = None
-    row_is_unlabeled: Optional[np.ndarray] = None
-    flat_is_labeled: Optional[np.ndarray] = None
-    flat_is_unlabeled: Optional[np.ndarray] = None
-
-    # ------------------------------------------------------------------
     # Leaf masses
     # ------------------------------------------------------------------
     inv_sqrt_leaf_mass: Optional[np.ndarray] = None
     inv_inbag_leaf_mass: Optional[np.ndarray] = None
-
-    # ------------------------------------------------------------------
-    # GAP-specific unlabeled target surrogates
-    # ------------------------------------------------------------------
-    empirical_mult_all_by_tree: Optional[np.ndarray] = None
-    empirical_mult_inbag_by_tree: Optional[np.ndarray] = None
 
     # ------------------------------------------------------------------
     # GBT-specific
@@ -71,11 +57,3 @@ class KernelCache:
     # ------------------------------------------------------------------
     n_samples: Optional[int] = None
     n_trees: Optional[int] = None
-    n_train_samples: Optional[int] = None
-
-    # ------------------------------------------------------------------
-    # Optional labeled / unlabeled indices on the reference set
-    # ------------------------------------------------------------------
-    idx_labeled: Optional[np.ndarray] = None
-    idx_unlabeled: Optional[np.ndarray] = None
-    is_transductive: bool = False

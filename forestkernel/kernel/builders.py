@@ -27,34 +27,20 @@ def initialize_cache(
     leaf_matrix,
     n_nodes_per_tree,
     n_samples,
-    idx_labeled=None,
-    idx_unlabeled=None,
-    n_train_samples=None,
 ):
     """
     Initialize the reusable structural part of the kernel cache from
     a leaf matrix.
-    
+
     This includes:
     - global leaf indexing
     - flattened sample-tree incidences
-    - transductive row/flat masks
-    - flattened tree ids used by tree-specific GAP surrogates
+    - flattened tree ids used by tree-specific quantities
     """
     cache = KernelCache()
     cache.leaf_matrix = leaf_matrix.astype(np.int32, copy=False)
     cache.n_samples = int(n_samples)
     cache.n_trees = int(leaf_matrix.shape[1])
-
-    cache.idx_labeled = None if idx_labeled is None else np.asarray(idx_labeled, dtype=np.int64)
-    cache.idx_unlabeled = None if idx_unlabeled is None else np.asarray(idx_unlabeled, dtype=np.int64)
-    cache.n_train_samples = int(n_train_samples) if n_train_samples is not None else int(n_samples)
-
-    # Transductive mode means that some rows in the active reference set are
-    # explicitly marked as unlabeled.
-    cache.is_transductive = (
-        cache.idx_unlabeled is not None and len(cache.idx_unlabeled) > 0
-    )
 
     cache.leaf_offsets = np.concatenate(([0], np.cumsum(n_nodes_per_tree)[:-1])).astype(np.int64)
     cache.total_unique_nodes = int(np.sum(n_nodes_per_tree))
@@ -64,18 +50,6 @@ def initialize_cache(
 
     cache.flat_rows = np.repeat(np.arange(cache.n_samples), cache.n_trees)
     cache.flat_cols = global_leaves.flatten()
-
-    # Cached row-level masks for transductive builders
-    cache.row_is_labeled = np.zeros(cache.n_samples, dtype=bool)
-    if cache.idx_labeled is not None:
-        cache.row_is_labeled[cache.idx_labeled] = True
-
-    cache.row_is_unlabeled = np.zeros(cache.n_samples, dtype=bool)
-    if cache.idx_unlabeled is not None:
-        cache.row_is_unlabeled[cache.idx_unlabeled] = True
-
-    cache.flat_is_labeled = np.repeat(cache.row_is_labeled, cache.n_trees)
-    cache.flat_is_unlabeled = np.repeat(cache.row_is_unlabeled, cache.n_trees)
 
     # Cached tree ids for flattened sample-tree arrays
     cache.flat_tree_ids = np.tile(np.arange(cache.n_trees, dtype=np.int64), cache.n_samples)
@@ -104,20 +78,9 @@ def attach_boosted_weights(cache, boosted_tree_weights):
 def attach_inv_sqrt_leaf_mass(cache):
     """
     Attach inverse square-root unit leaf-mass statistics used by KeRF.
-
-    In transductive mode, only labeled sample-tree incidences contribute
-    to the leaf mass.
     """
-    # In the current main API, idx_labeled should always be defined.
-    # We keep the fallback branch for low-level robustness.
-    if cache.idx_labeled is None:
-        flat_cols = cache.flat_cols
-    else:
-        labeled_incidence_mask = cache.flat_is_labeled
-        flat_cols = cache.flat_cols[labeled_incidence_mask]
-
     leaf_mass = np.bincount(
-        flat_cols,
+        cache.flat_cols,
         minlength=cache.total_unique_nodes,
     ).astype(np.float32)
 
@@ -131,10 +94,6 @@ def attach_inv_sqrt_leaf_mass(cache):
 def attach_inv_inbag_leaf_mass(cache):
     """
     Attach inverse multiplicity leaf-mass statistics used by GAP.
-
-    In transductive mode, only labeled sample-tree incidences contribute
-    to the denominator leaf mass, even though inbag_counts may be defined on all
-    reference points.
     """
     if cache.inbag_counts is None:
         raise ValueError("cache.inbag_counts is required to compute multiplicity leaf mass.")
@@ -142,78 +101,15 @@ def attach_inv_inbag_leaf_mass(cache):
     inbag_counts = cache.inbag_counts.astype(np.float32, copy=False)
     c_flat = inbag_counts.flatten()
 
-    # In the current main API, idx_labeled should always be defined.
-    # We keep the fallback branch for low-level robustness.
-    if cache.idx_labeled is None:
-        weights = c_flat
-    else:
-        weights = c_flat.copy()
-        weights[~cache.flat_is_labeled] = 0.0
-
     inbag_leaf_mass = np.bincount(
         cache.flat_cols,
-        weights=weights,
+        weights=c_flat,
         minlength=cache.total_unique_nodes,
     ).astype(np.float32)
 
     with np.errstate(divide="ignore", invalid="ignore"):
         cache.inv_inbag_leaf_mass = 1.0 / inbag_leaf_mass
     cache.inv_inbag_leaf_mass[~np.isfinite(cache.inv_inbag_leaf_mass)] = 0.0
-
-    return cache
-
-
-def attach_unlabeled_multiplicity_surrogates(cache):
-    """
-    Precompute empirical treewise multiplicity surrogates for unlabeled
-    phantom targets in transductive GAP.
-
-    The following surrogates are stored:
-
-    - empirical_mult_all_by_tree[t]
-      average multiplicity among labeled samples in tree t,
-      used for ordinary unlabeled off-diagonal target contributions
-
-    - empirical_mult_inbag_by_tree[t]
-      average multiplicity among in-bag labeled samples in tree t,
-      used only for the unlabeled diagonal adjustment when
-      force_nonzero_diag=True
-    """
-    if cache.inbag_counts is None:
-        raise ValueError(
-            "cache.inbag_counts is required to compute unlabeled multiplicity surrogates."
-        )
-
-    if not cache.is_transductive:
-        raise ValueError(
-            "Unlabeled multiplicity surrogates are only defined in transductive GAP."
-        )
-
-    if cache.idx_labeled is None or len(cache.idx_labeled) == 0:
-        raise ValueError(
-            "Transductive GAP requires at least one labeled sample to compute "
-            "empirical unlabeled multiplicity surrogates."
-        )
-
-    c_labeled = cache.inbag_counts[cache.idx_labeled].astype(np.float32, copy=False)
-
-    # Ordinary unlabeled target surrogate
-    cache.empirical_mult_all_by_tree = c_labeled.mean(axis=0).astype(np.float32)
-
-    # Diagonal-only unlabeled surrogate
-    inbag_mask = c_labeled > 0
-    inbag_counts = inbag_mask.sum(axis=0).astype(np.float32)
-    inbag_sums = c_labeled.sum(axis=0).astype(np.float32)
-
-    if np.any(inbag_counts == 0):
-        raise ValueError(
-            "Cannot compute empirical_mult_inbag_by_tree because at least one tree "
-            "has no labeled in-bag samples."
-        )
-
-    cache.empirical_mult_inbag_by_tree = (
-        inbag_sums / inbag_counts
-    ).astype(np.float32)
 
     return cache
 
@@ -344,105 +240,36 @@ def build_W_matrix(cache, kernel_method, force_nonzero_diag=False):
     #
     #   on each sample-tree incidence.
     #
-    #   - labeled reference points use their observed multiplicity c_j(t)
-    #   - unlabeled phantom reference points use the empirical surrogate
-    #     empirical_mult_all_by_tree[t]
-    #
     # Private diagonal coordinates:
     #   When force_nonzero_diag=True, one private coordinate per training
     #   sample is appended after the leaf coordinates. These coordinates
     #   are used only to correct training self-similarities.
     #
-    #   - for labeled rows, the private coordinate restores the intended
-    #     training diagonal based on the labeled target-side GAP term
-    #   - for unlabeled rows in transductive GAP, the private coordinate
-    #     contributes only the missing correction beyond the ordinary leaf
-    #     contribution already present in the unlabeled diagonal
-    #
     #   These private coordinates are training-only correction features:
     #   out-of-sample queries keep the corresponding columns in Q, but with
     #   zero values.
-    #
-    #   - Transductive GAP with force_nonzero_diag=False is currently
-    #     not supported at the API level.
     # ---------------------------------------------------------
     elif kernel_method == "gap":
         if cache.inbag_counts is None:
             raise ValueError("cache.inbag_counts is required for kernel_method='gap'.")
         if cache.inv_inbag_leaf_mass is None:
             raise ValueError("cache.inv_inbag_leaf_mass is required for kernel_method='gap'.")
-        if cache.is_transductive and not force_nonzero_diag:
-            raise ValueError(
-                "Transductive GAP with force_nonzero_diag=False is not supported."
-            )
-
-        has_unlabeled = cache.is_transductive
 
         # ----- Ordinary target-side term -----
-        c_j_t = cache.inbag_counts.flatten().astype(np.float32, copy=True)
-        if has_unlabeled:
-            c_j_t[cache.flat_is_unlabeled] = cache.empirical_mult_all_by_tree[
-                cache.flat_tree_ids[cache.flat_is_unlabeled]
-            ]
-
+        c_j_t = cache.inbag_counts.flatten().astype(np.float32, copy=False)
         weights = c_j_t * cache.inv_inbag_leaf_mass[flat_cols]
 
         # ----- Private diagonal correction -----
         if force_nonzero_diag:
             total_cols += N
 
-            # Labeled target diagonal
             row_sums = np.bincount(flat_rows, weights=weights, minlength=N).astype(np.float32)
             inbag_counts_per_row = (cache.inbag_counts > 0).sum(axis=1).astype(np.float32)
             inbag_counts_per_row[inbag_counts_per_row == 0] = 1.0
-            labeled_target_diag = row_sums / inbag_counts_per_row
+            diag_vals = (row_sums / inbag_counts_per_row).astype(np.float32)
 
-            if has_unlabeled:
-                unl = cache.idx_unlabeled.astype(np.int64, copy=False)
-
-                # Desired unlabeled diagonal:
-                #   (1/T) * sum_t empirical_mult_inbag_by_tree[t] / M_i(t)
-                desired_unl_diag_all = np.bincount(
-                    flat_rows,
-                    weights=cache.empirical_mult_inbag_by_tree[cache.flat_tree_ids] * cache.inv_inbag_leaf_mass[flat_cols],
-                    minlength=N
-                ).astype(np.float32) / np.float32(T)
-                desired_unl_diag = desired_unl_diag_all[unl]
-
-                # Ordinary unlabeled diagonal contributed by the non-private leaf part:
-                #   (1 / |S_i|) * sum_{t in S_i} empirical_mult_all_by_tree[t] / M_i(t)
-                if cache.oob_mask is None:
-                    raise ValueError("cache.oob_mask is required for training-time kernel_method='gap'.")
-
-                q_mask = cache.oob_mask.flatten() == 1
-                q_rows = cache.flat_rows[q_mask]
-                q_cols = cache.flat_cols[q_mask]
-                q_tree_ids = cache.flat_tree_ids[q_mask]
-
-                S_i_counts = cache.oob_mask.sum(axis=1).astype(np.float32)
-                S_i_counts[S_i_counts == 0] = 1.0
-                q_vals = (1.0 / S_i_counts[q_rows]).astype(np.float32)
-
-                ordinary_unl_diag = np.bincount(
-                    q_rows,
-                    weights=q_vals * cache.empirical_mult_all_by_tree[q_tree_ids] * cache.inv_inbag_leaf_mass[q_cols],
-                    minlength=N
-                ).astype(np.float32)[unl]
-
-                # Labeled rows get their full target diagonal
-                lab = np.flatnonzero(~cache.row_is_unlabeled)
-
-                diag_rows = np.concatenate([lab, unl])
-                diag_cols = diag_rows + cache.diag_offset
-                diag_vals = np.concatenate([
-                    labeled_target_diag[lab],
-                    desired_unl_diag - ordinary_unl_diag,
-                ]).astype(np.float32)
-
-            else:
-                diag_rows = np.arange(N, dtype=np.int64)
-                diag_cols = diag_rows + cache.diag_offset
-                diag_vals = labeled_target_diag.astype(np.float32)
+            diag_rows = np.arange(N, dtype=np.int64)
+            diag_cols = diag_rows + cache.diag_offset
 
             flat_rows = np.concatenate([flat_rows, diag_rows])
             flat_cols = np.concatenate([flat_cols, diag_cols])
@@ -604,9 +431,6 @@ def build_Q_matrix(
     # Private diagonal term:
     #   These private coordinates must match the extra columns created in W.
     #
-    #   - Transductive GAP with force_nonzero_diag=False is currently
-    #     not supported at the API level.
-    #
     #   - If force_nonzero_diag=True, Q places value 1 on all private
     #     coordinates for training points, and W determines the final
     #     diagonal magnitude.
@@ -616,40 +440,35 @@ def build_Q_matrix(
     #     OOS queries do not activate them.
     # ---------------------------------------------------------
     elif kernel_method == "gap":
-        if cache.is_transductive and not force_nonzero_diag:
-            raise ValueError(
-                "Transductive GAP with force_nonzero_diag=False is not supported."
-            )
-    
         # ----- Ordinary query-side term -----
         if is_training:
             if cache.oob_mask is None:
                 raise ValueError("cache.oob_mask is required for training-time kernel_method='gap'.")
-    
+
             mask = cache.oob_mask.flatten() == 1
             flat_rows = flat_rows[mask]
             flat_cols = flat_cols[mask]
-    
+
             S_i_counts = cache.oob_mask.sum(axis=1).astype(np.float32)
             S_i_counts[S_i_counts == 0] = 1.0
             vals = (1.0 / S_i_counts[flat_rows]).astype(np.float32)
-    
+
             # ----- Final assembly -----
             if force_nonzero_diag:
                 total_cols += cache.n_samples
-    
+
                 diag_rows = np.arange(N, dtype=np.int64)
                 diag_cols = diag_rows + cache.diag_offset
                 diag_vals = np.ones(N, dtype=np.float32)
-    
+
                 flat_rows = np.concatenate([flat_rows, diag_rows])
                 flat_cols = np.concatenate([flat_cols, diag_cols])
                 vals = np.concatenate([vals, diag_vals])
-    
+
         else:
             # OOS: average over all trees
             vals = np.full(N * T, 1.0 / T, dtype=np.float32)
-    
+
             # IMPORTANT:
             # keep the same ambient feature dimension as W when
             # force_nonzero_diag=True, but do NOT activate any private

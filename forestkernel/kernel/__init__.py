@@ -6,7 +6,6 @@ from .builders import (
     attach_boosted_weights,
     attach_inv_sqrt_leaf_mass,
     attach_inv_inbag_leaf_mass,
-    attach_unlabeled_multiplicity_surrogates,
     build_W_matrix,
     build_Q_matrix,
 )

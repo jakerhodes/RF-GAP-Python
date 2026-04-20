@@ -8,14 +8,12 @@ from .config import (
     validate_model_kwargs,
 )
 from .adapters import make_adapter
-from .fit_utils import prepare_reference_split
 from .kernel import (
     initialize_cache,
     attach_bootstrap_stats,
     attach_boosted_weights,
     attach_inv_sqrt_leaf_mass,
     attach_inv_inbag_leaf_mass,
-    attach_unlabeled_multiplicity_surrogates,
     build_W_matrix,
     build_Q_matrix,
     csr_row_scale_inplace,
@@ -108,10 +106,6 @@ def ForestKernel(
             """
             Update the active kernel construction configuration without refitting
             the forest.
-
-            This is useful when one wants to rebuild the kernel cache for a
-            different kernel method using the same fitted ensemble and the same
-            reference set.
             """
             next_kernel_method = self.kernel_method if kernel_method is None else kernel_method
             next_force_nonzero_diag = (
@@ -130,45 +124,29 @@ def ForestKernel(
 
             return self
 
-        def fit_forest(self, X, y, idx_unlabeled=None, **fit_kwargs):
+        def fit_forest(self, X, y, **fit_kwargs):
             """
             Fit only the underlying ensemble, without building kernel metadata.
 
             Useful for benchmarking forest fitting separately from kernel
             preprocessing.
             """
-            fit_data = prepare_reference_split(
-                X=X,
-                y=y,
-                idx_unlabeled=idx_unlabeled,
-            )
+            X = np.asarray(X)
+            y = np.asarray(y)
 
-            self.y = fit_data["y"]
-
-            self.forest_.fit(
-                fit_data["X_train"],
-                fit_data["y_train"],
-                **fit_kwargs,
-            )
+            self.y = y
+            self.forest_.fit(X, y, **fit_kwargs)
             self._adapter = make_adapter(self.forest_, self.model_type)
 
             self.fit_forest_context_ = {
-                "X": fit_data["X"],
-                "X_train": fit_data["X_train"],
-                "idx_labeled": fit_data["idx_labeled"],
-                "idx_unlabeled": fit_data["idx_unlabeled"],
-                "has_unlabeled": fit_data["has_unlabeled"],
+                "X": X,
             }
 
             # Any old cache becomes invalid after refitting the forest.
             self.cache = None
 
             return {
-                "X": fit_data["X"],
-                "X_train": fit_data["X_train"],
-                "idx_labeled": fit_data["idx_labeled"],
-                "idx_unlabeled": fit_data["idx_unlabeled"],
-                "has_unlabeled": fit_data["has_unlabeled"],
+                "X": X,
             }
 
         def build_kernel_cache(
@@ -181,11 +159,6 @@ def ForestKernel(
 
             Useful for benchmarking kernel preprocessing separately from
             forest fitting.
-
-            The reference-set information is taken from the stored fit context
-            created during fit_forest(...). This makes it possible to switch
-            kernel methods and rebuild the kernel cache without refitting the
-            underlying forest.
             """
             self._check_forest_fitted()
 
@@ -201,20 +174,9 @@ def ForestKernel(
                 )
 
             X = self.fit_forest_context_["X"]
-            X_train = self.fit_forest_context_["X_train"]
-            idx_labeled = self.fit_forest_context_["idx_labeled"]
-            idx_unlabeled = self.fit_forest_context_["idx_unlabeled"]
-            has_unlabeled = self.fit_forest_context_["has_unlabeled"]
-
-            if has_unlabeled and self.kernel_method == "gap" and not self.force_nonzero_diag:
-                raise ValueError(
-                    "Transductive GAP currently requires force_nonzero_diag=True. "
-                    "The zero-diagonal transductive GAP variant is not supported "
-                    "because it relies on signed private correction coordinates."
-                )
 
             # ---------------------------------------------------------
-            # STEP 1: initialize cache from leaf structure on ALL points
+            # STEP 1: initialize cache from leaf structure on all points
             # ---------------------------------------------------------
             leaf_matrix = self._adapter.get_leaf_matrix(X)
             n_nodes_per_tree = self._adapter.get_n_nodes_per_tree()
@@ -223,41 +185,18 @@ def ForestKernel(
                 leaf_matrix=leaf_matrix,
                 n_nodes_per_tree=n_nodes_per_tree,
                 n_samples=X.shape[0],
-                idx_labeled=idx_labeled,
-                idx_unlabeled=idx_unlabeled,
-                n_train_samples=X_train.shape[0],
             )
 
             # ---------------------------------------------------------
             # STEP 2: attach OOB / multiplicity structure to cache when needed
             # ---------------------------------------------------------
             if self.kernel_method in ["oob", "gap"]:
-                oob_labeled = self._adapter.get_oob_mask(X_train)
-
-                if has_unlabeled:
-                    T = self.cache.n_trees
-
-                    # Unlabeled rows are treated as OOB in every tree, so the OOB
-                    # mask is initialized with ones and then labeled rows are filled in.
-                    oob_mask = np.ones((self.cache.n_samples, T), dtype=np.int8)
-                    oob_mask[idx_labeled, :] = oob_labeled.astype(np.int8)
-
-                    if self.kernel_method == "gap":
-                        # Unlabeled rows are initialized with placeholder zeros.
-                        # The GAP builders later replace these target-side values using
-                        # the cached treewise surrogates.
-                        inbag_counts_labeled = self._adapter.get_in_bag_counts(X_train).astype(np.float32)
-                        inbag_counts = np.zeros((self.cache.n_samples, T), dtype=np.float32)
-                        inbag_counts[idx_labeled, :] = inbag_counts_labeled
-                    else:
-                        inbag_counts = None
-                else:
-                    oob_mask = oob_labeled.astype(np.int8)
-                    inbag_counts = (
-                        self._adapter.get_in_bag_counts(X_train).astype(np.float32)
-                        if self.kernel_method == "gap"
-                        else None
-                    )
+                oob_mask = self._adapter.get_oob_mask(X).astype(np.int8)
+                inbag_counts = (
+                    self._adapter.get_in_bag_counts(X).astype(np.float32)
+                    if self.kernel_method == "gap"
+                    else None
+                )
 
                 attach_bootstrap_stats(
                     self.cache,
@@ -269,7 +208,7 @@ def ForestKernel(
             # STEP 3: attach tree weights when needed
             # ---------------------------------------------------------
             if self.kernel_method == "boosted":
-                boosted_tree_weights = self._adapter.get_tree_weights(X_train)
+                boosted_tree_weights = self._adapter.get_tree_weights(X)
                 attach_boosted_weights(self.cache, boosted_tree_weights)
 
             # ---------------------------------------------------------
@@ -280,9 +219,6 @@ def ForestKernel(
 
             if self.kernel_method == "gap":
                 attach_inv_inbag_leaf_mass(self.cache)
-
-                if has_unlabeled:
-                    attach_unlabeled_multiplicity_surrogates(self.cache)
 
             # ---------------------------------------------------------
             # STEP 5: build the reference-side feature map W
@@ -295,14 +231,9 @@ def ForestKernel(
 
             return self
 
-        def fit(self, X, y, idx_unlabeled=None, **fit_kwargs):
+        def fit(self, X, y, **fit_kwargs):
             """
             Fit the ensemble and precompute the reference-side leaf map W.
-
-            In transductive mode, unlabeled samples are excluded from the
-            ensemble fit, but retained in the reference set used for kernel
-            construction through the transductive heuristic implemented in
-            builders.py.
 
             Additional keyword arguments are forwarded to the underlying base
             estimator fit() method.
@@ -310,7 +241,6 @@ def ForestKernel(
             self.fit_forest(
                 X,
                 y,
-                idx_unlabeled=idx_unlabeled,
                 **fit_kwargs,
             )
             self.build_kernel_cache()
@@ -405,30 +335,20 @@ def ForestKernel(
         def kernel_predict(self, X_new):
             """
             Proximity-weighted prediction on new samples using the fitted
-            labeled reference subset only.
-
-            In transductive mode, unlabeled reference points still influence
-            the geometry through the cache construction, but do not directly
-            vote in the prediction step.
+            reference set.
             """
             self._check_fitted()
 
             Q_new = self.get_query_map(X_new)
             K_ext = self.get_kernel_from_query_map(Q_new)
 
-            idx_labeled = self.cache.idx_labeled
-            if idx_labeled is None:
-                idx_labeled = np.arange(K_ext.shape[1], dtype=np.int64)
-
-            K_ext_labeled = K_ext[:, idx_labeled]
-            y_labeled = np.asarray(self.y[idx_labeled]).ravel()
-
-            K_ext_labeled = row_normalize_kernel_block(K_ext_labeled, self.kernel_method)
+            y_ref = np.asarray(self.y).ravel()
+            K_ext = row_normalize_kernel_block(K_ext, self.kernel_method)
 
             if self.prediction_type == "regression":
-                return kernel_predict_regression(K_ext_labeled, y_labeled)
+                return kernel_predict_regression(K_ext, y_ref)
 
-            return kernel_predict_classification(K_ext_labeled, y_labeled)
+            return kernel_predict_classification(K_ext, y_ref)
 
         # ---------------------------------------------------------
         # Convenience accessors to the underlying fitted ensemble
