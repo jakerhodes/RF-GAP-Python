@@ -16,6 +16,7 @@ from .kernel import (
     attach_inv_inbag_leaf_mass,
     build_W_matrix,
     build_Q_matrix,
+    augment_kernel_maps,
     csr_row_scale_inplace,
     block_symmetrize,
     format_output_matrix,
@@ -29,7 +30,6 @@ def ForestKernel(
     prediction_type=None,
     y=None,
     kernel_method="gap",
-    force_nonzero_diag=False,
     model_type="rf",
     **kwargs,
 ):
@@ -66,12 +66,10 @@ def ForestKernel(
         def __init__(
             self,
             kernel_method=kernel_method,
-            force_nonzero_diag=force_nonzero_diag,
             **model_kwargs,
         ):
             self.kernel_method = kernel_method
             self.prediction_type = prediction_type
-            self.force_nonzero_diag = force_nonzero_diag
             self.model_type = model_type
 
             # Underlying model kwargs
@@ -98,19 +96,12 @@ def ForestKernel(
                     "The underlying forest is not fitted yet. Call 'fit' first."
                 )
 
-        def set_kernel_config(
-            self,
-            kernel_method=None,
-            force_nonzero_diag=None,
-        ):
+        def set_kernel_config(self, kernel_method=None):
             """
             Update the active kernel construction configuration without refitting
             the forest.
             """
             next_kernel_method = self.kernel_method if kernel_method is None else kernel_method
-            next_force_nonzero_diag = (
-                self.force_nonzero_diag if force_nonzero_diag is None else force_nonzero_diag
-            )
 
             validate_model_configuration(
                 model_type=self.model_type,
@@ -120,8 +111,6 @@ def ForestKernel(
             )
 
             self.kernel_method = next_kernel_method
-            self.force_nonzero_diag = next_force_nonzero_diag
-
             return self
 
         def fit_forest(self, X, y, **fit_kwargs):
@@ -152,20 +141,12 @@ def ForestKernel(
         def build_kernel_cache(
             self,
             kernel_method=None,
-            force_nonzero_diag=None,
         ):
             """
-            Build all post-fit kernel metadata and the reference-side leaf map W.
-
-            Useful for benchmarking kernel preprocessing separately from
-            forest fitting.
+            Build all post-fit kernel metadata and the reference-side raw leaf map W.
             """
             self._check_forest_fitted()
-
-            self.set_kernel_config(
-                kernel_method=kernel_method,
-                force_nonzero_diag=force_nonzero_diag,
-            )
+            self.set_kernel_config(kernel_method=kernel_method)
 
             if self.fit_forest_context_ is None:
                 raise ValueError(
@@ -221,41 +202,36 @@ def ForestKernel(
                 attach_inv_inbag_leaf_mass(self.cache)
 
             # ---------------------------------------------------------
-            # STEP 5: build the reference-side feature map W
+            # STEP 5: build and cache the raw reference-side feature map W
             # ---------------------------------------------------------
             self.cache.W_mat = build_W_matrix(
                 self.cache,
                 kernel_method=self.kernel_method,
-                force_nonzero_diag=self.force_nonzero_diag,
             )
 
             return self
 
         def fit(self, X, y, **fit_kwargs):
             """
-            Fit the ensemble and precompute the reference-side leaf map W.
+            Fit the ensemble and precompute the reference-side raw leaf map W.
 
             Additional keyword arguments are forwarded to the underlying base
             estimator fit() method.
             """
-            self.fit_forest(
-                X,
-                y,
-                **fit_kwargs,
-            )
+            self.fit_forest(X, y, **fit_kwargs)
             self.build_kernel_cache()
             return self
 
         def get_reference_map(self, return_dense=False):
             """
-            Return the fitted reference-side leaf feature map W.
+            Return the fitted reference-side raw leaf feature map W.
             """
             self._check_fitted()
             return format_output_matrix(self.cache.W_mat, return_dense=return_dense)
 
         def get_train_query_map(self, normalize_diagonal=False, return_dense=False):
             """
-            Return the query-side leaf feature map Q on the fitted reference set.
+            Return the query-side raw leaf feature map Q on the fitted reference set.
             """
             self._check_fitted()
 
@@ -264,14 +240,9 @@ def ForestKernel(
                 kernel_method=self.kernel_method,
                 leaves=self.cache.leaf_matrix,
                 is_training=True,
-                force_nonzero_diag=self.force_nonzero_diag,
             )
 
-            if normalize_diagonal and (
-                (self.kernel_method == "gap" and self.force_nonzero_diag)
-                or self.kernel_method == "kerf"
-            ):
-                # Hadamard trick to get the diagonal of Q W^T without forming the full kernel matrix.
+            if normalize_diagonal and self.kernel_method == "kerf":
                 diagonal = Q_train.multiply(self.cache.W_mat).sum(axis=1).A.ravel()
                 diagonal[diagonal == 0] = 1.0
                 csr_row_scale_inplace(Q_train, 1.0 / diagonal)
@@ -280,47 +251,76 @@ def ForestKernel(
 
         def get_query_map(self, X_new, return_dense=False):
             """
-            Return the out-of-sample query-side leaf feature map Q(X_new).
+            Return the out-of-sample raw query-side leaf feature map Q(X_new).
             """
             self._check_fitted()
 
             leaves_new = self._adapter.get_leaf_matrix(X_new)
-
             Q_new = build_Q_matrix(
                 self.cache,
                 kernel_method=self.kernel_method,
                 leaves=leaves_new,
                 is_training=False,
-                force_nonzero_diag=self.force_nonzero_diag,
             )
 
             return format_output_matrix(Q_new, return_dense=return_dense)
 
         def get_kernel_from_query_map(self, Q, return_dense=False):
             """
-            Form a kernel block K = Q W^T from a query-side map Q.
+            Form a kernel block K = Q W^T from a raw query-side map Q.
             """
             self._check_fitted()
             K = Q.dot(self.cache.W_mat.T)
             return format_output_matrix(K, return_dense=return_dense)
 
-        def get_kernel(self, force_symmetric=False, normalize_diagonal=False, return_dense=False):
+        def get_kernel(
+            self,
+            force_symmetric=False,
+            normalize_diagonal=False,
+            adjust_diagonal=False,
+            return_dense=False,
+        ):
             """
             Return the fitted kernel matrix on the reference set.
+
+            If adjust_diagonal=True, the raw query/reference maps are internally
+            augmented with private diagonal-correction coordinates before forming
+            the kernel.
             """
             self._check_fitted()
 
-            Q_train = self.get_train_query_map(
-                normalize_diagonal=normalize_diagonal
+            Q_train = build_Q_matrix(
+                self.cache,
+                kernel_method=self.kernel_method,
+                leaves=self.cache.leaf_matrix,
+                is_training=True,
             )
+            W_ref = self.cache.W_mat
+
+            Q_train, W_ref = augment_kernel_maps(
+                self.cache,
+                self.kernel_method,
+                Q_train,
+                W_ref,
+                adjust_diagonal=adjust_diagonal,
+                is_training=True,
+            )
+
+            if normalize_diagonal and (
+                (self.kernel_method == "gap" and adjust_diagonal)
+                or self.kernel_method == "kerf"
+            ):
+                diagonal = Q_train.multiply(W_ref).sum(axis=1).A.ravel()
+                diagonal[diagonal == 0] = 1.0
+                csr_row_scale_inplace(Q_train, 1.0 / diagonal)
 
             if force_symmetric and (
                 self.kernel_method == "gap"
                 or (self.kernel_method == "kerf" and normalize_diagonal)
             ):
-                K = block_symmetrize(Q_train, self.cache.W_mat)
+                K = block_symmetrize(Q_train, W_ref)
             else:
-                K = Q_train.dot(self.cache.W_mat.T)
+                K = Q_train.dot(W_ref.T)
 
             return format_output_matrix(K, return_dense=return_dense)
 
@@ -329,8 +329,16 @@ def ForestKernel(
             Return the kernel block between X_new and the fitted reference set.
             """
             self._check_fitted()
-            Q_new = self.get_query_map(X_new)
-            return self.get_kernel_from_query_map(Q_new, return_dense=return_dense)
+
+            leaves_new = self._adapter.get_leaf_matrix(X_new)
+            Q_new = build_Q_matrix(
+                self.cache,
+                kernel_method=self.kernel_method,
+                leaves=leaves_new,
+                is_training=False,
+            )
+            K = Q_new.dot(self.cache.W_mat.T)
+            return format_output_matrix(K, return_dense=return_dense)
 
         def kernel_predict(self, X_new):
             """
@@ -339,8 +347,14 @@ def ForestKernel(
             """
             self._check_fitted()
 
-            Q_new = self.get_query_map(X_new)
-            K_ext = self.get_kernel_from_query_map(Q_new)
+            leaves_new = self._adapter.get_leaf_matrix(X_new)
+            Q_new = build_Q_matrix(
+                self.cache,
+                kernel_method=self.kernel_method,
+                leaves=leaves_new,
+                is_training=False,
+            )
+            K_ext = Q_new.dot(self.cache.W_mat.T)
 
             y_ref = np.asarray(self.y).ravel()
             K_ext = row_normalize_kernel_block(K_ext, self.kernel_method)
@@ -375,13 +389,11 @@ def ForestKernel(
             """
             return {
                 "kernel_method": self.kernel_method,
-                "force_nonzero_diag": self.force_nonzero_diag,
                 "model_type": self.model_type,
                 **self.model_kwargs,
             }
 
     return ForestKernel(
         kernel_method=kernel_method,
-        force_nonzero_diag=force_nonzero_diag,
         **kwargs,
     )

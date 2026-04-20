@@ -8,6 +8,7 @@ from .builders import (
     attach_inv_inbag_leaf_mass,
     build_W_matrix,
     build_Q_matrix,
+    augment_kernel_maps
 )
 from .sparse_utils import (
     csr_row_scale_inplace,

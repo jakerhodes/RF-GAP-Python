@@ -114,21 +114,18 @@ def attach_inv_inbag_leaf_mass(cache):
     return cache
 
 
-def build_W_matrix(cache, kernel_method, force_nonzero_diag=False):
+def build_W_matrix(cache, kernel_method):
     """
-    Builds the Weight Matrix W (N_ref x N_total_nodes_plus_optional_diag).
+    Builds the raw Weight Matrix W (N_ref x N_total_nodes).
 
     This matrix handles the 'j' term (target/reference) in the kernel
-    definitions.
+    definitions, restricted to the true leaf coordinates only.
 
     Parameters
     ----------
     cache : KernelCache
     kernel_method : str
         One of {'original', 'oob', 'gap', 'kerf', 'boosted'}
-    force_nonzero_diag : bool, default=False
-        Only relevant for GAP. Whether to inject virtual diagonal
-        coordinates to restore non-zero self-similarities.
 
     Returns
     -------
@@ -142,7 +139,6 @@ def build_W_matrix(cache, kernel_method, force_nonzero_diag=False):
     flat_rows = cache.flat_rows
     flat_cols = cache.flat_cols
 
-    # Base number of columns for sparse W building (before optional virtual diagonal).
     total_cols = cache.total_unique_nodes
 
     # ---------------------------------------------------------
@@ -192,15 +188,6 @@ def build_W_matrix(cache, kernel_method, force_nonzero_diag=False):
     #
     # Let M_j = number of OOB trees for sample j.
     # Then W carries sqrt(T) / M_j on the retained sample-tree incidences.
-    #
-    # Diagonal trick:
-    #   The raw separable OOB factorization yields self-similarity T / M_j,
-    #   which is generally > 1. To replace the diagonal exactly by 1 without
-    #   calling sparse setdiag(), we append one private coordinate per sample:
-    #
-    #       QW^T  ->  QW^T + diag(1 - raw_diag)
-    #
-    #   This is done by adding N virtual columns after the real leaf columns.
     # ---------------------------------------------------------
     elif kernel_method == "oob":
         if cache.oob_mask is None:
@@ -218,18 +205,6 @@ def build_W_matrix(cache, kernel_method, force_nonzero_diag=False):
         # Reference-side weights: sqrt(T) / M_j
         weights = (np.sqrt(T) / M[flat_rows]).astype(np.float32)
 
-        # Exact diagonal replacement trick for OOB.
-        raw_diag = (T / M).astype(np.float32)
-        diag_vals = (1.0 - raw_diag).astype(np.float32)
-
-        diag_rows = np.arange(N, dtype=np.int64)
-        diag_cols = diag_rows + cache.diag_offset
-
-        flat_rows = np.concatenate([flat_rows, diag_rows])
-        flat_cols = np.concatenate([flat_cols, diag_cols])
-        weights = np.concatenate([weights, diag_vals])
-        total_cols += N
-
     # ---------------------------------------------------------
     # GAP PROXIMITY
     #
@@ -239,15 +214,6 @@ def build_W_matrix(cache, kernel_method, force_nonzero_diag=False):
     #       c_j(t) / M_leaf
     #
     #   on each sample-tree incidence.
-    #
-    # Private diagonal coordinates:
-    #   When force_nonzero_diag=True, one private coordinate per training
-    #   sample is appended after the leaf coordinates. These coordinates
-    #   are used only to correct training self-similarities.
-    #
-    #   These private coordinates are training-only correction features:
-    #   out-of-sample queries keep the corresponding columns in Q, but with
-    #   zero values.
     # ---------------------------------------------------------
     elif kernel_method == "gap":
         if cache.inbag_counts is None:
@@ -255,30 +221,12 @@ def build_W_matrix(cache, kernel_method, force_nonzero_diag=False):
         if cache.inv_inbag_leaf_mass is None:
             raise ValueError("cache.inv_inbag_leaf_mass is required for kernel_method='gap'.")
 
-        # ----- Ordinary target-side term -----
         c_j_t = cache.inbag_counts.flatten().astype(np.float32, copy=False)
         weights = c_j_t * cache.inv_inbag_leaf_mass[flat_cols]
-
-        # ----- Private diagonal correction -----
-        if force_nonzero_diag:
-            total_cols += N
-
-            row_sums = np.bincount(flat_rows, weights=weights, minlength=N).astype(np.float32)
-            inbag_counts_per_row = (cache.inbag_counts > 0).sum(axis=1).astype(np.float32)
-            inbag_counts_per_row[inbag_counts_per_row == 0] = 1.0
-            diag_vals = (row_sums / inbag_counts_per_row).astype(np.float32)
-
-            diag_rows = np.arange(N, dtype=np.int64)
-            diag_cols = diag_rows + cache.diag_offset
-
-            flat_rows = np.concatenate([flat_rows, diag_rows])
-            flat_cols = np.concatenate([flat_cols, diag_cols])
-            weights = np.concatenate([weights, diag_vals])
 
     else:
         raise ValueError(f"Unknown kernel_method='{kernel_method}'.")
 
-    # Filter zeros and build sparse W
     mask = weights != 0
     W_mat = sparse.csr_matrix(
         (weights[mask], (flat_rows[mask], flat_cols[mask])),
@@ -293,12 +241,12 @@ def build_Q_matrix(
     kernel_method,
     leaves=None,
     is_training=True,
-    force_nonzero_diag=False,
 ):
     """
-    Builds the Query Matrix Q (N_query x N_total_nodes_plus_optional_diag).
+    Builds the raw Query Matrix Q (N_query x N_total_nodes).
 
-    This matrix handles the 'i' term and the summation scope S_i.
+    This matrix handles the 'i' term and the summation scope S_i,
+    restricted to the true leaf coordinates only.
 
     Parameters
     ----------
@@ -310,8 +258,6 @@ def build_Q_matrix(
     is_training : bool, default=True
         Whether the query points are the same as the fitted reference points.
         Relevant for OOB and GAP.
-    force_nonzero_diag : bool, default=False
-        Only relevant for GAP.
 
     Returns
     -------
@@ -326,7 +272,6 @@ def build_Q_matrix(
     flat_rows = np.repeat(np.arange(N), T)
     flat_cols = global_leaves.flatten()
 
-    # Base number of columns for sparse Q building (before optional virtual diagonal).
     total_cols = cache.total_unique_nodes
 
     # ---------------------------------------------------------
@@ -375,9 +320,6 @@ def build_Q_matrix(
     #   Let |S_i| be the number of such trees.
     #   Then Q carries sqrt(T) / |S_i|.
     #
-    #   To match the exact diagonal replacement in W, append the same private
-    #   virtual coordinates with value 1 on the query side.
-    #
     # If is_training=False:
     #   By convention, new points are treated as OOB for all trees, so |S_i| = T.
     # ---------------------------------------------------------
@@ -398,23 +340,9 @@ def build_Q_matrix(
             # Query-side weights: sqrt(T) / |S_i|
             vals = (np.sqrt(T) / S_i_counts[flat_rows]).astype(np.float32)
 
-            # Matching private diagonal coordinates for exact diagonal replacement
-            total_cols += cache.n_samples
-            diag_rows = np.arange(N, dtype=np.int64)
-            diag_cols = diag_rows + cache.diag_offset
-            diag_vals = np.ones(N, dtype=np.float32)
-
-            flat_rows = np.concatenate([flat_rows, diag_rows])
-            flat_cols = np.concatenate([flat_cols, diag_cols])
-            vals = np.concatenate([vals, diag_vals])
-
         else:
             # For new data, all trees are considered OOB by convention (size T).
             vals = np.full(N * T, np.sqrt(T) / T, dtype=np.float32)
-
-            # The reference-side W includes private diagonal coordinates for the training set.
-            # New queries should have zero mass on these coordinates, but the matrix width must match.
-            total_cols += cache.n_samples
 
     # ---------------------------------------------------------
     # GAP PROXIMITY
@@ -427,20 +355,8 @@ def build_Q_matrix(
     #   where S_i is:
     #   - the OOB set of sample i during training
     #   - all trees for extension points
-    #
-    # Private diagonal term:
-    #   These private coordinates must match the extra columns created in W.
-    #
-    #   - If force_nonzero_diag=True, Q places value 1 on all private
-    #     coordinates for training points, and W determines the final
-    #     diagonal magnitude.
-    #
-    #   - For OOS points, the ambient feature dimension must still match W,
-    #     so we keep the extra private-diagonal columns in the shape, but
-    #     OOS queries do not activate them.
     # ---------------------------------------------------------
     elif kernel_method == "gap":
-        # ----- Ordinary query-side term -----
         if is_training:
             if cache.oob_mask is None:
                 raise ValueError("cache.oob_mask is required for training-time kernel_method='gap'.")
@@ -453,33 +369,13 @@ def build_Q_matrix(
             S_i_counts[S_i_counts == 0] = 1.0
             vals = (1.0 / S_i_counts[flat_rows]).astype(np.float32)
 
-            # ----- Final assembly -----
-            if force_nonzero_diag:
-                total_cols += cache.n_samples
-
-                diag_rows = np.arange(N, dtype=np.int64)
-                diag_cols = diag_rows + cache.diag_offset
-                diag_vals = np.ones(N, dtype=np.float32)
-
-                flat_rows = np.concatenate([flat_rows, diag_rows])
-                flat_cols = np.concatenate([flat_cols, diag_cols])
-                vals = np.concatenate([vals, diag_vals])
-
         else:
             # OOS: average over all trees
             vals = np.full(N * T, 1.0 / T, dtype=np.float32)
 
-            # IMPORTANT:
-            # keep the same ambient feature dimension as W when
-            # force_nonzero_diag=True, but do NOT activate any private
-            # diagonal coordinates for OOS points.
-            if force_nonzero_diag:
-                total_cols += cache.n_samples
-
     else:
         raise ValueError(f"Unknown kernel_method='{kernel_method}'.")
 
-    # Filter zeros and build sparse Q
     mask = vals != 0
     Q = sparse.csr_matrix(
         (vals[mask], (flat_rows[mask], flat_cols[mask])),
@@ -487,3 +383,96 @@ def build_Q_matrix(
         dtype=np.float32
     )
     return Q
+
+
+def augment_kernel_maps(cache, kernel_method, Q, W, adjust_diagonal=False, is_training=True):
+    """
+    Optionally augment raw query/reference maps with private diagonal
+    correction coordinates for exact kernel construction.
+
+    This helper is shared by OOB and GAP. It assumes that build_Q_matrix()
+    and build_W_matrix() return only the raw leaf maps, and appends private
+    diagonal-correction coordinates only when requested.
+
+    Parameters
+    ----------
+    cache : KernelCache
+    kernel_method : str
+        One of {'original', 'oob', 'gap', 'kerf', 'boosted'}
+    Q : scipy.sparse.csr_matrix
+        Raw query-side map.
+    W : scipy.sparse.csr_matrix
+        Raw reference-side map.
+    adjust_diagonal : bool, default=False
+        Whether to append private diagonal-correction coordinates.
+    is_training : bool, default=True
+        Whether Q corresponds to the fitted reference set.
+
+    Returns
+    -------
+    Q_aug : scipy.sparse.csr_matrix
+    W_aug : scipy.sparse.csr_matrix
+    """
+    if not adjust_diagonal:
+        return Q, W
+
+    if kernel_method not in {"oob", "gap"}:
+        return Q, W
+
+    n_ref = cache.n_samples
+
+    # ---------------------------------------------------------
+    # Query-side augmentation
+    # ---------------------------------------------------------
+    if not is_training:
+        # OOS queries do not get active private diagonal coordinates.
+        # We only need to widen Q so it matches the augmented W width.
+        n_query = Q.shape[0]
+        zero_block = sparse.csr_matrix((n_query, n_ref), dtype=np.float32)
+        Q_aug = sparse.hstack([Q, zero_block], format="csr")
+    else:
+        diag_rows = np.arange(n_ref, dtype=np.int64)
+        diag_cols = np.arange(n_ref, dtype=np.int64)
+        diag_vals_q = np.ones(n_ref, dtype=np.float32)
+        Q_diag = sparse.csr_matrix(
+            (diag_vals_q, (diag_rows, diag_cols)),
+            shape=(n_ref, n_ref),
+            dtype=np.float32,
+        )
+        Q_aug = sparse.hstack([Q, Q_diag], format="csr")
+
+    # ---------------------------------------------------------
+    # Reference-side augmentation
+    # ---------------------------------------------------------
+    if kernel_method == "oob":
+        if cache.oob_mask is None:
+            raise ValueError("cache.oob_mask is required for kernel_method='oob'.")
+
+        T = cache.n_trees
+        M = cache.oob_mask.sum(axis=1).astype(np.float32)
+        M[M == 0] = 1.0
+        raw_diag = (T / M).astype(np.float32)
+        diag_vals_w = (1.0 - raw_diag).astype(np.float32)
+
+    elif kernel_method == "gap":
+        if cache.inbag_counts is None:
+            raise ValueError("cache.inbag_counts is required for kernel_method='gap'.")
+
+        row_sums = np.asarray(W.sum(axis=1)).ravel().astype(np.float32)
+        inbag_counts_per_row = (cache.inbag_counts > 0).sum(axis=1).astype(np.float32)
+        inbag_counts_per_row[inbag_counts_per_row == 0] = 1.0
+        diag_vals_w = (row_sums / inbag_counts_per_row).astype(np.float32)
+
+    else:
+        diag_vals_w = None
+
+    diag_rows = np.arange(n_ref, dtype=np.int64)
+    diag_cols = np.arange(n_ref, dtype=np.int64)
+    W_diag = sparse.csr_matrix(
+        (diag_vals_w, (diag_rows, diag_cols)),
+        shape=(n_ref, n_ref),
+        dtype=np.float32,
+    )
+    W_aug = sparse.hstack([W, W_diag], format="csr")
+
+    return Q_aug, W_aug
