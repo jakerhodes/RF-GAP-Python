@@ -1,15 +1,10 @@
 import numpy as np
-
 from .base import EnsembleAdapter
-
 
 class LightGBMAdapter(EnsembleAdapter):
     """
     Adapter for LightGBM sklearn-style estimators such as
     lightgbm.LGBMClassifier and lightgbm.LGBMRegressor.
-
-    This adapter supports leaf-based kernels and tree-weighted boosted-tree
-    proximities, but does not support OOB- or in-bag-based quantities.
     """
 
     def _get_booster(self):
@@ -18,86 +13,6 @@ class LightGBMAdapter(EnsembleAdapter):
                 "LightGBM estimator must be fitted before using LightGBMAdapter."
             )
         return self.estimator.booster_
-
-    def _get_tree_info_list(self):
-        """
-        Return the flattened list of LightGBM trees from the dumped model.
-        """
-        booster = self._get_booster()
-        model_dump = booster.dump_model()
-        return model_dump["tree_info"]
-
-    def _collect_leaf_values(self, node, out):
-        """
-        Recursively collect a mapping {leaf_index -> leaf_value} for one tree.
-        Handles the case where a tree might be a single leaf.
-        """
-        # If 'leaf_index' is directly in the node, it's a leaf
-        if "leaf_index" in node:
-            out[int(node["leaf_index"])] = np.float32(node["leaf_value"])
-            return
-
-        # Otherwise, recurse if children exist
-        if "left_child" in node:
-            self._collect_leaf_values(node["left_child"], out)
-        if "right_child" in node:
-            self._collect_leaf_values(node["right_child"], out)
-
-    def _count_nodes(self, node):
-        """
-        Recursively count all nodes, handling single-leaf trees.
-        """
-        if "leaf_index" in node:
-            return 1
-        
-        count = 1 # Count the current split node
-        if "left_child" in node:
-            count += self._count_nodes(node["left_child"])
-        if "right_child" in node:
-            count += self._count_nodes(node["right_child"])
-        return count
-
-    def _get_leaf_value_maps(self):
-        """
-        Return one dictionary per tree mapping LightGBM leaf_index to leaf_value.
-        """
-        tree_info_list = self._get_tree_info_list()
-        maps = []
-
-        for tree_info in tree_info_list:
-            leaf_map = {}
-            self._collect_leaf_values(tree_info["tree_structure"], leaf_map)
-            maps.append(leaf_map)
-
-        return maps
-
-    def _predict_tree_outputs(self, X_ref):
-        """
-        Return per-tree shrunken contributions of shape (n_samples, n_trees_total).
-
-        Following Tan et al. (2020), we reconstruct the contribution h_t(s)
-        for each tree. In LightGBM's dump_model(), the 'leaf_value' already
-        accounts for the learning rate (shrinkage), so we map leaf indices 
-        directly to these values.
-        """
-        # leaf_matrix shape: (n_samples, n_trees)
-        leaf_matrix = self.get_leaf_matrix(X_ref)
-        # leaf_value_maps is a list of dicts: [{leaf_idx: value}, ...]
-        leaf_value_maps = self._get_leaf_value_maps()
-
-        n_samples, n_trees = leaf_matrix.shape
-        outputs = np.zeros((n_samples, n_trees), dtype=np.float32)
-
-        for t, leaf_map in enumerate(leaf_value_maps):
-            # Map the leaf indices to their pre-shrunken values.
-            # We use a list comprehension for the mapping; for massive X_ref,
-            # consider np.vectorize or a lookup array for extra speed.
-            outputs[:, t] = np.array(
-                [leaf_map[int(leaf_idx)] for leaf_idx in leaf_matrix[:, t]],
-                dtype=np.float32,
-            )
-
-        return outputs
 
     def get_leaf_matrix(self, X):
         """
@@ -113,15 +28,57 @@ class LightGBMAdapter(EnsembleAdapter):
 
         return leaf_matrix
 
+    def _get_leaf_value_maps(self):
+        """
+        Return one dictionary per tree mapping leaf_index to leaf_value.
+        Uses trees_to_dataframe for robustness against single-node trees.
+        """
+        booster = self._get_booster()
+        df = booster.trees_to_dataframe()
+        
+        # Filter for rows that represent leaves. 
+        # In LGBM, these have a non-null leaf_index.
+        leaves_df = df[df['leaf_index'].notnull()].copy()
+        
+        maps = []
+        n_trees = int(df['tree_index'].max() + 1)
+        
+        for t in range(n_trees):
+            tree_leaves = leaves_df[leaves_df['tree_index'] == t]
+            # Map the leaf_index (int) to the pre-shrunken 'value'
+            leaf_map = dict(zip(tree_leaves['leaf_index'].astype(int), 
+                                tree_leaves['value'].astype(np.float32)))
+            maps.append(leaf_map)
+            
+        return maps
+
+    def _predict_tree_outputs(self, X_ref):
+        """
+        Return per-tree shrunken contributions of shape (n_samples, n_trees_total).
+        """
+        leaf_matrix = self.get_leaf_matrix(X_ref)
+        leaf_value_maps = self._get_leaf_value_maps()
+
+        n_samples, n_trees = leaf_matrix.shape
+        outputs = np.zeros((n_samples, n_trees), dtype=np.float32)
+
+        for t in range(n_trees):
+            leaf_map = leaf_value_maps[t]
+            # Use .get(idx, 0.0) to safely handle any empty/stub trees
+            outputs[:, t] = np.array(
+                [leaf_map.get(int(leaf_idx), 0.0) for leaf_idx in leaf_matrix[:, t]],
+                dtype=np.float32,
+            )
+
+        return outputs
+
     def get_n_nodes_per_tree(self):
         """
-        Return total node counts for each LightGBM tree.
+        Return total node counts for each LightGBM tree using the dataframe.
         """
-        tree_info_list = self._get_tree_info_list()
-        return [
-            self._count_nodes(tree_info["tree_structure"])
-            for tree_info in tree_info_list
-        ]
+        booster = self._get_booster()
+        df = booster.trees_to_dataframe()
+        return df.groupby("tree_index").size().astype(int).tolist()
 
     def get_oob_mask(self, X_train=None):
         raise ValueError("OOB indices are not defined for LightGBM.")
@@ -132,45 +89,28 @@ class LightGBMAdapter(EnsembleAdapter):
     def get_tree_weights(self, X_ref):
         """
         Compute tree-specific weights for boosted-tree proximities.
-    
-        Following the boosted-tree proximity definition of Tan et al. (2020),
-        each tree is weighted by the variance of its contribution over the
-        reference set. If h_t(s) denotes the shrunken output of tree t for
-        sample s, then the weight is taken proportional to
-    
-            w_t ∝ Var({h_t(s) : s in X_ref}).
-    
-        Since `_predict_tree_outputs(X_ref)` already returns the per-tree
-        shrunken contributions, this amounts to computing the empirical
-        variance of each tree's output across the reference samples.
-    
-        Notes
-        -----
-        - This differs from using the squared L2 norm of the tree outputs.
-            The two coincide only when the tree outputs are centered.
-        - For multiclass LightGBM, the flattened tree list contains
-            class-specific trees from successive boosting rounds, so these
-            weights should be interpreted as per-flattened-tree variance
-            weights.
+        Following Tan et al. (2020) variance-based weighting.
         """
-        # contribs shape: (n_samples, n_trees)
         contribs = self._predict_tree_outputs(X_ref)
-    
+        
         if contribs.shape[1] == 0:
             raise RuntimeError("No trees found in fitted LightGBM model.")
 
-        # Compute empirical variance of each tree contribution
         weights = np.var(contribs, axis=0).astype(np.float32)
     
-        # Handle edge case where trees might have zero variance (e.g., single-leaf trees)
         total_weight = weights.sum()
         if total_weight <= 1e-12:
-            # Fallback to uniform weighting if no variance is found
             weights[:] = 1.0 / len(weights)
         else:
             weights /= total_weight
     
         return weights.astype(np.float32)
+
+    def supports_oob(self):
+        return False
+
+    def supports_in_bag_counts(self):
+        return False
 
     def supports_tree_weights(self):
         return True
