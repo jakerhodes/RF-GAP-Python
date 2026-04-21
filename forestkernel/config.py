@@ -50,10 +50,9 @@ def infer_prediction_type(prediction_type=None, y=None):
         return "classification"
 
 
-def validate_model_configuration(model_type, kernel_method, prediction_type, kwargs=None):
+def validate_model_configuration(model_type, kernel_method, kwargs=None):
     """
-    Validate the high-level compatibility between model_type, kernel_method,
-    prediction_type, and a few kernel-specific estimator requirements.
+    Validate the high-level compatibility between model_type, kernel_method, and a few kernel-specific estimator requirements.
 
     Parameters
     ----------
@@ -61,8 +60,6 @@ def validate_model_configuration(model_type, kernel_method, prediction_type, kwa
         One of {'rf', 'et', 'gbt', 'lgbm', 'xgb'}.
     kernel_method : str
         One of {'original', 'oob', 'gap', 'kerf', 'boosted'}.
-    prediction_type : str
-        One of {'classification', 'regression'}.
     kwargs : dict or None
         Estimator kwargs supplied by the user. These are not modified here,
         only checked when needed for kernel-specific requirements.
