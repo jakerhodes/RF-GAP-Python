@@ -14,8 +14,6 @@ from sklearn.ensemble import (
 from lightgbm import LGBMClassifier, LGBMRegressor
 from xgboost import XGBClassifier, XGBRegressor
 
-from .wrappers.bagged_rotation_forest import BaggedRotationForest
-
 
 def infer_prediction_type(prediction_type=None, y=None):
     """
@@ -60,7 +58,7 @@ def validate_model_configuration(model_type, kernel_method, prediction_type, kwa
     Parameters
     ----------
     model_type : str
-        One of {'rf', 'et', 'gbt', 'lgbm', 'xgb', 'rotf'}.
+        One of {'rf', 'et', 'gbt', 'lgbm', 'xgb'}.
     kernel_method : str
         One of {'original', 'oob', 'gap', 'kerf', 'boosted'}.
     prediction_type : str
@@ -69,9 +67,9 @@ def validate_model_configuration(model_type, kernel_method, prediction_type, kwa
         Estimator kwargs supplied by the user. These are not modified here,
         only checked when needed for kernel-specific requirements.
     """
-    if model_type not in {"rf", "et", "gbt", "lgbm", "xgb", "rotf"}:
+    if model_type not in {"rf", "et", "gbt", "lgbm", "xgb"}:
         raise ValueError(
-            "model_type must be one of {'rf', 'et', 'gbt', 'lgbm', 'xgb', 'rotf'}"
+            "model_type must be one of {'rf', 'et', 'gbt', 'lgbm', 'xgb'}"
         )
 
     if kernel_method not in {"original", "oob", "gap", "kerf", "boosted"}:
@@ -79,17 +77,14 @@ def validate_model_configuration(model_type, kernel_method, prediction_type, kwa
             "kernel_method must be one of {'original', 'oob', 'gap', 'kerf', 'boosted'}"
         )
 
-    if model_type == "rotf" and prediction_type != "classification":
-        raise ValueError("model_type='rotf' currently supports classification only.")
-
     kwargs = {} if kwargs is None else dict(kwargs)
 
     # ---------------------------------------------------------
-    # RF / ET / Rotation Forest:
+    # RF / ET:
     # all forest-style kernels are allowed, but OOB / GAP need bootstrap
     # ---------------------------------------------------------
-    if model_type in {"rf", "et", "rotf"}:
-        if kernel_method in {"oob", "gap"} and model_type in {"rf", "et"}:
+    if model_type in {"rf", "et"}:
+        if kernel_method in {"oob", "gap"}:
             if "bootstrap" in kwargs and kwargs["bootstrap"] is not True:
                 raise ValueError(
                     f"kernel_method='{kernel_method}' with model_type='{model_type}' "
@@ -149,9 +144,6 @@ def get_base_model(model_type, prediction_type):
             if prediction_type == "classification"
             else XGBRegressor
         )
-
-    if model_type == "rotf":
-        return BaggedRotationForest
 
     raise ValueError(f"Unsupported model_type='{model_type}'")
 
