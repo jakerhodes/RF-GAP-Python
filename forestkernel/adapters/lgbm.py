@@ -31,24 +31,33 @@ class LightGBMAdapter(EnsembleAdapter):
     def _get_leaf_value_maps(self):
         """
         Return one dictionary per tree mapping leaf_index to leaf_value.
-        Uses trees_to_dataframe for robustness against single-node trees.
+        Defensively handles cases where LightGBM produces empty trees or 
+        missing columns in the dataframe dump.
         """
         booster = self._get_booster()
         df = booster.trees_to_dataframe()
         
-        # Filter for rows that represent leaves. 
-        # In LGBM, these have a non-null leaf_index.
-        leaves_df = df[df['leaf_index'].notnull()].copy()
-        
-        maps = []
+        # If the dataframe is empty, return an empty list
+        if df.empty:
+            return []
+
         n_trees = int(df['tree_index'].max() + 1)
+        maps = [{} for _ in range(n_trees)]
+
+        # If 'leaf_index' is missing, it means no trees have splits.
+        # We return the list of empty dicts, which results in 0 variance.
+        if 'leaf_index' not in df.columns:
+            return maps
+            
+        # Filter for rows that represent actual leaves
+        leaves_df = df[df['leaf_index'].notnull()].copy()
         
         for t in range(n_trees):
             tree_leaves = leaves_df[leaves_df['tree_index'] == t]
-            # Map the leaf_index (int) to the pre-shrunken 'value'
-            leaf_map = dict(zip(tree_leaves['leaf_index'].astype(int), 
-                                tree_leaves['value'].astype(np.float32)))
-            maps.append(leaf_map)
+            if not tree_leaves.empty:
+                # Map leaf_index to pre-shrunken 'value'
+                maps[t] = dict(zip(tree_leaves['leaf_index'].astype(int), 
+                                    tree_leaves['value'].astype(np.float32)))
             
         return maps
 
