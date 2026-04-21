@@ -39,6 +39,8 @@ class RFETAdapter(EnsembleAdapter):
         Returns OOB mask matrix of shape (N_train, T), where entry (i,t)=1 if
         sample i is OOB for tree t.
         """
+        if not getattr(self.estimator, "bootstrap", False):
+            raise ValueError("get_oob_mask requires bootstrap=True.")
         n_samples = X_train.shape[0]
         n_trees = len(self.estimator.estimators_)
         oob_mask = np.zeros((n_samples, n_trees), dtype=np.int8)
@@ -58,6 +60,8 @@ class RFETAdapter(EnsembleAdapter):
         Returns in-bag multiplicity matrix of shape (N_train, T), where entry
         (i,t) is the number of times sample i was drawn for tree t.
         """
+        if not getattr(self.estimator, "bootstrap", False):
+            raise ValueError("get_in_bag_counts requires bootstrap=True.")
         n_samples = X_train.shape[0]
         n_trees = len(self.estimator.estimators_)
         counts = np.zeros((n_samples, n_trees), dtype=np.int32)
