@@ -24,7 +24,7 @@ import warnings
 
 
 def RFGAP(prediction_type=None, y=None, prox_method='rfgap', matrix_type='sparse',
-          non_zero_diagonal=False, symm_mode='none', max_normalize=False,
+          non_zero_diagonal=False, symm_mode=None, max_normalize=False,
           model_type='rf', **kwargs):
     """
     Factory function to create an optimized Random Forest or Extra Trees Proximity object.
