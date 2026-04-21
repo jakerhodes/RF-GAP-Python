@@ -42,14 +42,15 @@ If you use this software in your research or experiments, please cite the follow
 ```
 
 ```bibtex
-@misc{aumon2026scalabletreeensembleproximities,
-      title={Scalable Tree Ensemble Proximities in Python}, 
+@misc{aumon2026revisitingforestproximitiessparse,
+      title={Revisiting Forest Proximities via Sparse Leaf-Incidence Kernels}, 
       author={Adrien Aumon and Guy Wolf and Kevin R. Moon and Jake S. Rhodes},
       year={2026},
       eprint={2601.02735},
       archivePrefix={arXiv},
       primaryClass={cs.LG},
-      url={https://arxiv.org/abs/2601.02735}}
+      url={https://arxiv.org/abs/2601.02735}, 
+}
 ```
 
 
