@@ -27,28 +27,35 @@ class LightGBMAdapter(EnsembleAdapter):
         model_dump = booster.dump_model()
         return model_dump["tree_info"]
 
-    def _count_nodes(self, node):
-        """
-        Recursively count all nodes in a LightGBM tree.
-        """
-        if "left_child" not in node and "right_child" not in node:
-            return 1
-        return (
-            1
-            + self._count_nodes(node["left_child"])
-            + self._count_nodes(node["right_child"])
-        )
-
     def _collect_leaf_values(self, node, out):
         """
         Recursively collect a mapping {leaf_index -> leaf_value} for one tree.
+        Handles the case where a tree might be a single leaf.
         """
-        if "left_child" not in node and "right_child" not in node:
+        # If 'leaf_index' is directly in the node, it's a leaf
+        if "leaf_index" in node:
             out[int(node["leaf_index"])] = np.float32(node["leaf_value"])
             return
 
-        self._collect_leaf_values(node["left_child"], out)
-        self._collect_leaf_values(node["right_child"], out)
+        # Otherwise, recurse if children exist
+        if "left_child" in node:
+            self._collect_leaf_values(node["left_child"], out)
+        if "right_child" in node:
+            self._collect_leaf_values(node["right_child"], out)
+
+    def _count_nodes(self, node):
+        """
+        Recursively count all nodes, handling single-leaf trees.
+        """
+        if "leaf_index" in node:
+            return 1
+        
+        count = 1 # Count the current split node
+        if "left_child" in node:
+            count += self._count_nodes(node["left_child"])
+        if "right_child" in node:
+            count += self._count_nodes(node["right_child"])
+        return count
 
     def _get_leaf_value_maps(self):
         """
