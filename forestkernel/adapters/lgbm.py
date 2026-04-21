@@ -66,31 +66,26 @@ class LightGBMAdapter(EnsembleAdapter):
 
     def _predict_tree_outputs(self, X_ref):
         """
-        Return per-tree raw contributions of shape (n_samples, n_trees_total).
+        Return per-tree shrunken contributions of shape (n_samples, n_trees_total).
 
-        This is used to define tree-specific weights. We reconstruct the output
-        of each tree from:
-        - pred_leaf=True assignments
-        - leaf_index -> leaf_value mappings from dump_model()
-
-        Note:
-        LightGBM tree dumps also contain a per-tree 'shrinkage' field. We apply
-        it here so the contribution matches the shrunken boosted update.
-
-        If your particular LightGBM version already stores shrunken leaf values
-        directly in leaf_value, then multiplying by shrinkage would double-count
-        the learning rate. In that case, remove the shrinkage factor below.
+        Following Tan et al. (2020), we reconstruct the contribution h_t(s)
+        for each tree. In LightGBM's dump_model(), the 'leaf_value' already
+        accounts for the learning rate (shrinkage), so we map leaf indices 
+        directly to these values.
         """
+        # leaf_matrix shape: (n_samples, n_trees)
         leaf_matrix = self.get_leaf_matrix(X_ref)
-        tree_info_list = self._get_tree_info_list()
+        # leaf_value_maps is a list of dicts: [{leaf_idx: value}, ...]
         leaf_value_maps = self._get_leaf_value_maps()
 
         n_samples, n_trees = leaf_matrix.shape
         outputs = np.zeros((n_samples, n_trees), dtype=np.float32)
 
-        for t, (tree_info, leaf_map) in enumerate(zip(tree_info_list, leaf_value_maps)):
-            shrinkage = np.float32(tree_info.get("shrinkage", 1.0))
-            outputs[:, t] = shrinkage * np.array(
+        for t, leaf_map in enumerate(leaf_value_maps):
+            # Map the leaf indices to their pre-shrunken values.
+            # We use a list comprehension for the mapping; for massive X_ref,
+            # consider np.vectorize or a lookup array for extra speed.
+            outputs[:, t] = np.array(
                 [leaf_map[int(leaf_idx)] for leaf_idx in leaf_matrix[:, t]],
                 dtype=np.float32,
             )
@@ -145,23 +140,25 @@ class LightGBMAdapter(EnsembleAdapter):
         Notes
         -----
         - This differs from using the squared L2 norm of the tree outputs.
-          The two coincide only when the tree outputs are centered.
+            The two coincide only when the tree outputs are centered.
         - For multiclass LightGBM, the flattened tree list contains
-          class-specific trees from successive boosting rounds, so these
-          weights should be interpreted as per-flattened-tree variance
-          weights.
+            class-specific trees from successive boosting rounds, so these
+            weights should be interpreted as per-flattened-tree variance
+            weights.
         """
+        # contribs shape: (n_samples, n_trees)
         contribs = self._predict_tree_outputs(X_ref)
     
-        # Empirical variance of each tree contribution over the reference set
-        centered = contribs - contribs.mean(axis=0, keepdims=True)
-        weights = np.mean(centered ** 2, axis=0).astype(np.float32)
-    
-        if weights.size == 0:
+        if contribs.shape[1] == 0:
             raise RuntimeError("No trees found in fitted LightGBM model.")
+
+        # Compute empirical variance of each tree contribution
+        weights = np.var(contribs, axis=0).astype(np.float32)
     
+        # Handle edge case where trees might have zero variance (e.g., single-leaf trees)
         total_weight = weights.sum()
-        if total_weight <= 0:
+        if total_weight <= 1e-12:
+            # Fallback to uniform weighting if no variance is found
             weights[:] = 1.0 / len(weights)
         else:
             weights /= total_weight

@@ -1,7 +1,5 @@
 import numpy as np
-
 from .base import EnsembleAdapter
-
 
 class GBTAdapter(EnsembleAdapter):
     """
@@ -25,6 +23,26 @@ class GBTAdapter(EnsembleAdapter):
         """
         tree_list = self._get_tree_list()
         return np.column_stack([tree.apply(X) for tree in tree_list]).astype(np.int32)
+
+    def _predict_tree_outputs(self, X_ref):
+        """
+        Helper to get shrunken tree outputs (learning_rate * tree_output).
+        Used to calculate variance for weights.
+        """
+        leaf_matrix = self.get_leaf_matrix(X_ref)
+        tree_list = self._get_tree_list()
+        lr = np.float32(self.estimator.learning_rate)
+        
+        n_samples, n_trees = leaf_matrix.shape
+        outputs = np.zeros((n_samples, n_trees), dtype=np.float32)
+
+        for t, tree in enumerate(tree_list):
+            # tree.tree_.value has shape (n_nodes, 1, 1)
+            # We map the leaf indices to their corresponding values
+            leaf_values = tree.tree_.value.reshape(-1).astype(np.float32)
+            outputs[:, t] = lr * leaf_values[leaf_matrix[:, t]]
+            
+        return outputs
 
     def get_n_nodes_per_tree(self):
         """
@@ -66,23 +84,17 @@ class GBTAdapter(EnsembleAdapter):
           weights should be interpreted as per-flattened-tree variance
           weights.
         """
-        lr = np.float32(self.estimator.learning_rate)
-        tree_list = self._get_tree_list()
-        weights = []
-    
-        for tree in tree_list:
-            contrib = lr * tree.predict(X_ref).astype(np.float32, copy=False)
-            centered = contrib - contrib.mean()
-            wt = np.mean(centered ** 2, dtype=np.float32)
-            weights.append(wt)
-    
-        weights = np.asarray(weights, dtype=np.float32)
-    
-        if weights.size == 0:
+        # contribs shape: (n_samples, n_trees)
+        contribs = self._predict_tree_outputs(X_ref)
+        
+        if contribs.shape[1] == 0:
             raise RuntimeError("No trees found in fitted GradientBoosting model.")
+
+        # Uniform calculation using np.var (Empirical variance)
+        weights = np.var(contribs, axis=0).astype(np.float32)
     
         total_weight = weights.sum()
-        if total_weight <= 0:
+        if total_weight <= 1e-12:
             weights[:] = 1.0 / len(weights)
         else:
             weights /= total_weight
