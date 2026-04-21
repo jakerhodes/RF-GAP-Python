@@ -53,7 +53,6 @@ def ForestKernel(
     validate_model_configuration(
         model_type=model_type,
         kernel_method=kernel_method,
-        prediction_type=prediction_type,
         kwargs=kwargs,
     )
     base_model = get_base_model(
@@ -106,7 +105,6 @@ def ForestKernel(
             validate_model_configuration(
                 model_type=self.model_type,
                 kernel_method=next_kernel_method,
-                prediction_type=self.prediction_type,
                 kwargs=self.model_kwargs,
             )
 
