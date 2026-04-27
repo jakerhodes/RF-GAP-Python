@@ -79,9 +79,3 @@ class RFETAdapter(EnsembleAdapter):
 
     def get_tree_weights(self, X_ref):
         raise ValueError("Tree weights are not defined for RandomForest / ExtraTrees.")
-
-    def supports_oob(self):
-        return True
-
-    def supports_in_bag_counts(self):
-        return True

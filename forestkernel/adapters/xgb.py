@@ -3,8 +3,13 @@ from .base import EnsembleAdapter
 
 class XGBoostAdapter(EnsembleAdapter):
     """
-    Adapter for XGBoost sklearn-style estimators such as
-    xgboost.XGBClassifier and xgboost.XGBRegressor.
+    Adapter for XGBoost sklearn-style estimators.
+
+    Notes
+    -----
+    XGBoost typically grows trees depth-wise by default. This can produce
+    more balanced leaves than LightGBM, which may increase shared-leaf
+    collisions and yield denser forest kernels.
     """
 
     def _get_booster(self):
@@ -120,6 +125,3 @@ class XGBoostAdapter(EnsembleAdapter):
             weights /= total_weight
     
         return weights.astype(np.float32)
-
-    def supports_tree_weights(self):
-        return True

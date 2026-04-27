@@ -1,11 +1,14 @@
 import numpy as np
 from .base import EnsembleAdapter
 
+import numpy as np
+from .base import EnsembleAdapter
+
+
 class GBTAdapter(EnsembleAdapter):
     """
-    Adapter for sklearn GradientBoosting ensembles.
+    Adapter for sklearn GradientBoosting estimators.
     """
-
     def _get_tree_list(self):
         """
         Flatten sklearn GBT estimators_ into a single list of trees.
@@ -100,6 +103,3 @@ class GBTAdapter(EnsembleAdapter):
             weights /= total_weight
     
         return weights.astype(np.float32)
-
-    def supports_tree_weights(self):
-        return True

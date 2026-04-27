@@ -2,7 +2,7 @@ class EnsembleAdapter:
     """
     Base adapter interface used to abstract away ensemble-specific internals.
 
-    Each adapter wraps a fitted ForestKernel estimator instance and exposes a
+    Each adapter wraps a fitted estimator instance and exposes a
     unified interface for:
     - retrieving leaf indices
     - retrieving per-tree node counts
@@ -50,12 +50,6 @@ class EnsembleAdapter:
         Only relevant for some ensembles such as Gradient Boosting.
         """
         raise NotImplementedError
-
-    def supports_oob(self):
-        return False
-
-    def supports_in_bag_counts(self):
-        return False
-
-    def supports_tree_weights(self):
-        return False
+    
+    def __getattr__(self, name):
+        return getattr(self.estimator, name)

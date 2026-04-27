@@ -114,7 +114,7 @@ def attach_inv_inbag_leaf_mass(cache):
     return cache
 
 
-def build_W_matrix(cache, kernel_method):
+def build_W_matrix(cache, weight_scheme):
     """
     Builds the raw Weight Matrix W (N_ref x N_total_nodes).
 
@@ -124,7 +124,7 @@ def build_W_matrix(cache, kernel_method):
     Parameters
     ----------
     cache : KernelCache
-    kernel_method : str
+    weight_scheme : str
         One of {'original', 'oob', 'gap', 'kerf', 'boosted'}
 
     Returns
@@ -149,7 +149,7 @@ def build_W_matrix(cache, kernel_method):
     #   Use a symmetric factorization with sqrt(1/T) on both sides.
     #   W handles the target/reference side.
     # ---------------------------------------------------------
-    if kernel_method == "original":
+    if weight_scheme == "original":
         scale_factor = np.float32(1.0 / np.sqrt(T))
         weights = np.full(N * T, scale_factor, dtype=np.float32)
 
@@ -160,9 +160,9 @@ def build_W_matrix(cache, kernel_method):
     # Mapping:
     #   Use a symmetric factorization with sqrt(w_t) on both sides.
     # ---------------------------------------------------------
-    elif kernel_method == "boosted":
+    elif weight_scheme == "boosted":
         if cache.boosted_tree_weights is None:
-            raise ValueError("cache.boosted_tree_weights is required for kernel_method='boosted'.")
+            raise ValueError("cache.boosted_tree_weights is required for weight_scheme='boosted'.")
         sqrt_w = np.sqrt(cache.boosted_tree_weights).astype(np.float32)
         weights = np.tile(sqrt_w, N)
 
@@ -175,9 +175,9 @@ def build_W_matrix(cache, kernel_method):
     #       1/sqrt(T) * 1/sqrt(M_leaf)
     #   on both Q and W.
     # ---------------------------------------------------------
-    elif kernel_method == "kerf":
+    elif weight_scheme == "kerf":
         if cache.inv_sqrt_leaf_mass is None:
-            raise ValueError("cache.inv_sqrt_leaf_mass is required for kernel_method='kerf'.")
+            raise ValueError("cache.inv_sqrt_leaf_mass is required for weight_scheme='kerf'.")
         weights = (1.0 / np.sqrt(T)) * cache.inv_sqrt_leaf_mass[flat_cols]
 
     # ---------------------------------------------------------
@@ -189,9 +189,9 @@ def build_W_matrix(cache, kernel_method):
     # Let M_j = number of OOB trees for sample j.
     # Then W carries sqrt(T) / M_j on the retained sample-tree incidences.
     # ---------------------------------------------------------
-    elif kernel_method == "oob":
+    elif weight_scheme == "oob":
         if cache.oob_mask is None:
-            raise ValueError("cache.oob_mask is required for kernel_method='oob'.")
+            raise ValueError("cache.oob_mask is required for weight_scheme='oob'.")
 
         # Apply OOB scope on the reference side: keep only OOB trees for each j.
         mask = cache.oob_mask.flatten() == 1
@@ -215,17 +215,17 @@ def build_W_matrix(cache, kernel_method):
     #
     #   on each sample-tree incidence.
     # ---------------------------------------------------------
-    elif kernel_method == "gap":
+    elif weight_scheme == "gap":
         if cache.inbag_counts is None:
-            raise ValueError("cache.inbag_counts is required for kernel_method='gap'.")
+            raise ValueError("cache.inbag_counts is required for weight_scheme='gap'.")
         if cache.inv_inbag_leaf_mass is None:
-            raise ValueError("cache.inv_inbag_leaf_mass is required for kernel_method='gap'.")
+            raise ValueError("cache.inv_inbag_leaf_mass is required for weight_scheme='gap'.")
 
         c_j_t = cache.inbag_counts.flatten().astype(np.float32, copy=False)
         weights = c_j_t * cache.inv_inbag_leaf_mass[flat_cols]
 
     else:
-        raise ValueError(f"Unknown kernel_method='{kernel_method}'.")
+        raise ValueError(f"Unknown weight_scheme='{weight_scheme}'.")
 
     mask = weights != 0
     W_mat = sparse.csr_matrix(
@@ -238,7 +238,7 @@ def build_W_matrix(cache, kernel_method):
 
 def build_Q_matrix(
     cache,
-    kernel_method,
+    weight_scheme,
     leaves=None,
     is_training=True,
 ):
@@ -251,7 +251,7 @@ def build_Q_matrix(
     Parameters
     ----------
     cache : KernelCache
-    kernel_method : str
+    weight_scheme : str
         One of {'original', 'oob', 'gap', 'kerf', 'boosted'}
     leaves : ndarray of shape (N_query, T), optional
         Query leaf matrix. If None, uses cache.leaf_matrix.
@@ -282,7 +282,7 @@ def build_Q_matrix(
     #   Use the same symmetric factorization as W:
     #       sqrt(1/T)
     # ---------------------------------------------------------
-    if kernel_method == "original":
+    if weight_scheme == "original":
         scale_factor = np.float32(1.0 / np.sqrt(T))
         vals = np.full(N * T, scale_factor, dtype=np.float32)
 
@@ -293,9 +293,9 @@ def build_Q_matrix(
     # Mapping:
     #   Use sqrt(w_t) on the query side too.
     # ---------------------------------------------------------
-    elif kernel_method == "boosted":
+    elif weight_scheme == "boosted":
         if cache.boosted_tree_weights is None:
-            raise ValueError("cache.boosted_tree_weights is required for kernel_method='boosted'.")
+            raise ValueError("cache.boosted_tree_weights is required for weight_scheme='boosted'.")
         sqrt_w = np.sqrt(cache.boosted_tree_weights).astype(np.float32)
         vals = np.tile(sqrt_w, N)
 
@@ -307,9 +307,9 @@ def build_Q_matrix(
     #   Same symmetric factorization as W:
     #       1/sqrt(T) * 1/sqrt(M_leaf)
     # ---------------------------------------------------------
-    elif kernel_method == "kerf":
+    elif weight_scheme == "kerf":
         if cache.inv_sqrt_leaf_mass is None:
-            raise ValueError("cache.inv_sqrt_leaf_mass is required for kernel_method='kerf'.")
+            raise ValueError("cache.inv_sqrt_leaf_mass is required for weight_scheme='kerf'.")
         vals = (1.0 / np.sqrt(T)) * cache.inv_sqrt_leaf_mass[flat_cols]
 
     # ---------------------------------------------------------
@@ -323,10 +323,10 @@ def build_Q_matrix(
     # If is_training=False:
     #   By convention, new points are treated as OOB for all trees, so |S_i| = T.
     # ---------------------------------------------------------
-    elif kernel_method == "oob":
+    elif weight_scheme == "oob":
         if is_training:
             if cache.oob_mask is None:
-                raise ValueError("cache.oob_mask is required for training-time kernel_method='oob'.")
+                raise ValueError("cache.oob_mask is required for training-time weight_scheme='oob'.")
 
             # Apply OOB scope on the query side: keep only OOB trees for each i.
             mask = cache.oob_mask.flatten() == 1
@@ -356,10 +356,10 @@ def build_Q_matrix(
     #   - the OOB set of sample i during training
     #   - all trees for extension points
     # ---------------------------------------------------------
-    elif kernel_method == "gap":
+    elif weight_scheme == "gap":
         if is_training:
             if cache.oob_mask is None:
-                raise ValueError("cache.oob_mask is required for training-time kernel_method='gap'.")
+                raise ValueError("cache.oob_mask is required for training-time weight_scheme='gap'.")
 
             mask = cache.oob_mask.flatten() == 1
             flat_rows = flat_rows[mask]
@@ -374,7 +374,7 @@ def build_Q_matrix(
             vals = np.full(N * T, 1.0 / T, dtype=np.float32)
 
     else:
-        raise ValueError(f"Unknown kernel_method='{kernel_method}'.")
+        raise ValueError(f"Unknown weight_scheme='{weight_scheme}'.")
 
     mask = vals != 0
     Q = sparse.csr_matrix(
@@ -385,7 +385,7 @@ def build_Q_matrix(
     return Q
 
 
-def augment_kernel_maps(cache, kernel_method, Q, W, adjust_diagonal=False, is_training=True):
+def augment_leaf_maps(cache, weight_scheme, Q, W, adjust_diagonal=False, is_training=True):
     """
     Optionally augment raw query/reference maps with private diagonal
     correction coordinates for exact kernel construction.
@@ -397,7 +397,7 @@ def augment_kernel_maps(cache, kernel_method, Q, W, adjust_diagonal=False, is_tr
     Parameters
     ----------
     cache : KernelCache
-    kernel_method : str
+    weight_scheme : str
         One of {'original', 'oob', 'gap', 'kerf', 'boosted'}
     Q : scipy.sparse.csr_matrix
         Raw query-side map.
@@ -416,7 +416,7 @@ def augment_kernel_maps(cache, kernel_method, Q, W, adjust_diagonal=False, is_tr
     if not adjust_diagonal:
         return Q, W
 
-    if kernel_method not in {"oob", "gap"}:
+    if weight_scheme not in {"oob", "gap"}:
         return Q, W
 
     n_ref = cache.n_samples
@@ -444,9 +444,9 @@ def augment_kernel_maps(cache, kernel_method, Q, W, adjust_diagonal=False, is_tr
     # ---------------------------------------------------------
     # Reference-side augmentation
     # ---------------------------------------------------------
-    if kernel_method == "oob":
+    if weight_scheme == "oob":
         if cache.oob_mask is None:
-            raise ValueError("cache.oob_mask is required for kernel_method='oob'.")
+            raise ValueError("cache.oob_mask is required for weight_scheme='oob'.")
 
         T = cache.n_trees
         M = cache.oob_mask.sum(axis=1).astype(np.float32)
@@ -454,9 +454,9 @@ def augment_kernel_maps(cache, kernel_method, Q, W, adjust_diagonal=False, is_tr
         raw_diag = (T / M).astype(np.float32)
         diag_vals_w = (1.0 - raw_diag).astype(np.float32)
 
-    elif kernel_method == "gap":
+    elif weight_scheme == "gap":
         if cache.inbag_counts is None:
-            raise ValueError("cache.inbag_counts is required for kernel_method='gap'.")
+            raise ValueError("cache.inbag_counts is required for weight_scheme='gap'.")
 
         row_sums = np.asarray(W.sum(axis=1)).ravel().astype(np.float32)
         inbag_counts_per_row = (cache.inbag_counts > 0).sum(axis=1).astype(np.float32)

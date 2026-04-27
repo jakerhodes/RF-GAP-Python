@@ -8,14 +8,9 @@ from .builders import (
     attach_inv_inbag_leaf_mass,
     build_W_matrix,
     build_Q_matrix,
-    augment_kernel_maps
+    augment_leaf_maps
 )
 from .sparse_utils import (
-    csr_row_scale_inplace,
     block_symmetrize,
     format_output_matrix
-)
-
-from .prediction import (
-    row_normalize_kernel_block, kernel_predict_regression, kernel_predict_classification
 )

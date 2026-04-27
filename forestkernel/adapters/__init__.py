@@ -5,17 +5,17 @@ from .xgb import XGBoostAdapter
 
 
 
-def make_adapter(estimator, model_type):
+def make_adapter(estimator, forest_type):
     """
     Factory returning the correct ensemble adapter for the fitted estimator.
     """
-    if model_type in ("rf", "et"):
+    if forest_type in ("rf", "et"):
         return RFETAdapter(estimator)
-    if model_type == "gbt":
+    if forest_type == "gbt":
         return GBTAdapter(estimator)
-    if model_type == "lgbm":
+    if forest_type == "lgbm":
         return LightGBMAdapter(estimator)
-    if model_type == "xgb":
+    if forest_type == "xgb":
         return XGBoostAdapter(estimator)
     
-    raise ValueError(f"Unsupported model_type: {model_type}")
+    raise ValueError(f"Unsupported forest_type: {forest_type}")

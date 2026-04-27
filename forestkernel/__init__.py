@@ -1,2 +1,2 @@
-from .forestkernel import ForestKernel
+from .encoder import LeafEncoder
 from .impute import gap_impute

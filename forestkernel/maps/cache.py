@@ -48,8 +48,9 @@ class KernelCache:
     boosted_tree_weights: Optional[np.ndarray] = None
 
     # ------------------------------------------------------------------
-    # Sparse right factor
+    # Sparse training query Q and reference W leaf-incidence matrices
     # ------------------------------------------------------------------
+    Q_mat: Optional[sparse.csr_matrix] = None
     W_mat: Optional[sparse.csr_matrix] = None
 
     # ------------------------------------------------------------------

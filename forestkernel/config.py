@@ -50,28 +50,28 @@ def infer_prediction_type(prediction_type=None, y=None):
         return "classification"
 
 
-def validate_model_configuration(model_type, kernel_method, kwargs=None):
+def validate_model_configuration(forest_type, weight_scheme, kwargs=None):
     """
-    Validate the high-level compatibility between model_type, kernel_method, and a few kernel-specific estimator requirements.
+    Validate the high-level compatibility between forest_type, weight_scheme, and a few kernel-specific estimator requirements.
 
     Parameters
     ----------
-    model_type : str
+    forest_type : str
         One of {'rf', 'et', 'gbt', 'lgbm', 'xgb'}.
-    kernel_method : str
+    weight_scheme : str
         One of {'original', 'oob', 'gap', 'kerf', 'boosted'}.
     kwargs : dict or None
         Estimator kwargs supplied by the user. These are not modified here,
         only checked when needed for kernel-specific requirements.
     """
-    if model_type not in {"rf", "et", "gbt", "lgbm", "xgb"}:
+    if forest_type not in {"rf", "et", "gbt", "lgbm", "xgb"}:
         raise ValueError(
-            "model_type must be one of {'rf', 'et', 'gbt', 'lgbm', 'xgb'}"
+            "forest_type must be one of {'rf', 'et', 'gbt', 'lgbm', 'xgb'}"
         )
 
-    if kernel_method not in {"original", "oob", "gap", "kerf", "boosted"}:
+    if weight_scheme not in {"original", "oob", "gap", "kerf", "boosted"}:
         raise ValueError(
-            "kernel_method must be one of {'original', 'oob', 'gap', 'kerf', 'boosted'}"
+            "weight_scheme must be one of {'original', 'oob', 'gap', 'kerf', 'boosted'}"
         )
 
     kwargs = {} if kwargs is None else dict(kwargs)
@@ -80,11 +80,11 @@ def validate_model_configuration(model_type, kernel_method, kwargs=None):
     # RF / ET:
     # all forest-style kernels are allowed, but OOB / GAP need bootstrap
     # ---------------------------------------------------------
-    if model_type in {"rf", "et"}:
-        if kernel_method in {"oob", "gap"}:
+    if forest_type in {"rf", "et"}:
+        if weight_scheme in {"oob", "gap"}:
             if "bootstrap" in kwargs and kwargs["bootstrap"] is not True:
                 raise ValueError(
-                    f"kernel_method='{kernel_method}' with model_type='{model_type}' "
+                    f"weight_scheme='{weight_scheme}' with forest_type='{forest_type}' "
                     "requires bootstrap=True."
                 )
         return
@@ -93,59 +93,59 @@ def validate_model_configuration(model_type, kernel_method, kwargs=None):
     # Boosted-tree models:
     # allow leaf-based kernels that do not require OOB / in-bag structure
     # ---------------------------------------------------------
-    if model_type in {"gbt", "lgbm", "xgb"}:
-        if kernel_method in {"oob", "gap"}:
+    if forest_type in {"gbt", "lgbm", "xgb"}:
+        if weight_scheme in {"oob", "gap"}:
             raise ValueError(
-                f"kernel_method='{kernel_method}' is not supported for "
-                f"model_type='{model_type}' because boosted trees do not provide "
+                f"weight_scheme='{weight_scheme}' is not supported for "
+                f"forest_type='{forest_type}' because boosted trees do not provide "
                 "the RF-style OOB / in-bag structure required by these kernels."
             )
         return
 
 
-def get_base_model(model_type, prediction_type):
+def get_base_model(forest_type, prediction_type):
     """
-    Return the base estimator class corresponding to model_type / prediction_type.
+    Return the base estimator class corresponding to forest_type / prediction_type.
     """
-    if model_type == "rf":
+    if forest_type == "rf":
         return (
             RandomForestClassifier
             if prediction_type == "classification"
             else RandomForestRegressor
         )
 
-    if model_type == "et":
+    if forest_type == "et":
         return (
             ExtraTreesClassifier
             if prediction_type == "classification"
             else ExtraTreesRegressor
         )
 
-    if model_type == "gbt":
+    if forest_type == "gbt":
         return (
             GradientBoostingClassifier
             if prediction_type == "classification"
             else GradientBoostingRegressor
         )
 
-    if model_type == "lgbm":
+    if forest_type == "lgbm":
         return (
             LGBMClassifier
             if prediction_type == "classification"
             else LGBMRegressor
         )
 
-    if model_type == "xgb":
+    if forest_type == "xgb":
         return (
             XGBClassifier
             if prediction_type == "classification"
             else XGBRegressor
         )
 
-    raise ValueError(f"Unsupported model_type='{model_type}'")
+    raise ValueError(f"Unsupported forest_type='{forest_type}'")
 
 
-def validate_model_kwargs(base_model, kwargs, extra_allowed=None):
+def validate_forest_kwargs(base_model, kwargs, extra_allowed=None):
     """
     Validate kwargs against the constructor signature of the selected base model.
 

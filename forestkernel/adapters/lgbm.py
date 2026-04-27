@@ -3,8 +3,13 @@ from .base import EnsembleAdapter
 
 class LightGBMAdapter(EnsembleAdapter):
     """
-    Adapter for LightGBM sklearn-style estimators such as
-    lightgbm.LGBMClassifier and lightgbm.LGBMRegressor.
+    Adapter for LightGBM sklearn-style estimators.
+
+    Notes
+    -----
+    LightGBM uses leaf-wise tree growth by default. This can produce more
+    specialized leaves than depth-wise/tree-level methods, which may reduce
+    the number of shared-leaf collisions and yield sparser forest kernels.
     """
 
     def _get_booster(self):
@@ -29,36 +34,23 @@ class LightGBMAdapter(EnsembleAdapter):
         return leaf_matrix
 
     def _get_leaf_value_maps(self):
-        """
-        Return one dictionary per tree mapping leaf_index to leaf_value.
-        Defensively handles cases where LightGBM produces empty trees or 
-        missing columns in the dataframe dump.
-        """
         booster = self._get_booster()
-        df = booster.trees_to_dataframe()
-        
-        # If the dataframe is empty, return an empty list
-        if df.empty:
-            return []
-
-        n_trees = int(df['tree_index'].max() + 1)
-        maps = [{} for _ in range(n_trees)]
-
-        # If 'leaf_index' is missing, it means no trees have splits.
-        # We return the list of empty dicts, which results in 0 variance.
-        if 'leaf_index' not in df.columns:
-            return maps
-            
-        # Filter for rows that represent actual leaves
-        leaves_df = df[df['leaf_index'].notnull()].copy()
-        
-        for t in range(n_trees):
-            tree_leaves = leaves_df[leaves_df['tree_index'] == t]
-            if not tree_leaves.empty:
-                # Map leaf_index to pre-shrunken 'value'
-                maps[t] = dict(zip(tree_leaves['leaf_index'].astype(int), 
-                                    tree_leaves['value'].astype(np.float32)))
-            
+        tree_info = booster.dump_model()["tree_info"]
+    
+        maps = []
+    
+        def collect_leaves(node, out):
+            if "leaf_index" in node:
+                out[int(node["leaf_index"])] = float(node["leaf_value"])
+                return
+            collect_leaves(node["left_child"], out)
+            collect_leaves(node["right_child"], out)
+    
+        for tree in tree_info:
+            out = {}
+            collect_leaves(tree["tree_structure"], out)
+            maps.append(out)
+    
         return maps
 
     def _predict_tree_outputs(self, X_ref):
@@ -114,12 +106,3 @@ class LightGBMAdapter(EnsembleAdapter):
             weights /= total_weight
     
         return weights.astype(np.float32)
-
-    def supports_oob(self):
-        return False
-
-    def supports_in_bag_counts(self):
-        return False
-
-    def supports_tree_weights(self):
-        return True

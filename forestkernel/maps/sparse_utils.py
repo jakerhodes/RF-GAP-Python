@@ -2,19 +2,6 @@ import numpy as np
 from scipy import sparse
 
 
-def csr_row_scale_inplace(A, scale):
-    """
-    In-place row scaling of a CSR matrix.
-    A[i, :] *= scale[i]
-    """
-    if not sparse.isspmatrix_csr(A):
-        raise ValueError("Matrix must be CSR for in-place scaling.")
-
-    scale = np.asarray(scale, dtype=A.data.dtype)
-    nnz_per_row = np.diff(A.indptr)
-    A.data *= np.repeat(scale, nnz_per_row)
-
-
 def block_symmetrize(Q, W):
     """
     Computes symmetric 'kernel' P using optimized sparse strategies.
