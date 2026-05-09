@@ -147,12 +147,7 @@ def dataprep(
     continuous_numeric_cols = [c for c in continuous_numeric_cols if c in df.columns]
 
     # ---------------------------------------------------------
-    # 4. Cast to float32
-    # ---------------------------------------------------------
-    df = df.astype(np.float32)
-
-    # ---------------------------------------------------------
-    # 5. Scale only continuous numeric columns
+    # 4. Scale only continuous numeric columns
     # ---------------------------------------------------------
     if scale == "standardize":
         if len(continuous_numeric_cols) > 0:
@@ -230,7 +225,7 @@ def dataprep(
     # ---------------------------------------------------------
     # 6. Return NumPy arrays
     # ---------------------------------------------------------
-    X = df.to_numpy(dtype=np.float32)
+    X = df.to_numpy()
 
     if y is not None:
         return X, y
