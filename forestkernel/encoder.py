@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import numpy as np
 
-from .extras import GAPExtrasMixin
+from .extras import KernelDiagnosticsMixin
 from .config import (
     infer_prediction_type,
     validate_model_configuration,
@@ -31,7 +31,7 @@ from .prediction import (
 )
 
 
-class LeafEncoder(GAPExtrasMixin):
+class LeafEncoder(KernelDiagnosticsMixin):
     """
     Sparse forest leaf encoder.
 
