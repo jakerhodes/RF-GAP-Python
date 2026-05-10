@@ -45,8 +45,12 @@ class LightGBMAdapter(EnsembleAdapter):
             if "leaf_index" in node:
                 out[int(node["leaf_index"])] = float(node["leaf_value"])
                 return
-            collect_leaves(node["left_child"], out)
-            collect_leaves(node["right_child"], out)
+        
+            if "left_child" in node:
+                collect_leaves(node["left_child"], out)
+        
+            if "right_child" in node:
+                collect_leaves(node["right_child"], out)
     
         for tree in tree_info:
             out = {}
