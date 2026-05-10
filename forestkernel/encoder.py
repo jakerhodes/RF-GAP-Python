@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import numpy as np
+from sklearn.base import BaseEstimator
 
 from .config import (
     infer_prediction_type,
@@ -23,15 +24,9 @@ from .maps import (
     block_symmetrize,
     format_output_matrix,
 )
-from .extras.prediction import (
-    kernel_predict_reg,
-    kernel_predict_cls,
-    kernel_predict_proba_cls,
-)
-from .extras.diagnostics import KernelDiagnostics
 
 
-class LeafEncoder:
+class LeafEncoder(BaseEstimator):
     """
     Sparse forest leaf encoder.
 
@@ -46,8 +41,8 @@ class LeafEncoder:
 
     The encoder provides direct access to the leaf maps Q and W for custom downstream tasks
     (e.g., kernel methods, manifold learning, dimensionality reduction, visualization...),
-    as well as higher-level utilities such as `kernel()` and `kernel_predict()`
-    for more standard use cases.
+    as well as higher-level utilities such as `kernel()` and `kernel_extend()` for explicitly
+    computing the kernel/proximity matrix P in dense or sparse form.
 
     While forming P is more expensive than working with the sparse maps directly,
     the sparse factorization keeps construction much more scalable than explicit,
@@ -88,9 +83,6 @@ class LeafEncoder:
         self.X_fit_ = None
         self.y_ = None
         self.classes_ = None
-
-        # Secondary diagnostics object, built on demand in the `diagnostics` property.
-        self._diagnostics = None
 
 
     def _check_forest_fitted(self):
@@ -352,65 +344,6 @@ class LeafEncoder:
 
         return self._format(P, return_dense=return_dense)
 
-    def kernel_predict(self, X):
-        """
-        Predict by kernel-weighted voting or averaging without materializing
-        the full kernel matrix.
-        """
-        self._check_fitted()
-
-        Q = self.transform(X, return_dense=False)
-        W = self.cache_.W_mat
-        y_ref = self.y_
-
-        if self.prediction_type == "regression":
-            return kernel_predict_reg(
-                Q,
-                W,
-                y_ref,
-                weight_scheme=self.weight_scheme,
-            )
-
-        return kernel_predict_cls(
-            Q,
-            W,
-            y_ref,
-            weight_scheme=self.weight_scheme,
-        )
-
-    def kernel_predict_proba(self, X):
-        """
-        Predict kernel-weighted class probabilities without materializing
-        the full kernel matrix.
-        """
-        self._check_fitted()
-
-        if self.prediction_type == "regression":
-            raise AttributeError(
-                "`kernel_predict_proba` is only available for classification."
-            )
-
-        Q = self.transform(X, return_dense=False)
-        W = self.cache_.W_mat
-        y_ref = self.y_
-
-        proba, _ = kernel_predict_proba_cls(
-            Q,
-            W,
-            y_ref,
-            weight_scheme=self.weight_scheme,
-        )
-
-        return proba
-    
-    @property
-    def diagnostics(self):
-        """
-        Return diagnostic utilities bound to this encoder.
-        """
-        if self._diagnostics is None:
-            self._diagnostics = KernelDiagnostics(self)
-        return self._diagnostics
 
     # sklearn compatibility methods, useful for hyperparameter tuning with GridSearchCV, etc.
     def get_params(self, deep=True):
@@ -434,6 +367,5 @@ class LeafEncoder:
         self.X_fit_ = None
         self.y_ = None
         self.classes_ = None
-        self._diagnostics = None
     
         return self

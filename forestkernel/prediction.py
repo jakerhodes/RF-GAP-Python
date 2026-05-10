@@ -52,7 +52,7 @@ def _validate_shapes(W, y_train):
         )
 
 
-def kernel_predict_reg(Q, W, y_train, weight_scheme):
+def _kernel_predict_reg(Q, W, y_train, weight_scheme):
     """
     Kernel-weighted regression using
 
@@ -76,7 +76,7 @@ def kernel_predict_reg(Q, W, y_train, weight_scheme):
     return preds
 
 
-def kernel_predict_proba_cls(Q, W, y_train, weight_scheme):
+def _kernel_predict_proba_cls(Q, W, y_train, weight_scheme):
     """
     Kernel-weighted class probabilities using
 
@@ -118,19 +118,16 @@ def kernel_predict_proba_cls(Q, W, y_train, weight_scheme):
     return proba, classes
 
 
-def kernel_predict_cls(Q, W, y_train, weight_scheme):
-    """
-    Kernel-weighted classification using
+def kernel_predict(Q, W, y_train, weight_scheme, prediction_type, return_proba=False):
+    if prediction_type == "regression":
+        if return_proba:
+            raise ValueError("`return_proba=True` is only valid for classification.")
+        return _kernel_predict_reg(Q, W, y_train, weight_scheme)
 
-        P Y = Q (W^T Y),
+    if prediction_type == "classification":
+        proba, classes = _kernel_predict_proba_cls(Q, W, y_train, weight_scheme)
+        if return_proba:
+            return proba, classes
+        return classes[np.argmax(proba, axis=1)]
 
-    without materializing P = Q W^T.
-    """
-    proba, classes = kernel_predict_proba_cls(
-        Q,
-        W,
-        y_train,
-        weight_scheme=weight_scheme,
-    )
-
-    return classes[np.argmax(proba, axis=1)]
+    raise ValueError("prediction_type must be 'classification' or 'regression'.")
