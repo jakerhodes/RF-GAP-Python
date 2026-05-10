@@ -301,7 +301,7 @@ def gap_impute(x, y, n_iters=10, initialization='median', global_initialization=
         missing_test = get_missing(x_test)
     
     # Initialize Random Forest model for RF-GAP imputation
-    rf = ForestKernel(y = y, matrix_type = 'dense', oob_score = True, random_state=random_state, **kwargs)
+    rf = LeafEncoder(y = y, matrix_type = 'dense', oob_score = True, random_state=random_state, **kwargs)
     
     # Dictionary to store metrics during iterations
     scores = {

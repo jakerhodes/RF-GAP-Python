@@ -23,13 +23,12 @@ from .maps import (
     block_symmetrize,
     format_output_matrix,
 )
-from .prediction import (
+from .extras.prediction import (
     kernel_predict_reg,
     kernel_predict_cls,
     kernel_predict_proba_cls,
 )
-
-from .extras import KernelDiagnostics
+from .extras.diagnostics import KernelDiagnostics
 
 
 class LeafEncoder:

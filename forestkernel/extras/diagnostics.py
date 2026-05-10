@@ -232,6 +232,45 @@ class KernelDiagnostics:
     # ------------------------------------------------------------------
     # Nonconformity / conformity scores
     # ------------------------------------------------------------------
+    @staticmethod
+    def _row_normalize_sparse_max(K):
+        K = K.tocsr(copy=True)
+        row_max = K.max(axis=1).toarray().ravel()
+        row_max[row_max == 0.0] = 1.0
+        inv = 1.0 / row_max
+        K = sparse.diags(inv) @ K
+        return K
+    
+    @staticmethod
+    def _sparse_topk_mean(K, k):
+        """
+        Dense-equivalent row-wise top-k mean for sparse input.
+    
+        Missing entries are treated as zeros, matching:
+            np.partition(K_dense, -k, axis=1)[:, -k:].mean(axis=1)
+        """
+        K = K.tocsr()
+        n_rows, n_cols = K.shape
+        k_eff = min(k, n_cols)
+        out = np.zeros(n_rows, dtype=float)
+        for i in range(n_rows):
+            start, end = K.indptr[i], K.indptr[i + 1]
+            row = K.data[start:end]
+            m = row.size
+            if k_eff == 0:
+                continue
+            if m == 0:
+                continue
+            if m >= k_eff:
+                topk = np.partition(row, m - k_eff)[m - k_eff:]
+                out[i] = topk.mean()
+            else:
+                # Dense-equivalent behavior:
+                # top-k contains all nonzeros plus k_eff - m implicit zeros.
+                out[i] = row.sum() / k_eff
+    
+        return out
+    
     def get_nonconformity(self, k=5, X_test=None, weight_scheme=None):
         """
         Compute class-wise nonconformity scores from forest kernels.
@@ -255,11 +294,8 @@ class KernelDiagnostics:
             self.oob_proba = oob_proba
             self.oob_predictions = np.argmax(oob_proba, axis=1)
 
-            K = self.kernel(return_dense=True)
-
-            row_max = np.max(K, axis=1, keepdims=True)
-            row_max[row_max == 0.0] = 1.0
-            K = K / row_max
+            K = self.kernel(return_dense=False)
+            K = self._row_normalize_sparse_max(K)
 
             y = self.y_
             self.nonconformity_scores = np.zeros_like(y, dtype=float)
@@ -267,14 +303,11 @@ class KernelDiagnostics:
             for label in np.unique(y):
                 mask = y == label
 
-                same_K = K[:, mask]
-                diff_K = K[:, ~mask]
-
-                same_k = np.partition(same_K, -k, axis=1)[:, -k:]
-                diff_k = np.partition(diff_K, -k, axis=1)[:, -k:]
-
-                same_mean = np.mean(same_k, axis=1)[mask]
-                diff_mean = np.mean(diff_k, axis=1)[mask]
+                same_mean_all = self._sparse_topk_mean(K[:, mask], k)
+                diff_mean_all = self._sparse_topk_mean(K[:, ~mask], k)
+                
+                same_mean = same_mean_all[mask]
+                diff_mean = diff_mean_all[mask]
 
                 min_nonzero = np.min(same_mean[same_mean > 0], initial=1e-10)
                 same_mean = np.where(same_mean == 0.0, min_nonzero, same_mean)
@@ -301,11 +334,8 @@ class KernelDiagnostics:
             if X_test is not None:
                 self.test_preds = self.forest_.predict(X_test)
 
-                K_test = self.kernel_extend(X_test, return_dense=True)
-
-                row_max_test = np.max(K_test, axis=1, keepdims=True)
-                row_max_test[row_max_test == 0.0] = 1.0
-                K_test = K_test / row_max_test
+                K_test = self.kernel_extend(X_test, return_dense=False)
+                K_test = self._row_normalize_sparse_max(K_test)
 
                 self.nonconformity_scores_test = np.zeros_like(
                     self.test_preds,
@@ -317,14 +347,8 @@ class KernelDiagnostics:
                     mask_train_same = y == label
                     mask_train_diff = y != label
 
-                    same_K = K_test[:, mask_train_same]
-                    diff_K = K_test[:, mask_train_diff]
-
-                    same_k = np.partition(same_K, -k, axis=1)[:, -k:]
-                    diff_k = np.partition(diff_K, -k, axis=1)[:, -k:]
-
-                    same_mean_all = np.mean(same_k, axis=1)
-                    diff_mean_all = np.mean(diff_k, axis=1)
+                    same_mean_all = self._sparse_topk_mean(K_test[:, mask_train_same], k)
+                    diff_mean_all = self._sparse_topk_mean(K_test[:, mask_train_diff], k)
 
                     same_mean = same_mean_all[mask_test]
                     diff_mean = diff_mean_all[mask_test]
