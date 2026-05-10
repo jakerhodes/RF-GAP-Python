@@ -1,8 +1,8 @@
 from sklearn.base import ClassifierMixin, RegressorMixin, is_classifier, is_regressor
 
-from .encoder import LeafEncoder
-from .prediction import kernel_predict
-from .extras.diagnostics import KernelDiagnostics
+from ..encoder import LeafEncoder
+from .functional import kernel_predict
+from .diagnostics import KernelDiagnostics
 
 
 class KernelClassifier(ClassifierMixin, LeafEncoder):
