@@ -145,6 +145,8 @@ def dataprep(
     # Recompute continuous columns after one-hot encoding
     # Keep only original continuous numeric columns that still exist
     continuous_numeric_cols = [c for c in continuous_numeric_cols if c in df.columns]
+    if len(continuous_numeric_cols) > 0:
+        df[continuous_numeric_cols] = df[continuous_numeric_cols].astype(np.float64)
 
     # ---------------------------------------------------------
     # 4. Scale only continuous numeric columns
@@ -225,7 +227,7 @@ def dataprep(
     # ---------------------------------------------------------
     # 6. Return NumPy arrays
     # ---------------------------------------------------------
-    X = df.to_numpy()
+    X = df.to_numpy(dtype=np.float64)
 
     if y is not None:
         return X, y
