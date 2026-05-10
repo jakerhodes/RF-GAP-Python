@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import numpy as np
 
-from .extras import KernelDiagnosticsMixin
 from .config import (
     infer_prediction_type,
     validate_model_configuration,
@@ -30,8 +29,10 @@ from .prediction import (
     kernel_predict_proba_cls,
 )
 
+from .extras import KernelDiagnostics
 
-class LeafEncoder(KernelDiagnosticsMixin):
+
+class LeafEncoder:
     """
     Sparse forest leaf encoder.
 
@@ -88,6 +89,9 @@ class LeafEncoder(KernelDiagnosticsMixin):
         self.X_fit_ = None
         self.y_ = None
         self.classes_ = None
+
+        # Secondary diagnostics object, built on demand in the `diagnostics` property.
+        self._diagnostics = None
 
 
     def _check_forest_fitted(self):
@@ -400,6 +404,14 @@ class LeafEncoder(KernelDiagnosticsMixin):
 
         return proba
     
+    @property
+    def diagnostics(self):
+        """
+        Return diagnostic utilities bound to this encoder.
+        """
+        if self._diagnostics is None:
+            self._diagnostics = KernelDiagnostics(self)
+        return self._diagnostics
 
     # sklearn compatibility methods, useful for hyperparameter tuning with GridSearchCV, etc.
     def get_params(self, deep=True):
@@ -423,5 +435,6 @@ class LeafEncoder(KernelDiagnosticsMixin):
         self.X_fit_ = None
         self.y_ = None
         self.classes_ = None
+        self._diagnostics = None
     
         return self

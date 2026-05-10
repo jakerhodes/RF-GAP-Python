@@ -2,10 +2,9 @@ import warnings
 
 import numpy as np
 from scipy import sparse
-from sklearn import metrics
 
 
-class KernelDiagnosticsMixin:
+class KernelDiagnostics:
     """
     Extra diagnostics built on top of fitted forest kernels.
 
@@ -13,7 +12,12 @@ class KernelDiagnosticsMixin:
     `kernel`, `kernel_extend`, `training_query_map`, `reference_map`,
     `transform`, `weight_scheme`, `prediction_type`, `forest_`, and `y_`.
     """
+    def __init__(self, encoder):
+        self.encoder = encoder
 
+    def __getattr__(self, name):
+        return getattr(self.encoder, name)
+    
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
@@ -419,15 +423,15 @@ class KernelDiagnosticsMixin:
         K = self.kernel(
             force_symmetric=force_symmetric,
             adjust_diagonal=adjust_diagonal,
-            return_dense=True,
+            return_dense=False,
         )
 
         avg_prox = np.zeros(n_samples, dtype=float)
 
         for cls in np.unique(y_arr):
             idx = np.where(y_arr == cls)[0]
-            K_sub = K[np.ix_(idx, idx)]
-            avg_prox[idx] = np.sum(K_sub**2, axis=1)
+            K_sub = K[idx, :][:, idx]
+            avg_prox[idx] = np.asarray(K_sub.multiply(K_sub).sum(axis=1)).ravel()
 
         if np.any(avg_prox == 0.0):
             warnings.warn(
