@@ -2,6 +2,7 @@ import warnings
 
 import numpy as np
 from scipy import sparse
+from sklearn.base import is_classifier, is_regressor
 
 
 class KernelDiagnostics:
@@ -10,7 +11,7 @@ class KernelDiagnostics:
 
     These utilities assume the main estimator exposes the LeafEncoder API:
     `kernel`, `kernel_extend`, `training_query_map`, `reference_map`,
-    `transform`, `weight_scheme`, `prediction_type`, `forest_`, and `y_`.
+    `transform`, `weight_scheme`, `forest_`, and `y_`.
     """
     def __init__(self, encoder):
         self.encoder = encoder
@@ -26,11 +27,11 @@ class KernelDiagnostics:
             raise ValueError("This diagnostic is only available for GAP kernels.")
 
     def _check_classification(self):
-        if self.prediction_type != "classification":
+        if not is_classifier(self.encoder):
             raise ValueError("This diagnostic is only available for classification.")
-
+    
     def _check_regression(self):
-        if self.prediction_type == "classification":
+        if not is_regressor(self.encoder):
             raise ValueError("This diagnostic is only available for regression.")
 
     def _get_oob_decision_function(self):

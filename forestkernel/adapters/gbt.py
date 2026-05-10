@@ -9,6 +9,9 @@ class GBTAdapter(EnsembleAdapter):
     """
     Adapter for sklearn GradientBoosting estimators.
     """
+
+    supported_weight_schemes = {"uniform", "kerf", "boosted"}
+
     def _get_tree_list(self):
         """
         Flatten sklearn GBT estimators_ into a single list of trees.

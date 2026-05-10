@@ -19,6 +19,19 @@ class RFETAdapter(EnsembleAdapter):
     Adapter for sklearn RandomForest / ExtraTrees ensembles.
     """
 
+    supported_weight_schemes = {"uniform", "kerf", "oob", "gap"}
+
+    def validate_weight_scheme(self, weight_scheme):
+        super().validate_weight_scheme(weight_scheme)
+
+        if weight_scheme in {"oob", "gap"} and not getattr(self.estimator, "bootstrap", False):
+            raise ValueError(
+                f"weight_scheme='{weight_scheme}' requires bootstrap=True "
+                f"for {type(self.estimator).__name__}."
+            )
+
+        return self
+
     def _extract_tree(self, estimator):
         return estimator
 

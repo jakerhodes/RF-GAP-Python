@@ -1,34 +1,31 @@
-from sklearn.base import ClassifierMixin, RegressorMixin
+from sklearn.base import ClassifierMixin, RegressorMixin, is_classifier, is_regressor
 
 from .encoder import LeafEncoder
 from .prediction import kernel_predict
 from .extras.diagnostics import KernelDiagnostics
 
 
-class KernelClassifier(LeafEncoder, ClassifierMixin):
-    def __init__(
-        self,
-        weight_scheme="original",
-        forest_type="rf",
-        **forest_kwargs,
-    ):
-        super().__init__(
-            prediction_type="classification",
-            weight_scheme=weight_scheme,
-            forest_type=forest_type,
-            **forest_kwargs,
-        )
-        self._diagnostics = None
+class KernelClassifier(ClassifierMixin, LeafEncoder):
+    def __init__(self, forest=None, weight_scheme="uniform"):
+        super().__init__(forest=forest, weight_scheme=weight_scheme)
+
+    def fit(self, X, y, **fit_kwargs):
+        if not is_classifier(self.forest):
+            raise TypeError("KernelClassifier requires a classifier forest estimator.")
+
+        if hasattr(self, "_diagnostics"):
+            del self._diagnostics
+
+        return super().fit(X, y, **fit_kwargs)
 
     @property
     def diagnostics(self):
-        if self._diagnostics is None:
+        if not hasattr(self, "_diagnostics"):
             self._diagnostics = KernelDiagnostics(self)
         return self._diagnostics
 
     def predict(self, X):
         self._check_fitted()
-
         Q = self.transform(X, return_dense=False)
 
         return kernel_predict(
@@ -41,7 +38,6 @@ class KernelClassifier(LeafEncoder, ClassifierMixin):
 
     def predict_proba(self, X):
         self._check_fitted()
-
         Q = self.transform(X, return_dense=False)
 
         proba, _ = kernel_predict(
@@ -56,30 +52,27 @@ class KernelClassifier(LeafEncoder, ClassifierMixin):
         return proba
 
 
-class KernelRegressor(LeafEncoder, RegressorMixin):
-    def __init__(
-        self,
-        weight_scheme="original",
-        forest_type="rf",
-        **forest_kwargs,
-    ):
-        super().__init__(
-            prediction_type="regression",
-            weight_scheme=weight_scheme,
-            forest_type=forest_type,
-            **forest_kwargs,
-        )
-        self._diagnostics = None
+class KernelRegressor(RegressorMixin, LeafEncoder):
+    def __init__(self, forest=None, weight_scheme="uniform"):
+        super().__init__(forest=forest, weight_scheme=weight_scheme)
+
+    def fit(self, X, y, **fit_kwargs):
+        if not is_regressor(self.forest):
+            raise TypeError("KernelRegressor requires a regressor forest estimator.")
+
+        if hasattr(self, "_diagnostics"):
+            del self._diagnostics
+
+        return super().fit(X, y, **fit_kwargs)
 
     @property
     def diagnostics(self):
-        if self._diagnostics is None:
+        if not hasattr(self, "_diagnostics"):
             self._diagnostics = KernelDiagnostics(self)
         return self._diagnostics
 
     def predict(self, X):
         self._check_fitted()
-
         Q = self.transform(X, return_dense=False)
 
         return kernel_predict(
