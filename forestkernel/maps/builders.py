@@ -149,7 +149,7 @@ def build_W_matrix(cache, weight_scheme):
     #   Use a symmetric factorization with sqrt(1/T) on both sides.
     #   W handles the target/reference side.
     # ---------------------------------------------------------
-    if weight_scheme == "original":
+    if weight_scheme == "uniform":
         scale_factor = np.float32(1.0 / np.sqrt(T))
         weights = np.full(N * T, scale_factor, dtype=np.float32)
 
@@ -282,7 +282,7 @@ def build_Q_matrix(
     #   Use the same symmetric factorization as W:
     #       sqrt(1/T)
     # ---------------------------------------------------------
-    if weight_scheme == "original":
+    if weight_scheme == "uniform":
         scale_factor = np.float32(1.0 / np.sqrt(T))
         vals = np.full(N * T, scale_factor, dtype=np.float32)
 
