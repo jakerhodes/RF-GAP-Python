@@ -30,5 +30,3 @@ experiments = ["pandas", "pyarrow", "matplotlib", "seaborn", "umap-learn"]
 test = ["pytest", "pytest-cov", "lightgbm", "xgboost"]
 all = ["lightgbm","xgboost","matplotlib","seaborn","umap-learn","pandas","pyarrow","pytest","pytest-cov"]
 
-[tool.setuptools.packages.find]
-include = ["forestkernel*"]
