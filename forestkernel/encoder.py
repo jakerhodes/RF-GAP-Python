@@ -255,7 +255,7 @@ class LeafEncoder(TransformerMixin, BaseEstimator):
             is_training=True,
         )
 
-        if force_symmetric and self.weight_scheme in {"gap", "kerf"}:
+        if force_symmetric and self.weight_scheme in {"gap"}:
             P = block_symmetrize(Q, W)
         else:
             P = Q.dot(W.T)
