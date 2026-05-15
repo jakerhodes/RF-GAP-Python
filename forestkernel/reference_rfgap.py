@@ -9,15 +9,9 @@ from sklearn.ensemble import RandomForestClassifier, RandomForestRegressor, Extr
 import sklearn
 from sklearn import metrics
 
-from packaging.version import Version as LooseVersion  # Handles python>3.12
-if LooseVersion(sklearn.__version__) >= LooseVersion("0.24"):
-    # In sklearn version 0.24, forest module changed to be private.
-    from sklearn.ensemble._forest import _generate_unsampled_indices
-    from sklearn.ensemble._forest import _generate_sample_indices
-else:
-    # Before sklearn version 0.24, forest was public, supporting this.
-    from sklearn.ensemble.forest import _generate_unsampled_indices # Remove underscore from _forest
-    from sklearn.ensemble.forest import _generate_sample_indices # Remove underscore from _forest
+# Import the private `_forest` helpers (sklearn>=0.24 uses private API).
+from sklearn.ensemble._forest import _generate_unsampled_indices
+from sklearn.ensemble._forest import _generate_sample_indices
 
 from sklearn.utils.validation import check_is_fitted
 import warnings

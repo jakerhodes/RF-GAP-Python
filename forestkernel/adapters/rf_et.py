@@ -1,15 +1,9 @@
 import numpy as np
 import sklearn
-from packaging.version import Version as LooseVersion  # Handles python>3.12
+import re
 
-if LooseVersion(sklearn.__version__) >= LooseVersion("0.24"):
-    # In sklearn version 0.24, forest module changed to be private.
-    from sklearn.ensemble._forest import _generate_unsampled_indices
-    from sklearn.ensemble._forest import _generate_sample_indices
-else:
-    # Before sklearn version 0.24, forest was public, supporting this.
-    from sklearn.ensemble.forest import _generate_unsampled_indices
-    from sklearn.ensemble.forest import _generate_sample_indices
+from sklearn.ensemble._forest import _generate_unsampled_indices
+from sklearn.ensemble._forest import _generate_sample_indices
 
 from .base import EnsembleAdapter
 
