@@ -1,0 +1,31 @@
+[build-system]
+requires = ["setuptools>=61", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "forestkernel"
+version = "0.1.2"
+description = "Forest kernel package"
+readme = "README.md"
+requires-python = ">=3.8"
+license = "GPL-3.0-or-later"
+license-files = ["LICENSE"]
+authors = [
+	{ name = "Jake Rhodes", email = "jakerhodes8@gmail.com" },
+	{ name = "Adrien Aumon", email = "adrien.aumon@umontreal.ca" },
+]
+urls = { "Homepage" = "https://github.com/jakerhodes/RF-GAP-Python" }
+
+dependencies = [
+	"numpy",
+	"scipy",
+	"scikit-learn",
+	"packaging",
+]
+
+[project.optional-dependencies]
+boosted = ["lightgbm", "xgboost"]
+viz = ["matplotlib", "seaborn", "umap-learn"]
+experiments = ["pandas", "pyarrow", "matplotlib", "seaborn", "umap-learn"]
+test = ["pytest", "pytest-cov", "lightgbm", "xgboost"]
+all = ["lightgbm","xgboost","matplotlib","seaborn","umap-learn","pandas","pyarrow","pytest","pytest-cov"]

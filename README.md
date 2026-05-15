@@ -20,8 +20,56 @@ The package implements forest proximity constructions described in
 “Revisiting Forest Proximities via Sparse Leaf-Incidence Kernels”
 (https://arxiv.org/abs/2601.02735).
 
-# Installation
-To install, please use ```pip install git+https://github.com/jakerhodes/RF-GAP-Python```
+# Installation (recommended)
+The recommended way for most users to install is directly from the GitHub repository into a virtual environment. This lets users install the package into their own venv without waiting for a PyPI release.
+
+```bash
+# install the latest main branch into the active venv
+pip install git+https://github.com/jakerhodes/RF-GAP-Python.git
+
+# or install a specific branch or tag
+pip install git+https://github.com/jakerhodes/RF-GAP-Python.git@main
+```
+
+GitHub install examples
+
+```bash
+# install with an extras group (boosted)
+pip install 'git+https://github.com/jakerhodes/RF-GAP-Python.git@main#egg=forestkernel[boosted]'
+
+# editable VCS install (development) with extras
+pip install -e 'git+https://github.com/jakerhodes/RF-GAP-Python.git@main#egg=forestkernel[boosted]'
+
+# install from GitHub but skip automatic dependency installation
+pip install --no-deps 'git+https://github.com/jakerhodes/RF-GAP-Python.git'
+
+# use a constraints file to control versions when installing from GitHub
+pip install 'git+https://github.com/jakerhodes/RF-GAP-Python.git' -c constraints.txt
+```
+
+Local / development install
+
+If you're developing on the project or want an editable install (changes in the checkout are immediately importable), use a virtualenv and one of the following:
+
+```bash
+# normal local install
+pip install .
+
+# editable / development install (recommended for contributors)
+pip install -e .
+```
+
+# Extras (optional dependencies)
+
+Install optional feature groups only when needed:
+
+```bash
+# install boosted extras
+pip install -e '.[boosted]'
+
+# install viz extras
+pip install -e '.[viz]'
+```
 
 # Usage
 
