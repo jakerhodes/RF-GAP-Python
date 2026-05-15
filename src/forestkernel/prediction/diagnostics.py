@@ -410,7 +410,7 @@ class KernelDiagnostics:
             ]
         )
 
-        auc = np.trapz(accuracy_drop, n_dropped)
+        auc = np.trapezoid(accuracy_drop, n_dropped)
 
         return auc, accuracy_drop, n_dropped
 
