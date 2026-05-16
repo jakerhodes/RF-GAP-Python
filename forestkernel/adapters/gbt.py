@@ -1,9 +1,6 @@
 import numpy as np
 from .base import EnsembleAdapter
 
-import numpy as np
-from .base import EnsembleAdapter
-
 
 class GBTAdapter(EnsembleAdapter):
     """
@@ -65,30 +62,65 @@ class GBTAdapter(EnsembleAdapter):
 
     def get_tree_weights(self, X_ref):
         """
-        Compute tree-specific weights for boosted-tree proximities.
+        Compute normalized tree-specific weights for boosted-tree proximities.
     
-        Following the boosted-tree proximity definition of Tan et al. (2020),
-        each tree is weighted by the variance of its contribution over the
-        reference set. If h_t(s) denotes the shrunken output of tree t for
-        sample s, then the weight is taken proportional to
+        Returns
+        -------
+        weights : np.ndarray of shape (T_total,), dtype np.float32
+            One nonnegative weight per tree in the flattened GradientBoosting
+            ensemble.
     
-            w_t ∝ Var({h_t(s) : s in X_ref}).
+            The entries are normalized to sum to one. Therefore, ``weights[t]``
+            gives the relative contribution of flattened tree ``t`` to the
+            boosted-tree proximity.
     
-        For sklearn GradientBoosting, the per-tree shrunken contribution is
+            Here, ``T_total`` is the number of trees after flattening
+            ``estimator.estimators_``:
     
-            learning_rate * tree.predict(X_ref),
-    
-        so we compute the empirical variance of these values over the
-        reference samples.
+            - regression: ``T_total = n_estimators``
+            - binary classification: ``T_total = n_estimators``
+            - multiclass classification:
+              ``T_total = n_estimators * n_classes``
     
         Notes
         -----
-        - This differs from using the squared L2 norm of the tree outputs.
-          The two coincide only when the tree outputs are centered.
-        - For multiclass GradientBoosting, the flattened tree list contains
-          class-specific trees from successive boosting stages, so these
-          weights should be interpreted as per-flattened-tree variance
-          weights.
+        Gradient Boosting models are additive ensembles of the form
+    
+            F(x) = sum_t h_t(x),
+    
+        where ``h_t(x)`` denotes the prediction contribution of tree ``t`` for
+        sample ``x``. For sklearn GradientBoosting estimators,
+    
+            h_t(x) = learning_rate * f_t(x),
+    
+        where ``f_t(x)`` is the raw prediction of tree ``t``.
+    
+        In this implementation, the tree contributions are obtained directly from
+        the fitted leaf values and the leaf assignments of ``X_ref``.
+    
+        Following the boosted-tree proximity definition of Tan et al. (2020),
+        each tree is weighted according to the empirical variance of its
+        contribution over the reference set:
+    
+            w_t ∝ Var({h_t(s) : s in X_ref}).
+    
+        The intuition is that trees whose outputs vary more across the dataset
+        carry more geometric and predictive information, and should therefore
+        contribute more strongly to the proximity. Conversely, trees whose
+        predictions are nearly constant over ``X_ref`` contribute little to
+        distinguishing samples and receive smaller weights.
+    
+        This differs from Random Forests, where trees are approximately
+        exchangeable and are therefore typically weighted uniformly. In boosting,
+        trees are built sequentially and can have very different importance,
+        making variance-based weighting more natural.
+    
+        If all empirical variances are numerically zero, the method falls back to
+        uniform weights.
+    
+        For multiclass GradientBoosting, sklearn stores one tree per class at each
+        boosting stage. The returned weights are therefore per flattened
+        class-specific tree, not per boosting stage.
         """
         # contribs shape: (n_samples, n_trees)
         contribs = self._predict_tree_outputs(X_ref)

@@ -1,10 +1,6 @@
 import numpy as np
-import sklearn
-import re
-
 from sklearn.ensemble._forest import _generate_unsampled_indices
 from sklearn.ensemble._forest import _generate_sample_indices
-
 from .base import EnsembleAdapter
 
 

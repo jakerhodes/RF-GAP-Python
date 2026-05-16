@@ -61,7 +61,12 @@ class LightGBMAdapter(EnsembleAdapter):
 
     def _predict_tree_outputs(self, X_ref):
         """
-        Return per-tree shrunken contributions of shape (n_samples, n_trees_total).
+        Return per-tree fitted contributions of shape
+        (n_samples, n_trees_total).
+    
+        LightGBM leaf values from ``booster.dump_model()`` already include the
+        learning-rate shrinkage used by the fitted booster, so no additional
+        multiplication by ``learning_rate`` is applied here.
         """
         leaf_matrix = self.get_leaf_matrix(X_ref)
         leaf_value_maps = self._get_leaf_value_maps()
@@ -95,8 +100,59 @@ class LightGBMAdapter(EnsembleAdapter):
 
     def get_tree_weights(self, X_ref):
         """
-        Compute tree-specific weights for boosted-tree proximities.
-        Following Tan et al. (2020) variance-based weighting.
+        Compute normalized tree-specific weights for boosted-tree proximities.
+    
+        Returns
+        -------
+        weights : np.ndarray of shape (n_trees_total,), dtype np.float32
+            One nonnegative weight per LightGBM tree.
+    
+            The entries are normalized to sum to one. Therefore, ``weights[t]``
+            gives the relative contribution of tree ``t`` to the boosted-tree
+            proximity.
+    
+            Here, ``n_trees_total`` is the number of trees returned by the fitted
+            LightGBM booster. For multiclass models, LightGBM stores one tree per
+            class at each boosting iteration, so
+    
+                ``n_trees_total = n_estimators * n_classes``.
+    
+        Notes
+        -----
+        Boosted trees are additive ensembles of the form
+    
+            F(x) = sum_t h_t(x),
+    
+        where ``h_t(x)`` denotes the contribution of tree ``t`` to the model score
+        for sample ``x``.
+    
+        In this implementation, ``h_t(x)`` is obtained from the fitted LightGBM
+        leaf values reached by ``x``. These leaf values are read directly from the
+        dumped booster model and correspond to the per-tree contribution used by
+        the fitted LightGBM ensemble.
+    
+        Following the boosted-tree proximity definition of Tan et al. (2020),
+        each tree is weighted according to the empirical variance of its
+        contribution over the reference set:
+    
+            w_t ∝ Var({h_t(s) : s in X_ref}).
+    
+        The intuition is that trees whose outputs vary more across the dataset
+        carry more geometric and predictive information, and should therefore
+        contribute more strongly to the proximity. Conversely, trees whose
+        predictions are nearly constant over ``X_ref`` contribute little to
+        distinguishing samples and receive smaller weights.
+    
+        This differs from Random Forests, where trees are approximately
+        exchangeable and are therefore typically weighted uniformly. In boosting,
+        trees are built sequentially and can have very different importance,
+        making variance-based weighting more natural.
+    
+        If all empirical variances are numerically zero, the method falls back to
+        uniform weights.
+    
+        For multiclass LightGBM models, the returned weights are per flattened
+        class-specific tree, not per boosting stage.
         """
         contribs = self._predict_tree_outputs(X_ref)
         

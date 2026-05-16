@@ -37,9 +37,21 @@ class XGBoostAdapter(EnsembleAdapter):
 
     def _predict_tree_outputs(self, X_ref):
         """
-        Helper to get shrunken tree outputs. 
-        In XGBoost, the 'Gain' column for leaf nodes in trees_to_dataframe() 
-        contains the raw leaf output.
+        Return per-tree fitted contributions of shape
+        (n_samples, n_trees_total).
+    
+        For each sample in ``X_ref`` and each XGBoost tree, this method returns
+        the leaf value reached by that sample. These values define the per-tree
+        contribution ``h_t(x)`` used by the fitted boosted model.
+    
+        In XGBoost, the leaf values stored in the dumped booster representation
+        are already scaled by the learning rate. Therefore, no additional
+        multiplication by ``learning_rate`` is applied here.
+    
+        Notes
+        -----
+        The values are read from ``booster.trees_to_dataframe()``. For leaf nodes,
+        XGBoost stores the fitted leaf output in the ``Gain`` column.
         """
         leaf_matrix = self.get_leaf_matrix(X_ref)
         n_samples, n_trees = leaf_matrix.shape
@@ -90,27 +102,54 @@ class XGBoostAdapter(EnsembleAdapter):
 
     def get_tree_weights(self, X_ref):
         """
-        Compute tree-specific weights for boosted-tree proximities.
+        Compute normalized tree-specific weights for boosted-tree proximities.
     
-        Following the boosted-tree proximity definition of Tan et al. (2020),
-        each tree is weighted by the variance of its contribution over the
-        reference set. If h_t(s) denotes the shrunken output of tree t for
-        sample s, then the weight is taken proportional to
+        Returns
+        -------
+        weights : np.ndarray of shape (n_trees_total,), dtype np.float32
+            One nonnegative weight per XGBoost tree.
     
-            w_t ∝ Var({h_t(s) : s in X_ref}).
+            The entries are normalized to sum to one. Therefore, ``weights[t]``
+            gives the relative contribution of tree ``t`` to the boosted-tree
+            proximity.
     
-        Since XGBoost leaf values in the booster dump are already shrunken by 
-        the learning rate, this amounts to computing the empirical variance 
-        of these values over the reference samples.
+            Here, ``n_trees_total`` is the number of trees returned by the fitted
+            XGBoost booster. For multiclass models, XGBoost stores one tree per
+            class at each boosting round, so
+    
+                ``n_trees_total = n_estimators * n_classes``.
     
         Notes
         -----
-        - This differs from using the squared L2 norm of the tree outputs.
-          The two coincide only when the tree outputs are centered.
-        - For multiclass XGBoost, the flattened tree list contains
-          class-specific trees from successive boosting rounds, so these
-          weights should be interpreted as per-flattened-tree variance
-          weights.
+        Boosted trees are additive ensembles of the form
+    
+            F(x) = sum_t h_t(x),
+    
+        where ``h_t(x)`` denotes the contribution of tree ``t`` to the model score
+        for sample ``x``.
+    
+        In this implementation, ``h_t(x)`` is obtained from the fitted XGBoost
+        leaf values reached by ``x``. These leaf values are already scaled by the
+        learning rate in the dumped booster representation, so no additional
+        shrinkage is applied.
+    
+        Following the boosted-tree proximity definition of Tan et al. (2020),
+        each tree is weighted according to the empirical variance of its
+        contribution over the reference set:
+    
+            w_t ∝ Var({h_t(s) : s in X_ref}).
+    
+        The intuition is that trees whose outputs vary more across the dataset
+        carry more geometric and predictive information, and should therefore
+        contribute more strongly to the proximity. Conversely, trees whose
+        predictions are nearly constant over ``X_ref`` contribute little to
+        distinguishing samples and receive smaller weights.
+    
+        If all empirical variances are numerically zero, the method falls back to
+        uniform weights.
+    
+        For multiclass XGBoost models, the returned weights are per flattened
+        class-specific tree, not per boosting round.
         """
         contribs = self._predict_tree_outputs(X_ref)
         
