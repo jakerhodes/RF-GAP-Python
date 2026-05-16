@@ -1,37 +1,60 @@
 # Contributing
 
-Developer setup
+Thank you for contributing to `forestkernel`.
 
-1. Create and activate a virtual environment:
+## Clone the repository
+
+```bash
+git clone https://github.com/jakerhodes/RF-GAP-Python.git
+cd RF-GAP-Python
+```
+
+## Create a virtual environment
+
+Create and activate a local virtual environment:
 
 ```bash
 python -m venv .venv
 source .venv/bin/activate
+```
+
+Upgrade packaging tools:
+
+```bash
 pip install -U pip setuptools wheel
 ```
 
-2. Install the project in editable mode so local edits are importable:
+## Install the project
+
+Install the project in editable mode so local source changes are immediately importable:
 
 ```bash
-pip install -e .           # development install
-# or install with extras (example)
-pip install -e '.[boosted]'
+pip install -e .
 ```
 
-3. Run tests:
+Optional extras can be installed as needed:
 
 ```bash
+# boosted tree support
+pip install -e '.[boosted]'
+
+# visualization dependencies
+pip install -e '.[viz]'
+
+# testing dependencies
 pip install -e '.[test]'
+```
+
+## Run tests
+
+```bash
 pytest
 ```
 
-Quick GitHub install (for users)
+## Notes
 
-```bash
-pip install git+https://github.com/jakerhodes/RF-GAP-Python.git
-```
-
-Notes
-
-- Use a virtualenv for project work to avoid polluting system packages.
-- If native dependencies are required for extras (e.g., `lightgbm` or `xgboost`), follow those projects' install instructions.
+- Use a virtual environment for development work.
+- Editable installs (`-e`) are recommended for contributors.
+- Some optional dependencies (e.g. `lightgbm` or `xgboost`) may require
+  additional system-level installation steps. Refer to the corresponding
+  project documentation if needed.
