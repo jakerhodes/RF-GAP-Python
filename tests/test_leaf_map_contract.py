@@ -3,11 +3,73 @@ import pytest
 
 from forestkernel import LeafEncoder
 
-from tests.test_constants import ALL_SUPPORTED_CASES, BOOSTED_FORESTS_AND_DATA
+from tests.test_constants import (
+    ALL_SUPPORTED_CASES,
+    BOOSTED_FORESTS_AND_DATA,
+)
 
 
 def _max_nnz_per_row(matrix):
     return np.diff(matrix.tocsr().indptr).max()
+
+
+def _assert_sparse_allclose(actual, expected):
+    assert actual.shape == expected.shape
+    np.testing.assert_allclose(actual.toarray(), expected.toarray())
+
+
+@pytest.mark.parametrize(
+    "forest_fixture,data_fixture,weight_scheme",
+    ALL_SUPPORTED_CASES,
+)
+def test_fit_transform_matches_fit_then_training_query_map(
+    request,
+    forest_fixture,
+    data_fixture,
+    weight_scheme,
+):
+    if data_fixture != "classification_data":
+        pytest.skip("fit_transform contract check is classification-only")
+
+    X_train, _, y_train, _ = request.getfixturevalue(data_fixture)
+    forest = request.getfixturevalue(forest_fixture)
+
+    fit_transform_encoder = LeafEncoder(forest=forest, weight_scheme=weight_scheme)
+    Q_fit_transform = fit_transform_encoder.fit_transform(X_train, y_train, return_dense=False)
+
+    fit_encoder = LeafEncoder(forest=forest, weight_scheme=weight_scheme)
+    fit_encoder.fit(X_train, y_train)
+    Q_training = fit_encoder.training_query_map(return_dense=False)
+
+    _assert_sparse_allclose(Q_fit_transform, Q_training)
+
+
+@pytest.mark.parametrize(
+    "forest_fixture,data_fixture,weight_scheme",
+    ALL_SUPPORTED_CASES,
+)
+def test_fit_transform_matches_fit_then_transform_for_inductive_classification_schemes(
+    request,
+    forest_fixture,
+    data_fixture,
+    weight_scheme,
+):
+    if data_fixture != "classification_data":
+        pytest.skip("fit_transform/transform contract check is classification-only")
+    if weight_scheme in {"gap", "oob"}:
+        pytest.skip("GAP and OOB have training-specific query maps")
+
+    X_train, _, y_train, _ = request.getfixturevalue(data_fixture)
+    forest = request.getfixturevalue(forest_fixture)
+
+    fit_transform_encoder = LeafEncoder(forest=forest, weight_scheme=weight_scheme)
+    Q_fit_transform = fit_transform_encoder.fit_transform(X_train, y_train, return_dense=False)
+
+    fit_encoder = LeafEncoder(forest=forest, weight_scheme=weight_scheme)
+    fit_encoder.fit(X_train, y_train)
+    Q_transform = fit_encoder.transform(X_train, return_dense=False)
+
+    _assert_sparse_allclose(Q_fit_transform, Q_transform)
 
 
 @pytest.mark.parametrize("forest_fixture,data_fixture,weight_scheme", ALL_SUPPORTED_CASES)
