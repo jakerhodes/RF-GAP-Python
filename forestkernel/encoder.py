@@ -97,11 +97,10 @@ class LeafEncoder(TransformerMixin, BaseEstimator):
         self.forest_ = adapter
         self.X_fit_ = X
         self.y_ = y
-        self.classes_ = (
-            np.unique(y)
-            if callable(getattr(adapter.estimator, "predict_proba", None))
-            else None
-        )
+        if callable(getattr(adapter.estimator, "predict_proba", None)):
+            self.classes_ = getattr(adapter.estimator, "classes_", np.unique(y))
+        else:
+            self.classes_ = None
         self.cache_ = None
     
         return self

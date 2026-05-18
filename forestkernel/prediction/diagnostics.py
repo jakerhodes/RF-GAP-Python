@@ -50,7 +50,13 @@ class KernelDiagnostics:
 
     def _oob_correctness(self):
         oob_proba = self._get_oob_decision_function()
-        oob_predictions = np.argmax(oob_proba, axis=1)
+        oob_pred_idx = np.argmax(oob_proba, axis=1)
+
+        if getattr(self, "classes_", None) is not None:
+            oob_predictions = np.asarray(self.classes_)[oob_pred_idx]
+        else:
+            oob_predictions = oob_pred_idx
+
         is_correct_oob = oob_predictions == self.y_
 
         self.oob_proba = oob_proba
@@ -395,7 +401,12 @@ class KernelDiagnostics:
             )
 
         oob_proba = self._get_oob_decision_function()
-        oob_preds = np.argmax(oob_proba, axis=1)
+        oob_pred_idx = np.argmax(oob_proba, axis=1)
+
+        if getattr(self, "classes_", None) is not None:
+            oob_preds = np.asarray(self.classes_)[oob_pred_idx]
+        else:
+            oob_preds = oob_pred_idx
 
         n_dropped = np.array(
             [np.sum(scores <= q) / len(scores) for q in quantiles]

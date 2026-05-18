@@ -9,6 +9,7 @@ def dataprep(
     global_transform=False,
     drop_missing_y=False,
     verbose=True,
+    factorize_labels=False,
 ):
     """
     Prepare a dataset for ML models.
@@ -17,7 +18,9 @@ def dataprep(
     --------
     - Extracts the label column if provided.
     - Drops rows with missing labels if requested.
-    - Factorizes categorical/string labels into integer codes.
+        - Optionally factorizes categorical/string labels into integer codes
+            (controlled by `factorize_labels`). By default labels are returned
+            in their original form when possible.
     - One-hot encodes categorical feature columns.
     - Applies scaling only to continuous numeric feature columns.
     - Leaves binary / dummy columns unchanged.
@@ -83,12 +86,20 @@ def dataprep(
             or pd.api.types.is_string_dtype(y_raw)
             or pd.api.types.is_categorical_dtype(y_raw)
         ):
-            y, uniques = pd.factorize(y_raw.astype(str))
-            y = y.astype(np.int64)
-            if verbose:
-                print(f"Label column: '{label_name}'")
-                print("Label handling: factorized categorical/string labels into integer codes.")
-                print(f"Number of classes: {len(uniques)}")
+            if factorize_labels:
+                y, uniques = pd.factorize(y_raw.astype(str))
+                y = y.astype(np.int64)
+                if verbose:
+                    print(f"Label column: '{label_name}'")
+                    print("Label handling: factorized categorical/string labels into integer codes.")
+                    print(f"Number of classes: {len(uniques)}")
+            else:
+                # keep original label values (strings / categories) as NumPy object array
+                y = y_raw.to_numpy()
+                if verbose:
+                    print(f"Label column: '{label_name}'")
+                    print("Label handling: kept categorical/string labels as original values.")
+                    print(f"Number of unique values: {len(pd.unique(y))}")
         else:
             y = y_raw.to_numpy()
             if verbose:
