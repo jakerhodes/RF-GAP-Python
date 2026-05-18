@@ -1,3 +1,4 @@
+import numpy as np
 from sklearn.base import clone
 from sklearn.metrics import accuracy_score, mean_squared_error
 import pytest
@@ -5,6 +6,36 @@ import pytest
 from forestkernel.prediction.predictors import KernelClassifier, KernelRegressor
 
 from tests.test_constants import RF_ET_WEIGHT_SCHEMES
+
+
+@pytest.mark.parametrize("forest_fixture", ["rf_classifier", "et_classifier"])
+@pytest.mark.parametrize("data_fixture", ["classification_data"])
+def test_gap_matches_base_classifier_predictions(request, forest_fixture, data_fixture):
+    X_train, X_test, y_train, y_test = request.getfixturevalue(data_fixture)
+    forest = request.getfixturevalue(forest_fixture)
+
+    base_forest = clone(forest)
+    base_forest.fit(X_train, y_train)
+
+    kernel_model = KernelClassifier(forest=clone(forest), weight_scheme="gap")
+    kernel_preds = kernel_model.fit(X_train, y_train).predict(X_test)
+
+    np.testing.assert_array_equal(kernel_preds, base_forest.predict(X_test))
+
+
+@pytest.mark.parametrize("forest_fixture", ["rf_regressor", "et_regressor"])
+@pytest.mark.parametrize("data_fixture", ["regression_data"])
+def test_gap_matches_base_regressor_predictions(request, forest_fixture, data_fixture):
+    X_train, X_test, y_train, y_test = request.getfixturevalue(data_fixture)
+    forest = request.getfixturevalue(forest_fixture)
+
+    base_forest = clone(forest)
+    base_forest.fit(X_train, y_train)
+
+    kernel_model = KernelRegressor(forest=clone(forest), weight_scheme="gap")
+    kernel_preds = kernel_model.fit(X_train, y_train).predict(X_test)
+
+    np.testing.assert_allclose(kernel_preds, base_forest.predict(X_test))
 
 
 @pytest.mark.parametrize("forest_fixture", ["rf_classifier", "et_classifier"])
