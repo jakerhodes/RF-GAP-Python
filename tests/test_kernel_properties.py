@@ -65,6 +65,19 @@ def test_training_kernel_is_symmetric(request, forest_fixture, data_fixture, wei
 
 
 @pytest.mark.parametrize("forest_fixture,data_fixture", RF_ET_FORESTS_AND_DATA)
+def test_gap_force_symmetric_kernel_is_symmetric(request, forest_fixture, data_fixture):
+    X_train, _, y_train, _ = request.getfixturevalue(data_fixture)
+    forest = request.getfixturevalue(forest_fixture)
+
+    enc = LeafEncoder(forest=forest, weight_scheme="gap").fit(X_train, y_train)
+
+    K = enc.kernel(force_symmetric=True, return_dense=True)
+
+    assert K.shape[0] == K.shape[1]
+    assert np.allclose(K, K.T, rtol=1e-6, atol=1e-8)
+
+
+@pytest.mark.parametrize("forest_fixture,data_fixture", RF_ET_FORESTS_AND_DATA)
 @pytest.mark.parametrize("weight_scheme", ["gap", "oob"])
 def test_adjust_diagonal_matches_expected_gap_and_oob_training_diagonal(
     request,
