@@ -3,7 +3,7 @@ from sklearn.base import clone
 from sklearn.metrics import accuracy_score, mean_squared_error
 import pytest
 
-from forestkernel.prediction.predictors import KernelClassifier, KernelRegressor
+from forestkernel import LeafEncoder
 
 from tests.test_constants import RF_ET_WEIGHT_SCHEMES
 
@@ -17,10 +17,14 @@ def test_gap_matches_base_classifier_predictions(request, forest_fixture, data_f
     base_forest = clone(forest)
     base_forest.fit(X_train, y_train)
 
-    kernel_model = KernelClassifier(forest=clone(forest), weight_scheme="gap")
+    kernel_model = LeafEncoder(forest=clone(forest), weight_scheme="gap")
     kernel_preds = kernel_model.fit(X_train, y_train).predict(X_test)
 
     np.testing.assert_array_equal(kernel_preds, base_forest.predict(X_test))
+
+    proba = kernel_model.predict_proba(X_test)
+    np.testing.assert_allclose(proba.sum(axis=1), np.ones(proba.shape[0]), atol=1e-6)
+    np.testing.assert_array_equal(kernel_model.classes_, base_forest.classes_)
 
 
 @pytest.mark.parametrize("forest_fixture", ["rf_regressor", "et_regressor"])
@@ -32,10 +36,13 @@ def test_gap_matches_base_regressor_predictions(request, forest_fixture, data_fi
     base_forest = clone(forest)
     base_forest.fit(X_train, y_train)
 
-    kernel_model = KernelRegressor(forest=clone(forest), weight_scheme="gap")
+    kernel_model = LeafEncoder(forest=clone(forest), weight_scheme="gap")
     kernel_preds = kernel_model.fit(X_train, y_train).predict(X_test)
 
     np.testing.assert_allclose(kernel_preds, base_forest.predict(X_test))
+
+    with pytest.raises(AttributeError):
+        kernel_model.predict_proba(X_test)
 
 
 @pytest.mark.parametrize("forest_fixture", ["rf_classifier", "et_classifier"])
@@ -50,7 +57,7 @@ def test_gap_is_closest_to_base_classifier_error(request, forest_fixture, data_f
 
     scheme_errors = {}
     for scheme in RF_ET_WEIGHT_SCHEMES:
-        kernel_model = KernelClassifier(forest=clone(forest), weight_scheme=scheme)
+        kernel_model = LeafEncoder(forest=clone(forest), weight_scheme=scheme)
         preds = kernel_model.fit(X_train, y_train).predict(X_test)
         scheme_errors[scheme] = abs((1.0 - accuracy_score(y_test, preds)) - base_error)
 
@@ -69,7 +76,7 @@ def test_gap_is_closest_to_base_regressor_mse(request, forest_fixture, data_fixt
 
     scheme_mses = {}
     for scheme in RF_ET_WEIGHT_SCHEMES:
-        kernel_model = KernelRegressor(forest=clone(forest), weight_scheme=scheme)
+        kernel_model = LeafEncoder(forest=clone(forest), weight_scheme=scheme)
         preds = kernel_model.fit(X_train, y_train).predict(X_test)
         scheme_mses[scheme] = abs(mean_squared_error(y_test, preds) - base_mse)
 

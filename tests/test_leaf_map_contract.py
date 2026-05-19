@@ -6,6 +6,8 @@ from forestkernel import LeafEncoder
 from tests.test_constants import (
     ALL_SUPPORTED_CASES,
     BOOSTED_FORESTS_AND_DATA,
+    RF_ET_CLASSIFICATION_CASES,
+    RF_ET_CLASSIFICATION_INDUCTIVE_CASES,
 )
 
 
@@ -18,19 +20,13 @@ def _assert_sparse_allclose(actual, expected):
     np.testing.assert_allclose(actual.toarray(), expected.toarray())
 
 
-@pytest.mark.parametrize(
-    "forest_fixture,data_fixture,weight_scheme",
-    ALL_SUPPORTED_CASES,
-)
+@pytest.mark.parametrize("forest_fixture,data_fixture,weight_scheme", RF_ET_CLASSIFICATION_CASES)
 def test_fit_transform_matches_fit_then_training_query_map(
     request,
     forest_fixture,
     data_fixture,
     weight_scheme,
 ):
-    if data_fixture != "classification_data":
-        pytest.skip("fit_transform contract check is classification-only")
-
     X_train, _, y_train, _ = request.getfixturevalue(data_fixture)
     forest = request.getfixturevalue(forest_fixture)
 
@@ -44,21 +40,13 @@ def test_fit_transform_matches_fit_then_training_query_map(
     _assert_sparse_allclose(Q_fit_transform, Q_training)
 
 
-@pytest.mark.parametrize(
-    "forest_fixture,data_fixture,weight_scheme",
-    ALL_SUPPORTED_CASES,
-)
+@pytest.mark.parametrize("forest_fixture,data_fixture,weight_scheme", RF_ET_CLASSIFICATION_INDUCTIVE_CASES)
 def test_fit_transform_matches_fit_then_transform_for_inductive_classification_schemes(
     request,
     forest_fixture,
     data_fixture,
     weight_scheme,
 ):
-    if data_fixture != "classification_data":
-        pytest.skip("fit_transform/transform contract check is classification-only")
-    if weight_scheme in {"gap", "oob"}:
-        pytest.skip("GAP and OOB have training-specific query maps")
-
     X_train, _, y_train, _ = request.getfixturevalue(data_fixture)
     forest = request.getfixturevalue(forest_fixture)
 
