@@ -27,11 +27,11 @@ class KernelDiagnostics:
             raise ValueError("This diagnostic is only available for GAP kernels.")
 
     def _check_classification(self):
-        if not is_classifier(self.encoder):
+        if not self.encoder._is_classifier(fitted=True):
             raise ValueError("This diagnostic is only available for classification.")
     
     def _check_regression(self):
-        if not is_regressor(self.encoder):
+        if self.encoder._is_classifier(fitted=True):
             raise ValueError("This diagnostic is only available for regression.")
 
     def _get_oob_decision_function(self):

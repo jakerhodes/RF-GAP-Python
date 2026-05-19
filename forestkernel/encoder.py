@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import numpy as np
-from sklearn.base import BaseEstimator, TransformerMixin
+from sklearn.base import BaseEstimator, TransformerMixin, is_classifier
 from sklearn.utils.validation import check_is_fitted
 from sklearn.exceptions import NotFittedError
 
@@ -20,6 +20,8 @@ from .maps import (
     block_symmetrize,
     format_output_matrix,
 )
+from .prediction.functional import kernel_predict
+from .prediction.diagnostics import KernelDiagnostics
 
 
 class LeafEncoder(TransformerMixin, BaseEstimator):
@@ -73,6 +75,18 @@ class LeafEncoder(TransformerMixin, BaseEstimator):
                 "This LeafEncoder instance is not fitted yet. "
                 "Call `fit(...)` first."
             )
+    
+    def _is_classifier(self, fitted=False):
+        """
+        Return whether the underlying forest is a classifier.
+    
+        If fitted=False, inspect the user-provided forest.
+        If fitted=True, inspect the fitted adapter estimator.
+    
+        Non-classifier estimators are treated as regressors by default.
+        """
+        estimator = self.forest_.estimator if fitted else self.forest
+        return is_classifier(estimator)
 
     def _format(self, matrix, return_dense=False):
         return format_output_matrix(matrix, return_dense=return_dense)
@@ -97,10 +111,11 @@ class LeafEncoder(TransformerMixin, BaseEstimator):
         self.forest_ = adapter
         self.X_fit_ = X
         self.y_ = y
-        if callable(getattr(adapter.estimator, "predict_proba", None)):
-            self.classes_ = getattr(adapter.estimator, "classes_", np.unique(y))
-        else:
-            self.classes_ = None
+        self.classes_ = (
+            getattr(adapter.estimator, "classes_", np.unique(y))
+            if self._is_classifier(fitted=True)
+            else None
+        )
         self.cache_ = None
     
         return self
@@ -190,6 +205,11 @@ class LeafEncoder(TransformerMixin, BaseEstimator):
         """
         self._fit_forest(X, y, **fit_kwargs)
         self._build_cache()
+    
+        # Drop cached diagnostics because they depend on fitted state.
+        if hasattr(self, "_diagnostics"):
+            del self._diagnostics
+    
         return self
 
     def fit_transform(self, X, y, return_dense=False, **fit_kwargs):
@@ -277,3 +297,53 @@ class LeafEncoder(TransformerMixin, BaseEstimator):
         P = Q.dot(self.cache_.W_mat.T)
 
         return self._format(P, return_dense=return_dense)
+    
+    def predict(self, X):
+        """
+        Predict by applying fitted forest proximity weights to training labels.
+        """
+        self._check_fitted()
+    
+        Q = self.transform(X, return_dense=False)
+    
+        return kernel_predict(
+            Q,
+            self.cache_.W_mat,
+            self.y_,
+            self.weight_scheme,
+            is_classifier=self._is_classifier(fitted=True),
+        )
+    
+    def predict_proba(self, X):
+        """
+        Return class probabilities for classifier forests.
+        """
+        self._check_fitted()
+    
+        if not self._is_classifier(fitted=True):
+            raise AttributeError(
+                "predict_proba is only available when the fitted forest is a classifier."
+            )
+    
+        Q = self.transform(X, return_dense=False)
+    
+        proba, _ = kernel_predict(
+            Q,
+            self.cache_.W_mat,
+            self.y_,
+            self.weight_scheme,
+            is_classifier=True,
+            return_proba=True,
+        )
+    
+        return proba
+    
+    @property
+    def diagnostics(self):
+        """
+        Lazy diagnostics accessor for fitted forest-kernel diagnostics.
+        """
+        if not hasattr(self, "_diagnostics"):
+            self._diagnostics = KernelDiagnostics(self)
+    
+        return self._diagnostics

@@ -118,16 +118,30 @@ def _kernel_predict_proba_cls(Q, W, y_train, weight_scheme):
     return proba, classes
 
 
-def kernel_predict(Q, W, y_train, weight_scheme, prediction_type, return_proba=False):
-    if prediction_type == "regression":
+def kernel_predict(Q, W, y_train, weight_scheme, is_classifier=False, return_proba=False):
+    """
+    Predict from query/reference leaf maps using proximity-weighted labels.
+
+    Parameters
+    ----------
+    is_classifier : bool, default=False
+        If True, perform classification. Otherwise, perform regression.
+
+    return_proba : bool, default=False
+        If True, return class probabilities and classes. Only valid when
+        is_classifier=True.
+    """
+    if not isinstance(is_classifier, bool):
+        raise TypeError("`is_classifier` must be a boolean.")
+
+    if not is_classifier:
         if return_proba:
             raise ValueError("`return_proba=True` is only valid for classification.")
         return _kernel_predict_reg(Q, W, y_train, weight_scheme)
 
-    if prediction_type == "classification":
-        proba, classes = _kernel_predict_proba_cls(Q, W, y_train, weight_scheme)
-        if return_proba:
-            return proba, classes
-        return classes[np.argmax(proba, axis=1)]
+    proba, classes = _kernel_predict_proba_cls(Q, W, y_train, weight_scheme)
 
-    raise ValueError("prediction_type must be 'classification' or 'regression'.")
+    if return_proba:
+        return proba, classes
+
+    return classes[np.argmax(proba, axis=1)]
