@@ -2,7 +2,6 @@ import warnings
 
 import numpy as np
 from scipy import sparse
-from sklearn.base import is_classifier, is_regressor
 
 
 class KernelDiagnostics:
