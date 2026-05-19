@@ -26,7 +26,7 @@ dependencies = [
 boosted = ["lightgbm", "xgboost"]
 viz = ["matplotlib", "seaborn", "umap-learn"]
 experiments = ["pandas", "pyarrow", "matplotlib", "seaborn", "umap-learn"]
-test = ["pytest", "pytest-cov", "lightgbm", "xgboost"]
+test = ["pytest", "pytest-cov"]
 all = ["lightgbm","xgboost","matplotlib","seaborn","umap-learn","pandas","pyarrow","pytest","pytest-cov"]
 
 [tool.setuptools]
