@@ -20,9 +20,7 @@ from .maps import (
     block_symmetrize,
     format_output_matrix,
 )
-from .prediction.functional import kernel_predict
-from .prediction.diagnostics import KernelDiagnostics
-
+from .prediction import kernel_predict, KernelDiagnostics
 
 class LeafEncoder(TransformerMixin, BaseEstimator):
     """
