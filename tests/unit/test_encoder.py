@@ -3,7 +3,7 @@ import pytest
 
 from forestkernel import LeafEncoder
 
-from tests.test_constants import RF_ET_FORESTS_AND_DATA, RF_ET_WEIGHT_SCHEMES
+from tests.fixtures.constants import RF_ET_FORESTS_AND_DATA, RF_ET_WEIGHT_SCHEMES
 
 
 @pytest.mark.parametrize("forest_fixture,data_fixture", RF_ET_FORESTS_AND_DATA)
