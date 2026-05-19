@@ -301,6 +301,9 @@ class LeafEncoder(TransformerMixin, BaseEstimator):
     def predict(self, X):
         """
         Predict by applying fitted forest proximity weights to training labels.
+
+        The prediction type is inferred from the fitted base forest so the same
+        encoder class can serve both classifier and regressor ensembles.
         """
         self._check_fitted()
     
@@ -317,6 +320,8 @@ class LeafEncoder(TransformerMixin, BaseEstimator):
     def predict_proba(self, X):
         """
         Return class probabilities for classifier forests.
+
+        This is only available when the fitted forest is a classifier.
         """
         self._check_fitted()
     
