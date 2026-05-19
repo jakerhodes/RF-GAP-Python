@@ -79,6 +79,3 @@ class RFETAdapter(EnsembleAdapter):
             counts[:, t] = binc
 
         return counts.astype(np.float32)
-
-    def get_tree_weights(self, X_ref):
-        raise ValueError("Tree weights are not defined for RandomForest / ExtraTrees.")
