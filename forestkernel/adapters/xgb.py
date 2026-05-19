@@ -94,12 +94,6 @@ class XGBoostAdapter(EnsembleAdapter):
         )
         return self._n_nodes_per_tree_cache
 
-    def get_oob_mask(self, X_train=None):
-        raise ValueError("OOB indices are not defined for XGBoost.")
-
-    def get_in_bag_counts(self, X_train=None):
-        raise ValueError("In-bag counts are not defined for XGBoost.")
-
     def get_tree_weights(self, X_ref):
         """
         Compute normalized tree-specific weights for boosted-tree proximities.

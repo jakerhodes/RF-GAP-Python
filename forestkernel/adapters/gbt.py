@@ -54,12 +54,6 @@ class GBTAdapter(EnsembleAdapter):
         tree_list = self._get_tree_list()
         return [tree.tree_.node_count for tree in tree_list]
 
-    def get_oob_mask(self, X_train=None):
-        raise ValueError("OOB indices are not defined for GradientBoosting.")
-
-    def get_in_bag_counts(self, X_train=None):
-        raise ValueError("In-bag counts are not defined for GradientBoosting.")
-
     def get_tree_weights(self, X_ref):
         """
         Compute normalized tree-specific weights for boosted-tree proximities.
