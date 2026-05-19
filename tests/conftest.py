@@ -9,8 +9,15 @@ from sklearn.ensemble import (
 )
 from sklearn.model_selection import train_test_split
 
-from lightgbm import LGBMClassifier
-from xgboost import XGBClassifier
+try:
+    from lightgbm import LGBMClassifier
+except ImportError:
+    LGBMClassifier = None
+
+try:
+    from xgboost import XGBClassifier
+except ImportError:
+    XGBClassifier = None
 
 
 @pytest.fixture
@@ -113,6 +120,9 @@ def gbt_classifier():
 
 @pytest.fixture
 def lgbm_classifier():
+    if LGBMClassifier is None:
+        pytest.importorskip("lightgbm")
+
     return LGBMClassifier(
         n_estimators=50,
         learning_rate=0.1,
@@ -124,6 +134,9 @@ def lgbm_classifier():
 
 @pytest.fixture
 def xgb_classifier():
+    if XGBClassifier is None:
+        pytest.importorskip("xgboost")
+
     return XGBClassifier(
         n_estimators=50,
         learning_rate=0.1,
