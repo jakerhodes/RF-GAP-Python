@@ -121,6 +121,13 @@ K_test_train = encoder.kernel_extend(X_test)
 K_train_dense = encoder.kernel(return_dense=True)
 ```
 
+For proximity-weighted prediction, `LeafEncoder.predict(X)` and
+`LeafEncoder.predict_proba(X)` provide matrix-free convenience wrappers that use
+the fitted base forest task type: regression forests return weighted responses,
+while classification forests return weighted class predictions/probabilities.
+They avoid materializing the full proximity matrix `P` by multiplying the sparse
+leaf factors against the training targets or class indicators directly.
+
 For asymmetric weighting schemes such as `gap`, the fitted training query map
 `Q_train` and reference map `W_train` differ. The train-train kernel is still
 computed as `Q_train @ W_train.T`, and `kernel_extend(X)` returns
