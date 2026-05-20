@@ -9,6 +9,7 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
+from sklearn.ensemble import ExtraTreesClassifier, RandomForestClassifier
 from sklearn.metrics import accuracy_score
 from sklearn.model_selection import StratifiedShuffleSplit
 
@@ -19,13 +20,18 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from forestkernel import ForestKernel
+from forestkernel import LeafEncoder
 from experiments.runtime_utils import (
     kernel_percent_nnz,
     load_dataset_pair,
     log_progress,
     resolve_dataset_paths_from_base_names,
 )
+
+try:
+    from xgboost import XGBClassifier
+except ImportError:
+    XGBClassifier = None
 
 
 # ---------------------------------------------------------------------
@@ -260,7 +266,7 @@ def instantiate_fk(
     kernel_method: str,
     seed: int,
     model_kwargs: dict[str, object],
-) -> ForestKernel:
+) -> LeafEncoder:
     kwargs = dict(model_kwargs)
 
     if model_type in {"rf", "et"}:
@@ -271,16 +277,23 @@ def instantiate_fk(
 
     kwargs["random_state"] = seed
 
-    return ForestKernel(
-        prediction_type="classification",
-        kernel_method=kernel_method,
-        model_type=model_type,
-        **kwargs,
-    )
+    if model_type == "rf":
+        forest = RandomForestClassifier(**kwargs)
+    elif model_type == "et":
+        forest = ExtraTreesClassifier(**kwargs)
+    elif model_type == "xgb":
+        if XGBClassifier is None:
+            raise ImportError("model_type='xgb' requires xgboost to be installed.")
+        forest = XGBClassifier(**kwargs)
+    else:
+        raise ValueError(f"Unsupported model_type for this script: {model_type!r}")
+
+    weight_scheme = "uniform" if kernel_method == "original" else kernel_method
+    return LeafEncoder(forest=forest, weight_scheme=weight_scheme)
 
 
 def run_fk_full_pipeline(
-    fk: ForestKernel,
+    fk: LeafEncoder,
     X_sub,
     y_sub,
     X_test,
@@ -288,25 +301,25 @@ def run_fk_full_pipeline(
     kernel_method: str,
 ):
     t0 = time.perf_counter()
-    fk.fit_forest(X_sub, y_sub)
+    fk._fit_forest(X_sub, y_sub)
     forest_fit_time = time.perf_counter() - t0
 
     t0 = time.perf_counter()
-    y_pred_forest = fk.predict_forest(X_test)
+    y_pred_forest = fk.forest_.estimator.predict(X_test)
     forest_pred_time = time.perf_counter() - t0
     forest_acc = accuracy_score(y_test, y_pred_forest)
 
     t0 = time.perf_counter()
-    fk.build_kernel_cache(kernel_method=kernel_method)
+    fk._build_cache()
     cache_time = time.perf_counter() - t0
 
     t0 = time.perf_counter()
-    fk.get_train_query_map()
+    fk.training_query_map()
     q_time = time.perf_counter() - t0
 
     if RUN_FULL_KERNEL:
         t0 = time.perf_counter()
-        K_fk = fk.get_kernel()
+        K_fk = fk.kernel()
         k_time = time.perf_counter() - t0
         k_percent_nnz = kernel_percent_nnz(K_fk)
     else:
@@ -314,7 +327,7 @@ def run_fk_full_pipeline(
         k_percent_nnz = np.nan
 
     t0 = time.perf_counter()
-    y_pred_kp = fk.kernel_predict(X_test)
+    y_pred_kp = fk.predict(X_test)
     kp_time = time.perf_counter() - t0
     kp_acc = accuracy_score(y_test, y_pred_kp)
 
@@ -374,6 +387,7 @@ from pathlib import Path
 import gc
 
 import numpy as np
+from sklearn.ensemble import ExtraTreesClassifier, RandomForestClassifier
 from sklearn.metrics import accuracy_score
 from sklearn.model_selection import StratifiedShuffleSplit
 
@@ -383,12 +397,17 @@ payload_path = Path(sys.argv[2])
 if str(project_root) not in sys.path:
     sys.path.insert(0, str(project_root))
 
-from forestkernel import ForestKernel
+from forestkernel import LeafEncoder
 from experiments.runtime_utils import (
     MemoryMonitor,
     kernel_percent_nnz,
     load_dataset_pair,
 )
+
+try:
+    from xgboost import XGBClassifier
+except ImportError:
+    XGBClassifier = None
 
 payload = json.loads(payload_path.read_text(encoding="utf-8"))
 
@@ -411,12 +430,18 @@ def instantiate_fk(model_type, kernel_method, seed, model_kwargs):
         kwargs.setdefault("n_jobs", -1)
         kwargs.setdefault("device", "cuda")
     kwargs["random_state"] = seed
-    return ForestKernel(
-        prediction_type="classification",
-        kernel_method=kernel_method,
-        model_type=model_type,
-        **kwargs,
-    )
+    if model_type == "rf":
+        forest = RandomForestClassifier(**kwargs)
+    elif model_type == "et":
+        forest = ExtraTreesClassifier(**kwargs)
+    elif model_type == "xgb":
+        if XGBClassifier is None:
+            raise ImportError("model_type='xgb' requires xgboost to be installed.")
+        forest = XGBClassifier(**kwargs)
+    else:
+        raise ValueError(f"Unsupported model_type for this script: {model_type!r}")
+    weight_scheme = "uniform" if kernel_method == "original" else kernel_method
+    return LeafEncoder(forest=forest, weight_scheme=weight_scheme)
 
 paths = payload["dataset_paths"]
 X_train_pool, X_test, y_train_pool, y_test, meta = load_dataset_pair(
@@ -453,12 +478,12 @@ run_full_kernel = payload["run_full_kernel"]
 # Unmeasured: forest fit
 # -------------------------------------------------
 t0 = time.perf_counter()
-fk.fit_forest(X_sub, y_sub)
+fk._fit_forest(X_sub, y_sub)
 forest_fit_time = time.perf_counter() - t0
 
 # Optional forest prediction time/acc, also unmeasured for memory
 t0 = time.perf_counter()
-y_pred_forest = fk.predict_forest(X_test)
+y_pred_forest = fk.forest_.estimator.predict(X_test)
 forest_pred_time = time.perf_counter() - t0
 forest_acc = accuracy_score(y_test, y_pred_forest)
 
@@ -469,16 +494,16 @@ gc.collect()
 # -------------------------------------------------
 with MemoryMonitor(poll_seconds=0.005) as mm:
     t0 = time.perf_counter()
-    fk.build_kernel_cache(kernel_method=payload["kernel_method"])
+    fk._build_cache()
     cache_time = time.perf_counter() - t0
 
     t0 = time.perf_counter()
-    fk.get_train_query_map()
+    fk.training_query_map()
     q_time = time.perf_counter() - t0
 
     if run_full_kernel:
         t0 = time.perf_counter()
-        K_fk = fk.get_kernel()
+        K_fk = fk.kernel()
         k_time = time.perf_counter() - t0
         k_percent_nnz = kernel_percent_nnz(K_fk)
     else:
@@ -491,7 +516,7 @@ kernel_build_peak_mb = mm.peak_delta_mb
 # Unmeasured: kernel prediction
 # -------------------------------------------------
 t0 = time.perf_counter()
-y_pred_kp = fk.kernel_predict(X_test)
+y_pred_kp = fk.predict(X_test)
 kp_time = time.perf_counter() - t0
 kp_acc = accuracy_score(y_test, y_pred_kp)
 

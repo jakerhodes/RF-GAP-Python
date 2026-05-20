@@ -8,7 +8,7 @@
 # For each setting:
 #   - fit shared forest
 #   - extract OOB masks
-#   - compare ForestKernel OOB mask vs legacy OOB mask
+#   - compare LeafEncoder OOB mask vs legacy OOB mask
 #   - compute the proposition ratio
 #
 # Proposition quantity:
@@ -26,6 +26,7 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
+from sklearn.ensemble import RandomForestClassifier
 from sklearn.model_selection import StratifiedShuffleSplit
 
 # ---------------------------------------------------------------------
@@ -36,7 +37,7 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from dataset import dataprep
-from forestkernel import ForestKernel
+from forestkernel import LeafEncoder
 from experiments.baselines.rfgap import RFGAP
 
 
@@ -174,15 +175,15 @@ def stratified_subsample_indices(y: np.ndarray, frac: float, seed: int) -> np.nd
 def build_fk(
     n_estimators: int,
     seed: int,
-) -> ForestKernel:
-    return ForestKernel(
-        prediction_type="classification",
-        kernel_method="oob",
-        model_type="rf",
-        n_estimators=n_estimators,
-        bootstrap=True,
-        n_jobs=-1,
-        random_state=seed,
+) -> LeafEncoder:
+    return LeafEncoder(
+        forest=RandomForestClassifier(
+            n_estimators=n_estimators,
+            bootstrap=True,
+            n_jobs=-1,
+            random_state=seed,
+        ),
+        weight_scheme="oob",
     )
 
 
@@ -205,12 +206,12 @@ def build_legacy(
 # ---------------------------------------------------------------------
 # OOB count statistics
 # ---------------------------------------------------------------------
-def get_fk_oob_mask(fk: ForestKernel) -> np.ndarray:
-    if not hasattr(fk, "cache") or fk.cache is None:
-        raise ValueError("ForestKernel cache is missing. Did you call build_kernel_cache('oob')?")
-    if not hasattr(fk.cache, "oob_mask"):
-        raise ValueError("ForestKernel cache has no attribute 'oob_mask'.")
-    return np.asarray(fk.cache.oob_mask, dtype=np.int8)
+def get_fk_oob_mask(fk: LeafEncoder) -> np.ndarray:
+    if not hasattr(fk, "cache_") or fk.cache_ is None:
+        raise ValueError("LeafEncoder cache is missing. Did you call _build_cache()?")
+    if not hasattr(fk.cache_, "oob_mask"):
+        raise ValueError("LeafEncoder cache has no attribute 'oob_mask'.")
+    return np.asarray(fk.cache_.oob_mask, dtype=np.int8)
 
 
 def get_legacy_oob_mask(legacy, X_train: np.ndarray) -> np.ndarray:
@@ -338,16 +339,16 @@ def main() -> None:
                     PROGRESS_LOG,
                 )
 
-                # Shared forest through ForestKernel
+                # Shared forest through LeafEncoder
                 fk = build_fk(n_estimators=n_estimators, seed=seed)
 
                 t0 = time.perf_counter()
-                fk.fit_forest(X_train, y_train)
+                fk._fit_forest(X_train, y_train)
                 forest_fit_time_s = time.perf_counter() - t0
 
-                # Build FK OOB cache to expose fk.cache.oob_mask
+                # Build FK OOB cache to expose fk.cache_.oob_mask
                 t0 = time.perf_counter()
-                fk.build_kernel_cache(kernel_method="oob")
+                fk._build_cache()
                 fk_oob_cache_time_s = time.perf_counter() - t0
 
                 t0 = time.perf_counter()
@@ -359,7 +360,7 @@ def main() -> None:
                     n_estimators=n_estimators,
                     seed=seed,
                 )
-                legacy.set_forest(fk.forest_, y=y_train)
+                legacy.set_forest(fk.forest_.estimator, y=y_train)
 
                 t0 = time.perf_counter()
                 legacy_oob_mask = get_legacy_oob_mask(legacy, X_train)

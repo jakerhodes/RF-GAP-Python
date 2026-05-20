@@ -9,6 +9,7 @@ import pandas as pd
 import scipy.sparse as sp
 from baselines import PageRankPHATE
 from sklearn.decomposition import PCA
+from sklearn.ensemble import RandomForestClassifier
 from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import accuracy_score
 from sklearn.neighbors import KNeighborsClassifier
@@ -23,7 +24,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from forestkernel import ForestKernel
+from forestkernel import LeafEncoder
 from experiments.runtime_utils import (
     load_dataset_pair_with_raw_labels,
     log_progress,
@@ -164,14 +165,14 @@ def validate_methods_to_run(methods_to_run: list[str]) -> None:
         )
 
 
-def instantiate_fk(seed: int) -> ForestKernel:
+def instantiate_fk(seed: int) -> LeafEncoder:
     kwargs = dict(FOREST_KWARGS)
     kwargs["random_state"] = seed
-    return ForestKernel(
-        prediction_type="classification",
-        kernel_method=KERNEL_METHOD,
-        model_type=MODEL_TYPE,
-        **kwargs,
+    if MODEL_TYPE != "rf":
+        raise ValueError(f"Unsupported MODEL_TYPE for this script: {MODEL_TYPE!r}")
+    return LeafEncoder(
+        forest=RandomForestClassifier(**kwargs),
+        weight_scheme=KERNEL_METHOD,
     )
 
 
@@ -434,7 +435,7 @@ def run_raw_pca(
 
 
 def run_leaf_pca(
-    fk: ForestKernel,
+    fk: LeafEncoder,
     X_train,
     X_test,
     y_train,
@@ -448,15 +449,15 @@ def run_leaf_pca(
 ) -> dict:
     def train_pipeline():
         t0 = time.perf_counter()
-        fk.fit_forest(X_train, y_train)
+        fk._fit_forest(X_train, y_train)
         forest_fit_time = time.perf_counter() - t0
 
         t0 = time.perf_counter()
-        fk.build_kernel_cache(kernel_method=KERNEL_METHOD)
+        fk._build_cache()
         cache_time = time.perf_counter() - t0
 
         t0 = time.perf_counter()
-        leaf_train = fk.get_reference_map()
+        leaf_train = fk.reference_map()
         ref_time = time.perf_counter() - t0
 
         pca = PCA(n_components=2, random_state=seed)
@@ -477,7 +478,7 @@ def run_leaf_pca(
 
     def test_pipeline():
         t0 = time.perf_counter()
-        leaf_test = fk.get_query_map(X_test)
+        leaf_test = fk.transform(X_test)
         query_time = time.perf_counter() - t0
 
         t0 = time.perf_counter()
@@ -601,7 +602,7 @@ def run_raw_pca_umap(
 
 
 def run_leaf_pca_umap(
-    fk: ForestKernel,
+    fk: LeafEncoder,
     X_train,
     X_test,
     y_train,
@@ -615,15 +616,15 @@ def run_leaf_pca_umap(
 ) -> dict:
     def train_pipeline():
         t0 = time.perf_counter()
-        fk.fit_forest(X_train, y_train)
+        fk._fit_forest(X_train, y_train)
         forest_fit_time = time.perf_counter() - t0
 
         t0 = time.perf_counter()
-        fk.build_kernel_cache(kernel_method=KERNEL_METHOD)
+        fk._build_cache()
         cache_time = time.perf_counter() - t0
 
         t0 = time.perf_counter()
-        leaf_train = fk.get_reference_map()
+        leaf_train = fk.reference_map()
         ref_time = time.perf_counter() - t0
 
         pca_reducer = PCA(n_components=PCA_UMAP_N_COMPONENTS, random_state=seed)
@@ -662,7 +663,7 @@ def run_leaf_pca_umap(
 
     def test_pipeline():
         t0 = time.perf_counter()
-        leaf_test = fk.get_query_map(X_test)
+        leaf_test = fk.transform(X_test)
         query_time = time.perf_counter() - t0
 
         t0 = time.perf_counter()
@@ -820,7 +821,7 @@ def run_raw_pca_phate(
 
 
 def run_leaf_pca_phate(
-    fk: ForestKernel,
+    fk: LeafEncoder,
     X_train,
     X_test,
     y_train,
@@ -834,15 +835,15 @@ def run_leaf_pca_phate(
 ) -> dict:
     def train_pipeline():
         t0 = time.perf_counter()
-        fk.fit_forest(X_train, y_train)
+        fk._fit_forest(X_train, y_train)
         forest_fit_time = time.perf_counter() - t0
 
         t0 = time.perf_counter()
-        fk.build_kernel_cache(kernel_method=KERNEL_METHOD)
+        fk._build_cache()
         cache_time = time.perf_counter() - t0
 
         t0 = time.perf_counter()
-        leaf_train = fk.get_reference_map()
+        leaf_train = fk.reference_map()
         ref_time = time.perf_counter() - t0
 
         pca_reducer = PCA(n_components=PCA_PHATE_N_COMPONENTS, random_state=seed)
@@ -896,7 +897,7 @@ def run_leaf_pca_phate(
 
     def test_pipeline():
         t0 = time.perf_counter()
-        leaf_test = fk.get_query_map(X_test)
+        leaf_test = fk.transform(X_test)
         query_time = time.perf_counter() - t0
 
         t0 = time.perf_counter()
