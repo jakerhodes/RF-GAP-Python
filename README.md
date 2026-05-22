@@ -1,24 +1,68 @@
-# forestgeom
+# ForestGeom
+```text
+    x_i ● ─────────────┐     ┌──────────── ● x_j
+                       ▼     ▼
+              ┌─────────────────────────┐
+              │     FOREST ENSEMBLE     │
+              └───────────┬─────────────┘
+                          │
+              ┌───────────┴───────────┐
+              │                       │
+              ▼                       ▼
+      ┌─────────────────┐     ┌─────────────────┐
+      │ same decision   │     │ divergent       │
+      │ paths           │     │ decision paths  │
+      │                 │     │                 │
+      │        ●        │     │        ●        │
+      │       / \       │     │       / \       │
+      │      ●   ●      │     │      ●   ●      │
+      │     /     \     │     │     /     \     │
+      │    ●       ●    │     │    ●       ●    │
+      │   / \     / \   │     │   / \     / \   │
+      │  ●   ●   ●   ●  │     │  ●   ●   ●   ●  │
+      │      ▲          │     │  ▲       ▲      │
+      │     x_i         │     │ x_i     x_j     │
+      │     x_j         │     │                 │
+      └────────┬────────┘     └────────┬────────┘
+               │                       │
+               └───────────┬───────────┘
+                           ▼
+                  Sparse Forest Maps:      x ↦ φ(x)
+                  Explicit Leaf-Collision Kernels: P = Q Wᵀ
+                  Vectorizing Tree Geometry
+```
 
-`forestgeom` builds sparse leaf-incidence representations for tree ensembles and
-uses them to compute forest kernels/proximities. The core API is
-`forestgeom.LeafEncoder`, which fits a supported ensemble, encodes samples by
-the leaves they reach, and represents the train-train kernel in factored form:
+`forestgeom` provides geometric representations induced by tree ensembles for
+downstream forest-guided learning. Its goal is to make the geometry learned by a
+forest available as reusable sparse features, proximity operators, and
+prediction utilities rather than treating the fitted forest only as a black-box
+predictor.
+
+The current core API is `forestgeom.LeafEncoder`, which fits a supported
+ensemble and encodes samples by the leaves they reach. This yields sparse
+query-side and reference-side leaf maps that factorize the forest proximity:
 
 ```text
 P = Q W^T
 ```
 
-Here, `Q` is the query-side leaf map and `W` is the reference-side leaf map. Both
-maps are sparse, with at most one nonzero per tree per sample, so downstream code
-can work directly with the sparse factors instead of materializing a dense
-pairwise proximity matrix.
+Here, `Q` is the query-side representation and `W` is the reference-side
+representation. Both maps are sparse, with at most one nonzero per tree per
+sample, so downstream methods can work directly with the factors instead of
+materializing dense pairwise proximity matrices.
 
 The package implements forest proximity constructions described in
 “Random Forest- Geometry- and Accuracy-Preserving Proximities”
 (https://ieeexplore.ieee.org/document/10089875) and
 “Revisiting Forest Proximities via Sparse Leaf-Incidence Kernels”
 (https://arxiv.org/abs/2601.02735).
+
+The project is intended to evolve beyond leaf-incidence maps into a broader
+framework for forest-induced representation learning. Natural extensions include
+path-based encoders, alternative forest geometries, additional base forest
+families, and integrations with downstream tasks such as embedding, clustering,
+imputation, uncertainty estimation, and semi-supervised learning. Contributions
+in these directions are welcome.
 
 # Installation (recommended)
 The recommended way for most users to install is directly from the GitHub repository into a virtual environment. This lets users install the package into their own venv without waiting for a PyPI release.
