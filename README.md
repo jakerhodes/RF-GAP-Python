@@ -1,14 +1,14 @@
 # ForestGeom
 ```text
-    x_i ● ─────────────┐     ┌──────────── ● x_j
-                       ▼     ▼
-              ┌─────────────────────────┐
-              │     FOREST ENSEMBLE     │
-              └───────────┬─────────────┘
-                          │
-              ┌───────────┴───────────┐
-              │                       │
-              ▼                       ▼
+     x_i ● ─────────────┐     ┌──────────── ● x_j
+                        ▼     ▼
+               ┌─────────────────────────┐
+               │     FOREST ENSEMBLE     │
+               └───────────┬─────────────┘
+                           │
+               ┌───────────┴───────────┐
+               │                       │
+               ▼                       ▼
       ┌─────────────────┐     ┌─────────────────┐
       │ same decision   │     │ divergent       │
       │ paths           │     │ decision paths  │
@@ -27,9 +27,9 @@
                │                       │
                └───────────┬───────────┘
                            ▼
-                  Sparse Forest Maps:      x ↦ φ(x)
-                  Explicit Leaf-Collision Kernels: P = Q Wᵀ
-                  Vectorizing Tree Geometry
+              Sparse Forest Maps:      x ↦ φ(x)
+              Explicit Leaf-Collision Kernels: P = Q Wᵀ
+              Vectorizing Tree Geometry
 ```
 
 `forestgeom` provides geometric representations induced by tree ensembles for
