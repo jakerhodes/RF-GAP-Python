@@ -139,6 +139,53 @@ ExtraTrees estimators support `uniform` and `kerf`; they support `oob` and
 `gap` only when fitted with `bootstrap=True`. Boosted estimators support
 `uniform`, `kerf`, and `boosted`.
 
+Leaf maps follow the usual scikit-learn transformer flow: use `fit(...)` when
+you want to keep the fitted encoder, `fit_transform(...)` when you want the
+training query map immediately, and `transform(...)` for new samples. This makes
+the query-side leaf representation easy to use in downstream estimators and
+pipelines that consume sparse feature matrices.
+
+```python
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.linear_model import LogisticRegression
+from sklearn.pipeline import make_pipeline
+
+from forestgeom import LeafEncoder
+
+forest = RandomForestClassifier(
+    n_estimators=500,
+    bootstrap=True,
+    random_state=0,
+    n_jobs=-1,
+)
+
+encoder = LeafEncoder(forest=forest, weight_scheme="uniform")
+
+# sklearn-style transformer flow.
+Q_train = encoder.fit_transform(X_train, y_train)
+Q_test = encoder.transform(X_test)
+
+# The sparse leaf maps can feed downstream models directly.
+clf = LogisticRegression(max_iter=1000)
+clf.fit(Q_train, y_train)
+pred = clf.predict(Q_test)
+
+# The encoder can also be placed in a pipeline when only the query map is needed.
+pipe = make_pipeline(
+    LeafEncoder(forest=forest, weight_scheme="uniform"),
+    LogisticRegression(max_iter=1000),
+)
+pipe.fit(X_train, y_train)
+pred = pipe.predict(X_test)
+```
+
+For symmetric weighting schemes such as `uniform`, `kerf`, and `boosted`, the
+training query map can usually be treated as the leaf-space feature matrix. For
+asymmetric schemes such as `gap`, the geometry is defined by two maps: the
+query-side map `Q` and the reference-side map `W`. In those cases, downstream
+code that needs proximities should keep both maps or use `Q @ W.T` explicitly rather than
+assuming a single symmetric feature representation.
+
 ```python
 from sklearn.ensemble import RandomForestClassifier
 from forestgeom import LeafEncoder
