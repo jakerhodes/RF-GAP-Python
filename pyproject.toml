@@ -1,6 +1,6 @@
 [build-system]
-requires = ["setuptools>=61", "wheel"]
-build-backend = "setuptools.build_meta"
+requires = ["hatchling"]
+build-backend = "hatchling.build"
 
 [project]
 name = "forestgeom"
@@ -8,7 +8,12 @@ version = "0.0.1"
 description = "Forest kernel package"
 readme = "README.md"
 requires-python = ">=3.8"
-license = { text = "GPL-3.0-or-later" }
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Operating System :: OS Independent",
+]
+license = "GPL-3.0-or-later"
+license-files = ["LICENSE"]
 authors = [
 	{ name = "Jake Rhodes", email = "jakerhodes8@gmail.com" },
 	{ name = "Adrien Aumon", email = "adrien.aumon@umontreal.ca" },
@@ -28,10 +33,5 @@ experiments = ["pandas", "pyarrow", "matplotlib", "seaborn", "umap-learn"]
 test = ["pytest", "pytest-cov"]
 all = ["lightgbm","xgboost","matplotlib","seaborn","umap-learn","pandas","pyarrow","pytest","pytest-cov"]
 
-[tool.setuptools]
-package-dir = { "" = "src" }
-license-files = ["LICENSE"]
-
-[tool.setuptools.packages.find]
-where = ["src"]
-include = ["forestgeom*"]
+[tool.hatch.build.targets.wheel]
+packages = ["src/forestgeom"]
