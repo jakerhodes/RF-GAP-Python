@@ -14,9 +14,12 @@ from sklearn.metrics import accuracy_score
 from sklearn.model_selection import StratifiedShuffleSplit
 
 # ---------------------------------------------------------------------
-# Make project root importable
+# Make local packages importable
 # ---------------------------------------------------------------------
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
+SRC_ROOT = PROJECT_ROOT / "src"
+if str(SRC_ROOT) not in sys.path:
+    sys.path.insert(0, str(SRC_ROOT))
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
@@ -392,8 +395,11 @@ from sklearn.metrics import accuracy_score
 from sklearn.model_selection import StratifiedShuffleSplit
 
 project_root = Path(sys.argv[1])
+src_root = project_root / "src"
 payload_path = Path(sys.argv[2])
 
+if str(src_root) not in sys.path:
+    sys.path.insert(0, str(src_root))
 if str(project_root) not in sys.path:
     sys.path.insert(0, str(project_root))
 
