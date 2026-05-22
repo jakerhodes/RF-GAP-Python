@@ -24,7 +24,7 @@ def _safe_divide_rows(values, row_sums):
 
 def _factored_row_sums(Q, W):
     """
-    Compute row sums of the kernel block P = Q W^T without materializing P.
+    Compute row sums of the proximity block P = Q W^T without materializing P.
 
     This returns
 
@@ -38,7 +38,7 @@ def _factored_row_sums(Q, W):
         Memory: O(L + n_query)
 
     where L is the number of leaf coordinates. This avoids the potentially
-    much larger cost of forming the full n_query x n_reference kernel block.
+    much larger cost of forming the full n_query x n_reference proximity block.
     """
     ones = np.ones(W.shape[0], dtype=float)
     return Q.dot(W.T.dot(ones))
@@ -52,9 +52,9 @@ def _validate_shapes(W, y_train):
         )
 
 
-def _kernel_predict_reg(Q, W, y_train, weight_scheme):
+def proximity_predict_reg(Q, W, y_train, weight_scheme):
     """
-    Kernel-weighted regression using
+    Proximity-weighted regression using
 
         P y = Q (W^T y),
 
@@ -76,9 +76,9 @@ def _kernel_predict_reg(Q, W, y_train, weight_scheme):
     return preds
 
 
-def _kernel_predict_proba_cls(Q, W, y_train, weight_scheme):
+def proximity_predict_proba_cls(Q, W, y_train, weight_scheme):
     """
-    Kernel-weighted class probabilities using
+    Proximity-weighted class probabilities using
 
         P Y = Q (W^T Y),
 
@@ -118,7 +118,7 @@ def _kernel_predict_proba_cls(Q, W, y_train, weight_scheme):
     return proba, classes
 
 
-def kernel_predict(Q, W, y_train, weight_scheme, is_classifier=False, return_proba=False):
+def proximity_predict(Q, W, y_train, weight_scheme, is_classifier=False, return_proba=False):
     """
     Predict from query/reference leaf maps using proximity-weighted labels.
 
@@ -137,9 +137,9 @@ def kernel_predict(Q, W, y_train, weight_scheme, is_classifier=False, return_pro
     if not is_classifier:
         if return_proba:
             raise ValueError("`return_proba=True` is only valid for classification.")
-        return _kernel_predict_reg(Q, W, y_train, weight_scheme)
+        return proximity_predict_reg(Q, W, y_train, weight_scheme)
 
-    proba, classes = _kernel_predict_proba_cls(Q, W, y_train, weight_scheme)
+    proba, classes = proximity_predict_proba_cls(Q, W, y_train, weight_scheme)
 
     if return_proba:
         return proba, classes

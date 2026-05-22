@@ -20,25 +20,25 @@ from .maps import (
     block_symmetrize,
     format_output_matrix,
 )
-from .prediction import kernel_predict, KernelDiagnostics
+from .prediction import proximity_predict, PredictionDiagnostics
 
 class LeafEncoder(TransformerMixin, BaseEstimator):
     """
     Sparse forest leaf encoder.
 
-    The fitted encoder represents forest kernels in factored form
+    The fitted encoder represents forest proximities in factored form
 
         P = Q W^T,
 
     where Q is the query-side leaf map and W is the reference-side leaf map.
     Both Q and W are highly sparse (at most T nonzeros per row), so the
     factorization enables efficient storage and computation without
-    materializing the full kernel matrix P.
+    materializing the full proximity matrix P.
 
     The encoder provides direct access to the leaf maps Q and W for custom downstream tasks
-    (e.g., kernel methods, manifold learning, dimensionality reduction, visualization...),
-    as well as higher-level utilities such as `kernel()` and `kernel_extend()` for explicitly
-    computing the kernel/proximity matrix P (dot product in leaf space) in dense or sparse form.
+    (e.g., proximity methods, manifold learning, dimensionality reduction, visualization...),
+    as well as higher-level utilities such as `proximity()` and `proximity_extend()` for explicitly
+    computing the proximity matrix P (dot product in leaf space) in dense or sparse form.
 
     While forming P is more expensive than working with the sparse maps directly,
     the sparse factorization keeps construction much more scalable than explicit,
@@ -231,8 +231,8 @@ class LeafEncoder(TransformerMixin, BaseEstimator):
         """
         Return the fitted reference-side leaf map W.
 
-        For symmetric kernels, this is the same as `training_query_map()`.
-        For asymmetric kernels such as GAP, W may differ from Q.
+        For symmetric proximities, this is the same as `training_query_map()`.
+        For asymmetric proximities such as GAP, W may differ from Q.
         """
         self._check_fitted()
         return self._format(self.cache_.W_mat, return_dense=return_dense)
@@ -254,9 +254,9 @@ class LeafEncoder(TransformerMixin, BaseEstimator):
 
         return self._format(Q, return_dense=return_dense)
 
-    def kernel(self, force_symmetric=False, adjust_diagonal=False, return_dense=False):
+    def proximity(self, force_symmetric=False, adjust_diagonal=False, return_dense=False):
         """
-        Return the fitted train-train forest kernel matrix P = Q W^T.
+        Return the fitted train-train forest proximity matrix P = Q W^T.
         """
         self._check_fitted()
 
@@ -279,11 +279,11 @@ class LeafEncoder(TransformerMixin, BaseEstimator):
 
         return self._format(P, return_dense=return_dense)
 
-    def kernel_extend(self, X, return_dense=False):
+    def proximity_extend(self, X, return_dense=False):
         """
-        Extend the fitted forest kernel to new samples.
+        Extend the fitted forest proximity to new samples.
 
-        Returns the out-of-sample kernel block
+        Returns the out-of-sample proximity block
 
             P_new = Q(X) W_train^T,
 
@@ -296,7 +296,7 @@ class LeafEncoder(TransformerMixin, BaseEstimator):
 
         return self._format(P, return_dense=return_dense)
     
-    def predict(self, X):
+    def proximity_predict(self, X):
         """
         Predict by applying fitted forest proximity weights to training labels.
 
@@ -307,7 +307,7 @@ class LeafEncoder(TransformerMixin, BaseEstimator):
     
         Q = self.transform(X, return_dense=False)
     
-        return kernel_predict(
+        return proximity_predict(
             Q,
             self.cache_.W_mat,
             self.y_,
@@ -315,7 +315,7 @@ class LeafEncoder(TransformerMixin, BaseEstimator):
             is_classifier=self._is_classifier(fitted=True),
         )
     
-    def predict_proba(self, X):
+    def proximity_predict_proba(self, X):
         """
         Return class probabilities for classifier forests.
 
@@ -325,12 +325,12 @@ class LeafEncoder(TransformerMixin, BaseEstimator):
     
         if not self._is_classifier(fitted=True):
             raise AttributeError(
-                "predict_proba is only available when the fitted forest is a classifier."
+                "proximity_predict_proba is only available when the fitted forest is a classifier."
             )
     
         Q = self.transform(X, return_dense=False)
     
-        proba, _ = kernel_predict(
+        proba, _ = proximity_predict(
             Q,
             self.cache_.W_mat,
             self.y_,
@@ -344,9 +344,9 @@ class LeafEncoder(TransformerMixin, BaseEstimator):
     @property
     def diagnostics(self):
         """
-        Lazy diagnostics accessor for fitted forest-kernel diagnostics.
+        Lazy diagnostics accessor for fitted forest-proximity diagnostics.
         """
         if not hasattr(self, "_diagnostics"):
-            self._diagnostics = KernelDiagnostics(self)
+            self._diagnostics = PredictionDiagnostics(self)
     
         return self._diagnostics

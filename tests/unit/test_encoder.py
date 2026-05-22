@@ -13,8 +13,8 @@ def test_gap_train_and_test_rows_sum_to_one_exactly(request, forest_fixture, dat
 
     enc = LeafEncoder(forest=forest, weight_scheme="gap").fit(X_train, y_train)
 
-    K_train = enc.kernel(return_dense=False)
-    K_test = enc.kernel_extend(X_test, return_dense=False)
+    K_train = enc.proximity(return_dense=False)
+    K_test = enc.proximity_extend(X_test, return_dense=False)
 
     train_row_sums = np.asarray(K_train.sum(axis=1)).ravel()
     test_row_sums = np.asarray(K_test.sum(axis=1)).ravel()
@@ -34,8 +34,8 @@ def test_kerf_train_kernel_is_doubly_stochastic_and_test_rows_sum_to_one(
 
     enc = LeafEncoder(forest=forest, weight_scheme="kerf").fit(X_train, y_train)
 
-    K_train = enc.kernel(return_dense=False)
-    K_test = enc.kernel_extend(X_test, return_dense=False)
+    K_train = enc.proximity(return_dense=False)
+    K_test = enc.proximity_extend(X_test, return_dense=False)
 
     train_row_sums = np.asarray(K_train.sum(axis=1)).ravel()
     train_col_sums = np.asarray(K_train.sum(axis=0)).ravel()
@@ -58,7 +58,7 @@ def test_training_kernel_is_symmetric(request, forest_fixture, data_fixture, wei
 
     enc = LeafEncoder(forest=forest, weight_scheme=weight_scheme).fit(X_train, y_train)
 
-    K = enc.kernel(return_dense=True)
+    K = enc.proximity(return_dense=True)
 
     assert K.shape[0] == K.shape[1]
     assert np.allclose(K, K.T, rtol=1e-6, atol=1e-8)
@@ -71,7 +71,7 @@ def test_gap_force_symmetric_kernel_is_symmetric(request, forest_fixture, data_f
 
     enc = LeafEncoder(forest=forest, weight_scheme="gap").fit(X_train, y_train)
 
-    K = enc.kernel(force_symmetric=True, return_dense=True)
+    K = enc.proximity(force_symmetric=True, return_dense=True)
 
     assert K.shape[0] == K.shape[1]
     assert np.allclose(K, K.T, rtol=1e-6, atol=1e-8)
@@ -90,7 +90,7 @@ def test_adjust_diagonal_matches_expected_gap_and_oob_training_diagonal(
 
     enc = LeafEncoder(forest=forest, weight_scheme=weight_scheme).fit(X_train, y_train)
 
-    K = enc.kernel(adjust_diagonal=True, return_dense=True)
+    K = enc.proximity(adjust_diagonal=True, return_dense=True)
     diag = np.diag(K)
 
     if weight_scheme == "oob":

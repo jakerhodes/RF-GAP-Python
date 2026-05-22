@@ -102,13 +102,13 @@ def test_leaf_maps_have_at_most_one_nonzero_per_tree_per_row(
 
 
 @pytest.mark.parametrize("forest_fixture,data_fixture,weight_scheme", ALL_SUPPORTED_CASES)
-def test_kernel_matches_leaf_factorization(request, forest_fixture, data_fixture, weight_scheme):
+def test_proximity_matches_leaf_factorization(request, forest_fixture, data_fixture, weight_scheme):
     X_train, _, y_train, _ = request.getfixturevalue(data_fixture)
     forest = request.getfixturevalue(forest_fixture)
 
     enc = LeafEncoder(forest=forest, weight_scheme=weight_scheme).fit(X_train, y_train)
 
-    K = enc.kernel(return_dense=True)
+    K = enc.proximity(return_dense=True)
     Q = enc.training_query_map(return_dense=False)
     W = enc.reference_map(return_dense=False)
 
@@ -116,7 +116,7 @@ def test_kernel_matches_leaf_factorization(request, forest_fixture, data_fixture
 
 
 @pytest.mark.parametrize("forest_fixture,data_fixture,weight_scheme", ALL_SUPPORTED_CASES)
-def test_kernel_extend_matches_leaf_factorization(
+def test_proximity_extend_matches_leaf_factorization(
     request,
     forest_fixture,
     data_fixture,
@@ -127,10 +127,9 @@ def test_kernel_extend_matches_leaf_factorization(
 
     enc = LeafEncoder(forest=forest, weight_scheme=weight_scheme).fit(X_train, y_train)
 
-    K_test = enc.kernel_extend(X_test, return_dense=True)
+    K_test = enc.proximity_extend(X_test, return_dense=True)
     Q_test = enc.transform(X_test, return_dense=False)
     W = enc.reference_map(return_dense=False)
 
     assert np.allclose(K_test, (Q_test @ W.T).toarray())
-
 

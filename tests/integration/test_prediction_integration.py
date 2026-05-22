@@ -20,8 +20,8 @@ def test_gap_is_closest_to_base_classifier_error(request, forest_fixture, data_f
 
     scheme_errors = {}
     for scheme in RF_ET_WEIGHT_SCHEMES:
-        kernel_model = LeafEncoder(forest=clone(forest), weight_scheme=scheme)
-        preds = kernel_model.fit(X_train, y_train).predict(X_test)
+        proximity_model = LeafEncoder(forest=clone(forest), weight_scheme=scheme)
+        preds = proximity_model.fit(X_train, y_train).proximity_predict(X_test)
         scheme_errors[scheme] = abs((1.0 - accuracy_score(y_test, preds)) - base_error)
 
     assert scheme_errors["gap"] <= min(v for k, v in scheme_errors.items() if k != "gap") + 1e-8
@@ -40,8 +40,8 @@ def test_gap_is_closest_to_base_regressor_mse(request, forest_fixture, data_fixt
 
     scheme_mses = {}
     for scheme in RF_ET_WEIGHT_SCHEMES:
-        kernel_model = LeafEncoder(forest=clone(forest), weight_scheme=scheme)
-        preds = kernel_model.fit(X_train, y_train).predict(X_test)
+        proximity_model = LeafEncoder(forest=clone(forest), weight_scheme=scheme)
+        preds = proximity_model.fit(X_train, y_train).proximity_predict(X_test)
         scheme_mses[scheme] = abs(mean_squared_error(y_test, preds) - base_mse)
 
     assert scheme_mses["gap"] <= min(v for k, v in scheme_mses.items() if k != "gap") + 1e-8

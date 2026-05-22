@@ -4,12 +4,12 @@ import numpy as np
 from scipy import sparse
 
 
-class KernelDiagnostics:
+class PredictionDiagnostics:
     """
-    Extra diagnostics built on top of fitted forest kernels.
+    Extra diagnostics built on top of fitted forest proximities.
 
     These utilities assume the main estimator exposes the LeafEncoder API:
-    `kernel`, `kernel_extend`, `training_query_map`, `reference_map`,
+    `proximity`, `proximity_extend`, `training_query_map`, `reference_map`,
     `transform`, `weight_scheme`, `forest_`, and `y_`.
     """
     def __init__(self, encoder):
@@ -23,7 +23,7 @@ class KernelDiagnostics:
     # ------------------------------------------------------------------
     def _check_gap(self):
         if self.weight_scheme != "gap":
-            raise ValueError("This diagnostic is only available for GAP kernels.")
+            raise ValueError("This diagnostic is only available for GAP proximities.")
 
     def _check_classification(self):
         if not self.encoder._is_classifier(fitted=True):
@@ -81,7 +81,7 @@ class KernelDiagnostics:
 
             P c = Q (W^T c)
 
-        without materializing the full train-train kernel matrix.
+        without materializing the full train-train proximity matrix.
         """
         self._check_fitted()
         self._check_gap()
@@ -116,7 +116,7 @@ class KernelDiagnostics:
 
             P_test c = Q_test (W^T c)
 
-        without materializing the full test-train kernel block.
+        without materializing the full test-train proximity block.
         """
         self._check_fitted()
         self._check_gap()
@@ -151,7 +151,7 @@ class KernelDiagnostics:
         Generate point predictions with prediction intervals for regression.
 
         Prediction intervals are based on the distribution of OOB residuals
-        weighted by GAP kernel neighborhoods.
+        weighted by GAP proximity neighborhoods.
         """
         self._check_fitted()
         self._check_gap()
@@ -162,16 +162,16 @@ class KernelDiagnostics:
 
         self.interval_level = level
 
-        test_kernel = self.kernel_extend(X_test, return_dense=True)
-        self.test_kernel_ = test_kernel
+        test_proximity = self.proximity_extend(X_test, return_dense=True)
+        self.test_proximity_ = test_proximity
         self.x_test = X_test
 
         oob_prediction = self._get_oob_prediction()
         oob_residuals = self.y_ - oob_prediction
 
-        residuals_tiled = np.tile(oob_residuals, (test_kernel.shape[0], 1))
+        residuals_tiled = np.tile(oob_residuals, (test_proximity.shape[0], 1))
 
-        nearest_indices = np.flip(test_kernel.argsort(axis=1), axis=1)
+        nearest_indices = np.flip(test_proximity.argsort(axis=1), axis=1)
         nearest_residuals = np.take_along_axis(
             residuals_tiled,
             nearest_indices,
@@ -193,13 +193,13 @@ class KernelDiagnostics:
                     )
 
             case "auto":
-                test_kernel_sorted = np.take_along_axis(
-                    test_kernel,
+                test_proximity_sorted = np.take_along_axis(
+                    test_proximity,
                     nearest_indices,
                     axis=1,
                 )
-                self.test_kernel_sorted_ = test_kernel_sorted
-                nearest_residuals[test_kernel_sorted < 1e-10] = np.nan
+                self.test_proximity_sorted_ = test_proximity_sorted
+                nearest_residuals[test_proximity_sorted < 1e-10] = np.nan
 
             case "all":
                 n_neighbors = nearest_residuals.shape[1]
@@ -279,7 +279,7 @@ class KernelDiagnostics:
     
     def get_nonconformity(self, k=5, X_test=None, weight_scheme=None):
         """
-        Compute class-wise nonconformity scores from forest kernels.
+        Compute class-wise nonconformity scores from forest proximities.
 
         If `X_test` is provided, test nonconformity scores are computed using
         predicted test labels.
@@ -300,7 +300,7 @@ class KernelDiagnostics:
             self.oob_proba = oob_proba
             self.oob_predictions = np.argmax(oob_proba, axis=1)
 
-            K = self.kernel(return_dense=False)
+            K = self.proximity(return_dense=False)
             K = self._row_normalize_sparse_max(K)
 
             y = self.y_
@@ -340,7 +340,7 @@ class KernelDiagnostics:
             if X_test is not None:
                 self.test_preds = self.forest_.predict(X_test)
 
-                K_test = self.kernel_extend(X_test, return_dense=False)
+                K_test = self.proximity_extend(X_test, return_dense=False)
                 K_test = self._row_normalize_sparse_max(K_test)
 
                 self.nonconformity_scores_test = np.zeros_like(
@@ -435,7 +435,7 @@ class KernelDiagnostics:
         adjust_diagonal=False,
     ):
         """
-        Compute class-relative outlier scores from the fitted kernel matrix.
+        Compute class-relative outlier scores from the fitted proximity matrix.
         """
         self._check_fitted()
 
@@ -455,7 +455,7 @@ class KernelDiagnostics:
                 "`y` must have the same length as the fitted training set."
             )
 
-        K = self.kernel(
+        K = self.proximity(
             force_symmetric=force_symmetric,
             adjust_diagonal=adjust_diagonal,
             return_dense=False,
@@ -470,7 +470,7 @@ class KernelDiagnostics:
 
         if np.any(avg_prox == 0.0):
             warnings.warn(
-                "Some samples have zero average same-class kernel mass. "
+                "Some samples have zero average same-class proximity mass. "
                 "Outlier scores may be unstable.",
                 category=UserWarning,
             )

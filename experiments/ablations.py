@@ -322,7 +322,7 @@ def run_fk_full_pipeline(
 
     if RUN_FULL_KERNEL:
         t0 = time.perf_counter()
-        K_fk = fk.kernel()
+        K_fk = fk.proximity()
         k_time = time.perf_counter() - t0
         k_percent_nnz = kernel_percent_nnz(K_fk)
     else:
@@ -330,7 +330,7 @@ def run_fk_full_pipeline(
         k_percent_nnz = np.nan
 
     t0 = time.perf_counter()
-    y_pred_kp = fk.predict(X_test)
+    y_pred_kp = fk.proximity_predict(X_test)
     kp_time = time.perf_counter() - t0
     kp_acc = accuracy_score(y_test, y_pred_kp)
 
@@ -509,7 +509,7 @@ with MemoryMonitor(poll_seconds=0.005) as mm:
 
     if run_full_kernel:
         t0 = time.perf_counter()
-        K_fk = fk.kernel()
+        K_fk = fk.proximity()
         k_time = time.perf_counter() - t0
         k_percent_nnz = kernel_percent_nnz(K_fk)
     else:
@@ -522,7 +522,7 @@ kernel_build_peak_mb = mm.peak_delta_mb
 # Unmeasured: kernel prediction
 # -------------------------------------------------
 t0 = time.perf_counter()
-y_pred_kp = fk.predict(X_test)
+y_pred_kp = fk.proximity_predict(X_test)
 kp_time = time.perf_counter() - t0
 kp_acc = accuracy_score(y_test, y_pred_kp)
 

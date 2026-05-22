@@ -113,27 +113,27 @@ Q_train = encoder.training_query_map()
 W_train = encoder.reference_map()
 Q_test = encoder.transform(X_test)
 
-# Explicit kernel/proximity matrices. These are sparse by default.
-K_train = encoder.kernel()
-K_test_train = encoder.kernel_extend(X_test)
+# Explicit proximity matrices. These are sparse by default.
+K_train = encoder.proximity()
+K_test_train = encoder.proximity_extend(X_test)
 
 # Dense output is available when needed.
-K_train_dense = encoder.kernel(return_dense=True)
+K_train_dense = encoder.proximity(return_dense=True)
 ```
 
-For proximity-weighted prediction, `LeafEncoder.predict(X)` and
-`LeafEncoder.predict_proba(X)` provide matrix-free convenience wrappers that use
+For proximity-weighted prediction, `LeafEncoder.proximity_predict(X)` and
+`LeafEncoder.proximity_predict_proba(X)` provide matrix-free convenience wrappers that use
 the fitted base forest task type: regression forests return weighted responses,
 while classification forests return weighted class predictions/probabilities.
 They avoid materializing the full proximity matrix `P` by multiplying the sparse
 leaf factors against the training targets or class indicators directly.
 
 For asymmetric weighting schemes such as `gap`, the fitted training query map
-`Q_train` and reference map `W_train` differ. The train-train kernel is still
-computed as `Q_train @ W_train.T`, and `kernel_extend(X)` returns
+`Q_train` and reference map `W_train` differ. The train-train proximity is still
+computed as `Q_train @ W_train.T`, and `proximity_extend(X)` returns
 `Q(X) @ W_train.T` for out-of-sample data.
 
-The sparse factors can be used directly in kernel methods, manifold learning,
+The sparse factors can be used directly in proximity methods, manifold learning,
 dimensionality reduction, visualization, imputation, and other proximity-based
 workflows.
 

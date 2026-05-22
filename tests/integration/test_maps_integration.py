@@ -20,7 +20,7 @@ if BOOSTED_FORESTS_AND_DATA:
 
         enc = LeafEncoder(forest=forest, weight_scheme="boosted").fit(X_train, y_train)
 
-        K_fast = enc.kernel(return_dense=True)
+        K_fast = enc.proximity(return_dense=True)
         leaves = enc.forest_.get_leaf_matrix(X_train)
         weights = enc.forest_.get_tree_weights(X_train)
 
