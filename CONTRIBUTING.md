@@ -1,6 +1,6 @@
 # Contributing
 
-Thank you for contributing to `forestkernel`.
+Thank you for contributing to `forestgeom`.
 
 ## Clone the repository
 

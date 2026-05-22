@@ -1,4 +1,4 @@
-# forestkernel/encoder.py
+# forestgeom/encoder.py
 
 from __future__ import annotations
 

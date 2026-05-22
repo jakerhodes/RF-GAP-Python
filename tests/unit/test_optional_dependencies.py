@@ -5,10 +5,10 @@ import sys
 import pytest
 
 
-ADAPTER_MODULE = "forestkernel.adapters"
+ADAPTER_MODULE = "forestgeom.adapters"
 OPTIONAL_ADAPTER_MODULES = (
-    "forestkernel.adapters.lgbm",
-    "forestkernel.adapters.xgb",
+    "forestgeom.adapters.lgbm",
+    "forestgeom.adapters.xgb",
 )
 
 

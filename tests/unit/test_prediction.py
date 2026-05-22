@@ -3,7 +3,7 @@ from sklearn.base import clone
 from sklearn.metrics import accuracy_score, mean_squared_error
 import pytest
 
-from forestkernel import LeafEncoder
+from forestgeom import LeafEncoder
 
 from tests.fixtures.constants import RF_ET_WEIGHT_SCHEMES
 

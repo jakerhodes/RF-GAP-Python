@@ -1,7 +1,7 @@
 import numpy as np
 import pytest
 
-from forestkernel import LeafEncoder
+from forestgeom import LeafEncoder
 
 from tests.fixtures.constants import BOOSTED_FORESTS_AND_DATA
 

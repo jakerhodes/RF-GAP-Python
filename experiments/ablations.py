@@ -23,7 +23,7 @@ if str(SRC_ROOT) not in sys.path:
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from forestkernel import LeafEncoder
+from forestgeom import LeafEncoder
 from experiments.runtime_utils import (
     kernel_percent_nnz,
     load_dataset_pair,
@@ -403,7 +403,7 @@ if str(src_root) not in sys.path:
 if str(project_root) not in sys.path:
     sys.path.insert(0, str(project_root))
 
-from forestkernel import LeafEncoder
+from forestgeom import LeafEncoder
 from experiments.runtime_utils import (
     MemoryMonitor,
     kernel_percent_nnz,

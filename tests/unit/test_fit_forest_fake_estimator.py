@@ -1,7 +1,7 @@
 import numpy as np
 import pytest
 
-from forestkernel.encoder import LeafEncoder
+from forestgeom.encoder import LeafEncoder
 
 
 class FakeEstimator:

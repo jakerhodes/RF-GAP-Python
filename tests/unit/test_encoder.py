@@ -1,7 +1,7 @@
 import numpy as np
 import pytest
 
-from forestkernel import LeafEncoder
+from forestgeom import LeafEncoder
 
 from tests.fixtures.constants import RF_ET_FORESTS_AND_DATA, RF_ET_WEIGHT_SCHEMES
 

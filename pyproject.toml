@@ -3,7 +3,7 @@ requires = ["setuptools>=61", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "forestkernel"
+name = "forestgeom"
 version = "0.1.0"
 description = "Forest kernel package"
 readme = "README.md"
@@ -34,4 +34,4 @@ license-files = ["LICENSE"]
 
 [tool.setuptools.packages.find]
 where = ["src"]
-include = ["forestkernel*"]
+include = ["forestgeom*"]

@@ -1,8 +1,8 @@
-# forestkernel
+# forestgeom
 
-`forestkernel` builds sparse leaf-incidence representations for tree ensembles and
+`forestgeom` builds sparse leaf-incidence representations for tree ensembles and
 uses them to compute forest kernels/proximities. The core API is
-`forestkernel.LeafEncoder`, which fits a supported ensemble, encodes samples by
+`forestgeom.LeafEncoder`, which fits a supported ensemble, encodes samples by
 the leaves they reach, and represents the train-train kernel in factored form:
 
 ```text
@@ -35,10 +35,10 @@ GitHub install examples
 
 ```bash
 # install with an extras group (boosted)
-pip install 'git+https://github.com/jakerhodes/RF-GAP-Python.git@main#egg=forestkernel[boosted]'
+pip install 'git+https://github.com/jakerhodes/RF-GAP-Python.git@main#egg=forestgeom[boosted]'
 
 # editable VCS install (development) with extras
-pip install -e 'git+https://github.com/jakerhodes/RF-GAP-Python.git@main#egg=forestkernel[boosted]'
+pip install -e 'git+https://github.com/jakerhodes/RF-GAP-Python.git@main#egg=forestgeom[boosted]'
 
 # install from GitHub but skip automatic dependency installation
 pip install --no-deps 'git+https://github.com/jakerhodes/RF-GAP-Python.git'
@@ -97,7 +97,7 @@ ExtraTrees estimators support `uniform` and `kerf`; they support `oob` and
 
 ```python
 from sklearn.ensemble import RandomForestClassifier
-from forestkernel import LeafEncoder
+from forestgeom import LeafEncoder
 
 forest = RandomForestClassifier(
     n_estimators=500,
