@@ -15,6 +15,7 @@ __pycache__/
 # Data and results
 experiments/results/
 datasets/
+data/
 experiments/notebooks/compiled_embedding_figure/
 experiments/notebooks/compiled_ablation_figures/
 experiments/notebooks/compiled_oob_figure/
@@ -149,9 +150,3 @@ dmypy.json
 .pyre/
 
 
-# My Files
-data/
-test.ipynb
-
-
-TODO.txt
