@@ -1,3 +1,11 @@
+# This project has migrated
+
+This repository is no longer actively developed here. Development has migrated to **ForestGeom**:
+
+https://github.com/JakeSRhodesLab/ForestGeom
+
+Please use the new repository for installation, documentation, issues, and future development. This repository remains available for historical reference.
+
 # RF-GAP-Python
 Python code for Random Forest-Geometry- and Accuracy-Preserving Proximities
 
